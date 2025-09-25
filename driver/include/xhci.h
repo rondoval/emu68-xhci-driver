@@ -1128,9 +1128,6 @@ static inline void xhci_writeq(__le64 volatile *regs, const u64 val)
 	writel(val_hi, ptr + 1);
 }
 
-int xhci_hcd_init(int index, struct xhci_hccr **ret_hccr,
-					struct xhci_hcor **ret_hcor);
-void xhci_hcd_stop(int index);
 
 /*************************************************************
 	EXTENDED CAPABILITY DEFINITIONS
@@ -1217,7 +1214,7 @@ struct xhci_ctrl {
 	struct xhci_scratchpad *scratchpad;
 	struct xhci_virt_device *devs[MAX_HC_SLOTS];
 	struct usb_hub_descriptor hub_desc;
-	int rootdev;
+	unsigned int rootdev;
 	u16 hci_version;
 	int page_size;
 	u32 quirks;
@@ -1250,15 +1247,10 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr,
 			u32 slot_id, u32 ep_index, trb_type cmd);
 void xhci_acknowledge_event(struct xhci_ctrl *ctrl);
-union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected);
-union xhci_trb *xhci_wait_for_event_tmo(struct xhci_ctrl *ctrl, trb_type expected, unsigned int timeout_ms);
+union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected, unsigned int timeout_ms);
 int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
-		 int length, void *buffer);
-int xhci_bulk_tx_tmo(struct usb_device *udev, unsigned long pipe,
 		 int length, void *buffer, unsigned int timeout_ms);
 int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
-		 struct devrequest *req, int length, void *buffer);
-int xhci_ctrl_tx_tmo(struct usb_device *udev, unsigned long pipe,
 		 struct devrequest *req, int length, void *buffer, unsigned int timeout_ms);
 int xhci_check_maxpacket(struct usb_device *udev);
 void xhci_flush_cache(uintptr_t addr, u32 type_len);

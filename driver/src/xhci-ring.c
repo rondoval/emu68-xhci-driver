@@ -15,17 +15,14 @@
 
 #include <compat.h>
 #include <debug.h>
-#include <stdbool.h>
- // #include <cpu_func.h>
-// #include <log.h>
-// #include <asm/byteorder.h>
 #include <usb.h>
-// #include <watchdog.h>
-// #include <asm/unaligned.h>
-// #include <linux/bug.h>
-// #include <linux/errno.h>
 
 #include <xhci.h>
+
+#ifdef DEBUG
+#undef Kprintf
+#define Kprintf(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
+#endif
 
 /*
  * Returns zero if the TRB isn't in this segment, otherwise it returns the DMA
@@ -353,7 +350,7 @@ void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id,
  * Return: remainder
  */
 static u32 xhci_td_remainder(struct xhci_ctrl *ctrl, int transferred,
-			     int trb_buff_len, unsigned int td_total_len,
+			     unsigned int trb_buff_len, unsigned int td_total_len,
 			     int maxp, bool more_trbs_coming)
 {
 	u32 total_packet_count;
@@ -463,9 +460,10 @@ static int event_ready(struct xhci_ctrl *ctrl)
  *
  * @param ctrl		Host controller data structure
  * @param expected	TRB type expected from Event TRB
+ * @param timeout_ms	Timeout in milliseconds
  * Return: pointer to event trb
  */
-union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
+union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected, unsigned int timeout_ms)
 {
 	trb_type type;
 	unsigned long ts = get_time();
@@ -514,61 +512,7 @@ union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected)
 				LE32(event->generic.field[3]));
 
 		xhci_acknowledge_event(ctrl);
-	} while (get_time() - ts < XHCI_TIMEOUT);
-
-	if (expected == TRB_TRANSFER)
-		return NULL;
-
-	Kprintf("XHCI timeout on event type %ld...\n", expected);
-
-	return NULL;
-}
-
-/* Timeout-configurable wait */
-union xhci_trb *xhci_wait_for_event_tmo(struct xhci_ctrl *ctrl, trb_type expected, unsigned int timeout_ms)
-{
-	trb_type type;
-	unsigned long ts = get_time();
-	unsigned int wait_ms = timeout_ms ? timeout_ms : XHCI_TIMEOUT;
-
-	do {
-		union xhci_trb *event = ctrl->event_ring->dequeue;
-
-		if (!event_ready(ctrl))
-			continue;
-
-		type = TRB_FIELD_TO_TYPE(LE32(event->event_cmd.flags));
-		if (type == expected ||
-			(expected == TRB_NONE && type != TRB_PORT_STATUS)) {
-			Kprintf("xhci_wait_for_event_tmo: got expected=%ld event (%08lx %08lx %08lx %08lx)\n",
-				(ULONG)expected,
-				(ULONG)LE32(event->generic.field[0]),
-				(ULONG)LE32(event->generic.field[1]),
-				(ULONG)LE32(event->generic.field[2]),
-				(ULONG)LE32(event->generic.field[3]));
-			return event;
-		}
-
-		if (type == TRB_PORT_STATUS)
-		{
-			if(GET_COMP_CODE(LE32(event->generic.field[2])) !=    COMP_SUCCESS)
-			{
-				Kprintf("Unexpected XHCI port status event, skipping... (%08lx %08lx %08lx %08lx)\n",
-					LE32(event->generic.field[0]),
-					LE32(event->generic.field[1]),
-					LE32(event->generic.field[2]),
-					LE32(event->generic.field[3]));
-			}
-		}
-		else
-			Kprintf("Unexpected XHCI event TRB, skipping... (%08lx %08lx %08lx %08lx)\n",
-				LE32(event->generic.field[0]),
-				LE32(event->generic.field[1]),
-				LE32(event->generic.field[2]),
-				LE32(event->generic.field[3]));
-
-		xhci_acknowledge_event(ctrl);
-	} while (get_time() - ts < wait_ms);
+	} while (get_time() - ts < timeout_ms * 1000);
 
 	if (expected == TRB_TRANSFER)
 		return NULL;
@@ -592,7 +536,7 @@ static void reset_ep(struct usb_device *udev, int ep_index)
 
 	Kprintf("Resetting EP %ld...\n", ep_index);
 	xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_RESET_EP);
-	event = xhci_wait_for_event(ctrl, TRB_COMPLETION);
+	event = xhci_wait_for_event(ctrl, TRB_COMPLETION, XHCI_TIMEOUT);
 	if (!event)
 		return;
 
@@ -608,7 +552,7 @@ static void reset_ep(struct usb_device *udev, int ep_index)
 	addr = xhci_trb_virt_to_dma(ring->enq_seg,
 		(void *)((uintptr_t)ring->enqueue | ring->cycle_state));
 	xhci_queue_command(ctrl, addr, udev->slot_id, ep_index, TRB_SET_DEQ);
-	event = xhci_wait_for_event(ctrl, TRB_COMPLETION);
+	event = xhci_wait_for_event(ctrl, TRB_COMPLETION, XHCI_TIMEOUT);
 	if (!event)
 		return;
 
@@ -633,7 +577,7 @@ static void reset_ep(struct usb_device *udev, int ep_index)
  * (Careful: This will BUG() when there was no transfer in progress. Shouldn't
  * happen in practice for current uses and is too complicated to fix right now.)
  */
-static void abort_td(struct usb_device *udev, int ep_index)
+static void abort_td(struct usb_device *udev, unsigned int ep_index)
 {
 	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
 	struct xhci_ring *ring =  ctrl->devs[udev->slot_id]->eps[ep_index].ring;
@@ -645,7 +589,7 @@ static void abort_td(struct usb_device *udev, int ep_index)
 
 	xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING);
 
-	event = xhci_wait_for_event(ctrl, TRB_NONE);
+	event = xhci_wait_for_event(ctrl, TRB_NONE, XHCI_TIMEOUT);
 	if (!event)
 		return;
 
@@ -672,7 +616,7 @@ static void abort_td(struct usb_device *udev, int ep_index)
 		}
 		xhci_acknowledge_event(ctrl);
 
-		event = xhci_wait_for_event(ctrl, TRB_COMPLETION);
+		event = xhci_wait_for_event(ctrl, TRB_COMPLETION, XHCI_TIMEOUT);
 		if (!event)
 			return;
 		type = TRB_FIELD_TO_TYPE(LE32(event->event_cmd.flags));
@@ -697,7 +641,7 @@ static void abort_td(struct usb_device *udev, int ep_index)
 	addr = xhci_trb_virt_to_dma(ring->enq_seg,
 		(void *)((uintptr_t)ring->enqueue | ring->cycle_state));
 	xhci_queue_command(ctrl, addr, udev->slot_id, ep_index, TRB_SET_DEQ);
-	event = xhci_wait_for_event(ctrl, TRB_COMPLETION);
+	event = xhci_wait_for_event(ctrl, TRB_COMPLETION, XHCI_TIMEOUT);
 	if (!event)
 		return;
 
@@ -749,8 +693,8 @@ static void record_transfer_result(struct usb_device *udev,
 		udev->status = 0x80;  /* USB_ST_TOO_LAZY_TO_MAKE_A_NEW_MACRO */
 	}
 
-	Kprintf("record_transfer_result: mapped status=%ld (0=OK, stall=%ld)\n",
-		(LONG)udev->status, (LONG)USB_ST_STALLED);
+	Kprintf("record_transfer_result: mapped status=%ld (0=OK)\n",
+		(LONG)udev->status);
 }
 
 /*
@@ -777,7 +721,7 @@ int usb_maxpacket(struct usb_device *dev, unsigned long pipe)
  * Return: returns 0 if successful else -1 on failure
  */
 int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
-			int length, void *buffer)
+			int length, void *buffer, unsigned int timeout_ms)
 {
 	int num_trbs = 0;
 	struct xhci_generic_trb *start_trb;
@@ -786,8 +730,8 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 	u32 field = 0;
 	u32 length_field = 0;
 	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
-	int slot_id = udev->slot_id;
-	int ep_index;
+	unsigned int slot_id = udev->slot_id;
+	unsigned int ep_index;
 	struct xhci_virt_device *virt_dev;
 	struct xhci_ep_ctx *ep_ctx;
 	struct xhci_ring *ring;		/* EP transfer ring */
@@ -955,7 +899,7 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 		(ULONG)lower_32_bits((u64)last_transfer_trb_addr), (LONG)start_cycle);
 
 again:
-	event = xhci_wait_for_event(ctrl, TRB_TRANSFER);
+	event = xhci_wait_for_event(ctrl, TRB_TRANSFER, timeout_ms);
 	if (!event) {
 		Kprintf("XHCI bulk transfer timed out, aborting...\n");
 		abort_td(udev, ep_index);
@@ -1004,187 +948,6 @@ again:
 	return (udev->status != USB_ST_NOT_PROC) ? 0 : -1;
 }
 
-int xhci_bulk_tx_tmo(struct usb_device *udev, unsigned long pipe,
-			int length, void *buffer, unsigned int timeout_ms)
-{
-	int num_trbs = 0;
-	struct xhci_generic_trb *start_trb;
-	bool first_trb = false;
-	int start_cycle;
-	u32 field = 0;
-	u32 length_field = 0;
-	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
-	int slot_id = udev->slot_id;
-	int ep_index;
-	struct xhci_virt_device *virt_dev;
-	struct xhci_ep_ctx *ep_ctx;
-	struct xhci_ring *ring;     /* EP transfer ring */
-	union xhci_trb *event;
-
-	int running_total, trb_buff_len;
-	bool more_trbs_coming = true;
-	int maxpacketsize;
-	u64 addr;
-	int ret;
-	u32 trb_fields[4];
-	u64 buf_64 = xhci_dma_map(ctrl, buffer, length);
-	dma_addr_t last_transfer_trb_addr;
-	int available_length;
-
-	Kprintf("xhci_bulk_tx_tmo: slot=%ld ep=%ld dir=%s pipe=%lx buf=%lx len=%ld tmo=%ldms\n",
-		(LONG)udev->slot_id, (LONG)usb_pipe_ep_index(pipe),
-		usb_pipein(pipe) ? "IN" : "OUT",
-		(ULONG)pipe, (ULONG)buffer, (LONG)length, (LONG)timeout_ms);
-
-	available_length = length;
-	ep_index = usb_pipe_ep_index(pipe);
-	virt_dev = ctrl->devs[slot_id];
-
-	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
-			 virt_dev->out_ctx->size);
-
-	ep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
-	Kprintf("xhci_bulk_tx_tmo: ep_state=%lx\n", (ULONG)(LE32(ep_ctx->ep_info) & EP_STATE_MASK));
-
-	if ((LE32(ep_ctx->ep_info) & EP_STATE_MASK) == EP_STATE_HALTED)
-		reset_ep(udev, ep_index);
-
-	ring = virt_dev->eps[ep_index].ring;
-	if (!ring)
-		return -EINVAL;
-
-	/* Split into TRBs respecting 64KB boundary limits */
-	running_total = TRB_MAX_BUFF_SIZE -
-			(lower_32_bits(buf_64) & (TRB_MAX_BUFF_SIZE - 1));
-	trb_buff_len = running_total;
-	running_total &= TRB_MAX_BUFF_SIZE - 1;
-	if (running_total != 0 || length == 0)
-		num_trbs++;
-	while (running_total < length) {
-		num_trbs++;
-		running_total += TRB_MAX_BUFF_SIZE;
-	}
-
-	ret = prepare_ring(ctrl, ring, LE32(ep_ctx->ep_info) & EP_STATE_MASK);
-	if (ret < 0)
-		return ret;
-
-	start_trb = &ring->enqueue->generic;
-	start_cycle = ring->cycle_state;
-
-	running_total = 0;
-	maxpacketsize = usb_maxpacket(udev, pipe);
-	addr = buf_64;
-	if (trb_buff_len > length)
-		trb_buff_len = length;
-	first_trb = true;
-
-	/* flush the buffer before use */
-	xhci_flush_cache((uintptr_t)buffer, length);
-
-	do {
-		u32 remainder = 0;
-		field = 0;
-		if (first_trb) {
-			first_trb = false;
-			if (start_cycle == 0)
-				field |= TRB_CYCLE;
-		} else {
-			field |= ring->cycle_state;
-		}
-
-		if (num_trbs > 1) {
-			field |= TRB_CHAIN;
-		} else {
-			field |= TRB_IOC;
-			more_trbs_coming = false;
-		}
-
-		if (usb_pipein(pipe))
-			field |= TRB_ISP;
-
-		remainder = xhci_td_remainder(ctrl, running_total, trb_buff_len,
-						  length, maxpacketsize,
-						  more_trbs_coming);
-
-		length_field = (TRB_LEN(trb_buff_len) |
-				TRB_TD_SIZE(remainder) |
-				TRB_INTR_TARGET(0));
-
-		trb_fields[0] = lower_32_bits(addr);
-		trb_fields[1] = upper_32_bits(addr);
-		trb_fields[2] = length_field;
-		trb_fields[3] = field | TRB_TYPE(TRB_NORMAL);
-
-		Kprintf("xhci_bulk_tx_tmo: queue TRB addr=%08lx%08lx lenf=%08lx flags=%08lx num_trbs=%ld\n",
-			(ULONG)trb_fields[1], (ULONG)trb_fields[0], (ULONG)trb_fields[2], (ULONG)trb_fields[3], (LONG)num_trbs);
-		last_transfer_trb_addr = queue_trb(ctrl, ring, (num_trbs > 1), trb_fields);
-
-		--num_trbs;
-		running_total += trb_buff_len;
-		addr += trb_buff_len;
-		trb_buff_len = min((length - running_total), TRB_MAX_BUFF_SIZE);
-	} while (running_total < length);
-
-	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
-	Kprintf("xhci_bulk_tx_tmo: waiting, last_trb_addr=%08lx%08lx start_cycle=%ld\n",
-		(ULONG)upper_32_bits((u64)last_transfer_trb_addr),
-		(ULONG)lower_32_bits((u64)last_transfer_trb_addr), (LONG)start_cycle);
-
-	again_tmo:
-	event = xhci_wait_for_event_tmo(ctrl, TRB_TRANSFER, timeout_ms);
-	if (!event) {
-		Kprintf("XHCI bulk transfer timed out, aborting...\n");
-		abort_td(udev, ep_index);
-		udev->status = USB_ST_NAK_REC;
-		udev->act_len = 0;
-		/* unmap and return error */
-		xhci_dma_unmap(ctrl, buf_64, length);
-		return -ETIMEDOUT;
-	}
-
-	if ((uintptr_t)(LE64(event->trans_event.buffer)) !=
-		(uintptr_t)last_transfer_trb_addr) {
-		available_length -=
-			(int)EVENT_TRB_LEN(LE32(event->trans_event.transfer_len));
-		Kprintf("xhci_bulk_tx_tmo: skipping intermediate event buf=%08lx%08lx new_avail=%ld\n",
-			(ULONG)upper_32_bits(LE64(event->trans_event.buffer)),
-			(ULONG)lower_32_bits(LE64(event->trans_event.buffer)),
-			(LONG)available_length);
-		xhci_acknowledge_event(ctrl);
-		goto again_tmo;
-	}
-
-	field = LE32(event->trans_event.flags);
-	if(TRB_TO_SLOT_ID(field) != slot_id)
-	{
-		Kprintf("bulk_tx_tmo: Expected a TRB for slot %ld, got %ld\n",
-			slot_id, TRB_TO_SLOT_ID(field));
-		xhci_dma_unmap(ctrl, buf_64, length);
-		return -EINVAL;
-	}
-	if(TRB_TO_EP_INDEX(field) != ep_index)
-	{
-		Kprintf("bulk_tx_tmo: Expected a TRB for ep %ld, got %ld\n",
-			ep_index, TRB_TO_EP_INDEX(field));
-		xhci_dma_unmap(ctrl, buf_64, length);
-		return -EINVAL;
-	}
-
-	Kprintf("xhci_bulk_tx_tmo: event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
-		(ULONG)LE32(event->trans_event.flags),
-		(ULONG)LE32(event->trans_event.transfer_len),
-		(ULONG)upper_32_bits(LE64(event->trans_event.buffer)),
-		(ULONG)lower_32_bits(LE64(event->trans_event.buffer)));
-	record_transfer_result(udev, event, available_length);
-	xhci_acknowledge_event(ctrl);
-	xhci_inval_cache((uintptr_t)buffer, length);
-	xhci_dma_unmap(ctrl, buf_64, length);
-	Kprintf("xhci_bulk_tx_tmo: done status=%ld act_len=%ld\n", (LONG)udev->status, (LONG)udev->act_len);
-
-	return (udev->status != USB_ST_NOT_PROC) ? 0 : -1;
-}
-
 /**
  * Queues up the Control Transfer Request
  *
@@ -1193,11 +956,12 @@ int xhci_bulk_tx_tmo(struct usb_device *udev, unsigned long pipe,
  * @param req		request type
  * @param length	length of the buffer
  * @param buffer	buffer to be read/written based on the request
+ * @param timeout_ms	Timeout in milliseconds
  * Return: returns 0 if successful else error code on failure
  */
 int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 			struct devrequest *req,	int length,
-			void *buffer)
+			void *buffer, unsigned int timeout_ms)
 {
 	Kprintf("xhci_ctrl_tx: slot=%ld ep_index=%ld length=%ld dir=%s\n",
 		(LONG)udev->slot_id, (LONG)usb_pipe_ep_index(pipe), (LONG)length,
@@ -1210,8 +974,8 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	u64 buf_64 = 0;
 	struct xhci_generic_trb *start_trb;
 	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
-	int slot_id = udev->slot_id;
-	int ep_index;
+	unsigned int slot_id = udev->slot_id;
+	unsigned int ep_index;
 	u32 trb_fields[4];
 	struct xhci_virt_device *virt_dev = ctrl->devs[slot_id];
 	struct xhci_ring *ep_ring;
@@ -1371,7 +1135,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 
 	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
 
-	event = xhci_wait_for_event(ctrl, TRB_TRANSFER);
+	event = xhci_wait_for_event(ctrl, TRB_TRANSFER, timeout_ms);
 	if (!event)
 		goto abort;
 	field = LE32(event->trans_event.flags);
@@ -1413,7 +1177,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	if (GET_COMP_CODE(LE32(event->trans_event.transfer_len))
 			== COMP_SHORT_TX) {
 		/* Short data stage, clear up additional status stage event */
-	event = xhci_wait_for_event(ctrl, TRB_TRANSFER);
+		event = xhci_wait_for_event(ctrl, TRB_TRANSFER, timeout_ms);
 		if (!event)
 			goto abort;
 		Kprintf("xhci_ctrl_tx: short-tx status event flags=%08lx status=%08lx\n",
@@ -1435,178 +1199,6 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	return (udev->status != USB_ST_NOT_PROC) ? 0 : -1;
 
 abort:
-	Kprintf("XHCI control transfer timed out, aborting...\n");
-	abort_td(udev, ep_index);
-	udev->status = USB_ST_NAK_REC;
-	udev->act_len = 0;
-	return -ETIMEDOUT;
-}
-
-int xhci_ctrl_tx_tmo(struct usb_device *udev, unsigned long pipe,
-			struct devrequest *req, int length,
-			void *buffer, unsigned int timeout_ms)
-{
-	Kprintf("xhci_ctrl_tx_tmo: dev=%ld addr=%ld pipe=%lx tmo=%ld len=%ld dir=%s\n",
-		(ULONG)udev, (ULONG)udev->devnum, pipe, (ULONG)timeout_ms, (LONG)length,
-		usb_pipein(pipe) ? "IN" : "OUT");
-	int ret;
-	int start_cycle;
-	int num_trbs;
-	u32 field;
-	u32 length_field;
-	u64 buf_64 = 0;
-	struct xhci_generic_trb *start_trb;
-	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
-	int slot_id = udev->slot_id;
-	int ep_index;
-	u32 trb_fields[4];
-	struct xhci_virt_device *virt_dev = ctrl->devs[slot_id];
-	struct xhci_ring *ep_ring;
-	union xhci_trb *event;
-	u32 remainder;
-
-	ep_index = usb_pipe_ep_index(pipe);
-	ep_ring = virt_dev->eps[ep_index].ring;
-	if (!ep_ring)
-		return -EINVAL;
-
-	if (udev->speed == USB_SPEED_FULL) {
-		ret = xhci_check_maxpacket(udev);
-		if (ret < 0)
-			return ret;
-	}
-
-	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
-			 virt_dev->out_ctx->size);
-
-	struct xhci_ep_ctx *ep_ctx = NULL;
-	ep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
-
-	num_trbs = 2;
-	if (length > 0)
-		num_trbs++;
-	ret = prepare_ring(ctrl, ep_ring,
-				LE32(ep_ctx->ep_info) & EP_STATE_MASK);
-	if (ret < 0)
-		return ret;
-
-	start_trb = &ep_ring->enqueue->generic;
-	start_cycle = ep_ring->cycle_state;
-
-	field = 0;
-	field |= TRB_IDT | TRB_TYPE(TRB_SETUP);
-	if (start_cycle == 0)
-		field |= 0x1;
-
-	if (ctrl->hci_version >= 0x100 || ctrl->quirks & XHCI_MTK_HOST) {
-		if (length > 0) {
-			if (req->requesttype & USB_DIR_IN)
-				field |= TRB_TX_TYPE(TRB_DATA_IN);
-			else
-				field |= TRB_TX_TYPE(TRB_DATA_OUT);
-		}
-	}
-
-	trb_fields[0] = req->requesttype | req->request << 8 |
-				LE16(req->value) << 16;
-	trb_fields[1] = LE16(req->index) |
-			LE16(req->length) << 16;
-	trb_fields[2] = (TRB_LEN(8) | TRB_INTR_TARGET(0));
-	trb_fields[3] = field;
-	queue_trb(ctrl, ep_ring, true, trb_fields);
-
-	field = 0;
-	if (usb_pipein(pipe))
-		field = TRB_ISP | TRB_TYPE(TRB_DATA);
-	else
-		field = TRB_TYPE(TRB_DATA);
-
-	remainder = xhci_td_remainder(ctrl, 0, length, length,
-					  usb_maxpacket(udev, pipe), true);
-	length_field = TRB_LEN(length) | TRB_TD_SIZE(remainder) |
-			   TRB_INTR_TARGET(0);
-
-	if (length > 0) {
-		if (req->requesttype & USB_DIR_IN)
-			field |= TRB_DIR_IN;
-		buf_64 = xhci_dma_map(ctrl, buffer, length);
-
-		trb_fields[0] = lower_32_bits(buf_64);
-		trb_fields[1] = upper_32_bits(buf_64);
-		trb_fields[2] = length_field;
-		trb_fields[3] = field | ep_ring->cycle_state;
-
-		xhci_flush_cache((uintptr_t)buffer, length);
-		queue_trb(ctrl, ep_ring, true, trb_fields);
-	}
-
-	field = 0;
-	if (length > 0 && req->requesttype & USB_DIR_IN)
-		field = 0;
-	else
-		field = TRB_DIR_IN;
-
-	trb_fields[0] = 0;
-	trb_fields[1] = 0;
-	trb_fields[2] = TRB_INTR_TARGET(0);
-	trb_fields[3] = field | TRB_IOC |
-			TRB_TYPE(TRB_STATUS) | ep_ring->cycle_state;
-
-	queue_trb(ctrl, ep_ring, false, trb_fields);
-
-	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
-
-	event = xhci_wait_for_event_tmo(ctrl, TRB_TRANSFER, timeout_ms);
-	if (!event)
-		goto abort_tmo;
-	field = LE32(event->trans_event.flags);
-
-	if (TRB_TO_SLOT_ID(field) != slot_id)
-	{
-		Kprintf("ctrl_tx_tmo: Expected a TRB for slot %ld, got %ld\n",
-			slot_id, TRB_TO_SLOT_ID(field));
-		return -EINVAL;
-	}
-	if(TRB_TO_EP_INDEX(field) != ep_index)
-	{
-		Kprintf("ctrl_tx_tmo: Expected a TRB for ep %ld, got %ld\n",
-			ep_index, TRB_TO_EP_INDEX(field));
-		return -EINVAL;
-	}
-
-	record_transfer_result(udev, event, length);
-	xhci_acknowledge_event(ctrl);
-	if (udev->status == USB_ST_STALLED) {
-		reset_ep(udev, ep_index);
-		return -EPIPE;
-	}
-
-	if (length > 0) {
-		xhci_inval_cache((uintptr_t)buffer, length);
-		xhci_dma_unmap(ctrl, buf_64, length);
-	}
-
-	if (GET_COMP_CODE(LE32(event->trans_event.transfer_len))
-			== COMP_SHORT_TX) {
-		event = xhci_wait_for_event_tmo(ctrl, TRB_TRANSFER, timeout_ms);
-		if (!event)
-			goto abort_tmo;
-		if (TRB_TO_SLOT_ID(field) != slot_id) {
-			Kprintf("ctrl_tx_tmo: Expected a TRB for slot %ld, got %ld\n",
-				slot_id, TRB_TO_SLOT_ID(field));
-			return -EINVAL;
-		}
-		if (TRB_TO_EP_INDEX(field) != ep_index) {
-			Kprintf("ctrl_tx_tmo: Expected a TRB for ep %ld, got %ld\n",
-				ep_index, TRB_TO_EP_INDEX(field));
-			return -EINVAL;
-		}
-		xhci_acknowledge_event(ctrl);
-	}
-
-	return (udev->status != USB_ST_NOT_PROC) ? 0 : -1;
-
-abort_tmo:
 	Kprintf("XHCI control transfer timed out, aborting...\n");
 	abort_td(udev, ep_index);
 	udev->status = USB_ST_NAK_REC;

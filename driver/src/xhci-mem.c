@@ -25,6 +25,11 @@
 #include <usb.h>
 #include <xhci.h>
 
+#ifdef DEBUG
+#undef Kprintf
+#define Kprintf(fmt, ...) PrintPistorm("[xhci-mem] %s: " fmt, __func__, ##__VA_ARGS__)
+#endif
+
 #define CACHELINE_SIZE		64
 
 /**
@@ -88,7 +93,7 @@ static void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
 	struct xhci_segment *first_seg;
 
 	if (!ring) {
-		Kprintf("[xhci] Ring is NULL, nothing to free\n");
+		Kprintf("Ring is NULL, nothing to free\n");
 		return;
 	}
 
@@ -218,7 +223,7 @@ static void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
 	ptr = memalign(ctrl->memoryPool, cacheline_size, ALIGN(size, cacheline_size));
 	if( !ptr )
 	{
-		Kprintf("[xhci] %s: memalign failed for size %lu\n", __func__, size);
+		Kprintf("memalign failed for size %lu\n", (ULONG)size);
 		return NULL;
 	}
 	_memset(ptr, '\0', size);
@@ -239,8 +244,8 @@ static void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
  * @param link_trbs	flag to indicate whether to link the trbs or NOT
  * Return: none
  */
-static void xhci_link_segments(struct xhci_ctrl *ctrl, struct xhci_segment *prev,
-			       struct xhci_segment *next, bool link_trbs)
+static void xhci_link_segments(struct xhci_segment *prev,
+			       struct xhci_segment *next, BOOL link_trbs)
 {
 	u32 val;
 
@@ -302,8 +307,8 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
 
 	seg = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_segment));
 	if (!seg) {
-		Kprintf("[xhci] %s: AllocVecPooled failed for size %lu\n",
-			__func__, sizeof(struct xhci_segment));
+		Kprintf("AllocVecPooled failed for size %lu\n",
+			(ULONG)sizeof(struct xhci_segment));
 		return NULL;
 	}
 
@@ -338,8 +343,8 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 
 	ring = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_ring));
 	if (!ring) {
-		Kprintf("[xhci] %s: AllocVecPooled failed for size %lu\n",
-			__func__, sizeof(struct xhci_ring));
+		Kprintf("AllocVecPooled failed for size %lu\n",
+			(ULONG)sizeof(struct xhci_ring));
 		return NULL;
 	}
 
@@ -348,7 +353,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 
 	ring->first_seg = xhci_segment_alloc(ctrl);
 	if (!ring->first_seg) {
-		Kprintf("[xhci] %s: xhci_segment_alloc failed\n", __func__);
+		Kprintf("xhci_segment_alloc failed\n");
 		FreeVecPooled(ctrl->memoryPool, ring);
 		return NULL;
 	}
@@ -361,17 +366,17 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 
 		next = xhci_segment_alloc(ctrl);
 		if (!next) {
-			Kprintf("[xhci] %s: xhci_segment_alloc failed\n", __func__);
+			Kprintf("xhci_segment_alloc failed\n");
 			xhci_ring_free(ctrl, ring);
 			return NULL;
 		}
 
-		xhci_link_segments(ctrl, prev, next, link_trbs);
+		xhci_link_segments(prev, next, link_trbs);
 
 		prev = next;
 		num_segs--;
 	}
-	xhci_link_segments(ctrl, prev, ring->first_seg, link_trbs);
+	xhci_link_segments(prev, ring->first_seg, link_trbs);
 	if (link_trbs) {
 		/* See section 4.9.2.1 and 6.4.4.1 */
 		prev->trbs[TRBS_PER_SEGMENT-1].link.control |=
@@ -847,7 +852,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 		break;
 	default:
 		/* Speed was set earlier, this shouldn't happen. */
-		Kprintf("[xhci] Unknown device speed %ld\n", speed);
+		Kprintf("Unknown device speed %ld\n", (ULONG)speed);
 	}
 
 	port_num = hop_portnr;
@@ -879,7 +884,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 		break;
 	default:
 		/* New speed? */
-		Kprintf("[xhci] Unknown device speed %ld\n", speed);
+		Kprintf("Unknown device speed %ld\n", (ULONG)speed);
 	}
 
 	/* EP 0 can handle "burst" sizes of 1, so Max Burst Size field is 0 */

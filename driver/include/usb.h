@@ -13,13 +13,8 @@
 
 #include <stdbool.h>
 #include <compat.h>
-// #include <fdtdec.h>
 #include <usb_defs.h>
 #include <ch9.h>
-// #include <asm/cache.h>
-// #include <part.h>
-
-extern bool usb_started; /* flag for the started/stopped USB status */
 
 /*
  * The EHCI spec says that we must align to at least 32 bytes.  However,
@@ -112,62 +107,36 @@ enum {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
-	int	devnum;			/* Device number on USB bus */
+	unsigned int	devnum;			/* Device number on USB bus */
 	enum usb_device_speed speed;	/* full/low/high */
-	char	mf[32];			/* manufacturer */
-	char	prod[32];		/* product */
-	char	serial[32];		/* serial number */
 
 	/* Maximum packet size; one of: PACKET_SIZE_* */
 	int maxpacketsize;
 	/* one bit for each endpoint ([0] = IN, [1] = OUT) */
-	unsigned int toggle[2];
+	// unsigned int toggle[2];
 	/* endpoint halts; one bit per endpoint # & direction;
 	 * [0] = IN, [1] = OUT
 	 */
-	unsigned int halted[2];
+	// unsigned int halted[2];
 	int epmaxpacketin[16];		/* INput endpoint specific maximums */
 	int epmaxpacketout[16];		/* OUTput endpoint specific maximums */
 
-	int configno;			/* selected config number */
-	/* Device Descriptor */
-	struct usb_device_descriptor descriptor
-		__attribute__((aligned(ARCH_DMA_MINALIGN)));
+	// int configno;			/* selected config number */
 	struct usb_config config; /* config descriptor */
 
-	int have_langid;		/* whether string_langid is valid yet */
-	int string_langid;		/* language ID for strings */
-	int (*irq_handle)(struct usb_device *dev);
-	unsigned long irq_status;
-	int irq_act_len;		/* transferred bytes */
 	void *privptr;
 	/*
 	 * Child devices -  if this is a hub device
 	 * Each instance needs its own set of data structures.
 	 */
 	unsigned long status;
-	unsigned long int_pending;	/* 1 bit per ep, used by int_queue */
 	int act_len;			/* transferred bytes */
-	int maxchild;			/* Number of ports if hub */
-	int portnr;			/* Port number, 1=first */
 	/* slot_id - for xHCI enabled devices */
 	unsigned int slot_id;
 
 	struct xhci_ctrl *controller; /* xHCI controller */
 };
 
-struct int_queue;
-
-/*
- * You can initialize platform's USB host or device
- * ports by passing this enum as an argument to
- * board_usb_init().
- */
-enum usb_init_type {
-	USB_INIT_HOST,
-	USB_INIT_DEVICE,
-	USB_INIT_UNKNOWN,
-};
 
 /**********************************************************************
  * this is how the lowlevel part communicate with the outer world
@@ -178,48 +147,12 @@ enum usb_init_type {
 int submit_bulk_msg(struct usb_device *dev, unsigned long pipe,
 			void *buffer, int transfer_len);
 int submit_control_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
-			int transfer_len, struct devrequest *setup);
-/* Timeout-capable variant that preserves root-hub routing */
-int submit_control_msg_tmo(struct usb_device *dev, unsigned long pipe, void *buffer,
 			int transfer_len, struct devrequest *setup, unsigned int timeout_ms);
 int submit_int_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
 			int transfer_len, int interval, bool nonblock);
 
 
 /* Defines */
-#define USB_UHCI_VEND_ID	0x8086
-#define USB_UHCI_DEV_ID		0x7112
-
-
-/*
- * USB Keyboard reports are 8 bytes in boot protocol.
- * Appendix B of HID Device Class Definition 1.11
- */
-#define USB_KBD_BOOT_REPORT_SIZE 8
-
-/* big endian -> little endian conversion */
-/* some CPUs are already little endian e.g. the ARM920T */
-#define __swap_16(x) \
-	({ unsigned short x_ = (unsigned short)x; \
-	 (unsigned short)( \
-		((x_ & 0x00FFU) << 8) | ((x_ & 0xFF00U) >> 8)); \
-	})
-#define __swap_32(x) \
-	({ unsigned long x_ = (unsigned long)x; \
-	 (unsigned long)( \
-		((x_ & 0x000000FFUL) << 24) | \
-		((x_ & 0x0000FF00UL) <<	 8) | \
-		((x_ & 0x00FF0000UL) >>	 8) | \
-		((x_ & 0xFF000000UL) >> 24)); \
-	})
-
-#ifdef __LITTLE_ENDIAN
-# define swap_16(x) (x)
-# define swap_32(x) (x)
-#else
-# define swap_16(x) __swap_16(x)
-# define swap_32(x) __swap_32(x)
-#endif
 
 /*
  * Calling this entity a "pipe" is glorifying it. A USB pipe
@@ -319,141 +252,10 @@ int submit_int_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
 				((usb_pipeendpoint(pipe) * 2) - \
 				 (usb_pipein(pipe) ? 0 : 1))
 
-/**
- * struct usb_device_id - identifies USB devices for probing and hotplugging
- * @match_flags: Bit mask controlling which of the other fields are used to
- *	match against new devices. Any field except for driver_info may be
- *	used, although some only make sense in conjunction with other fields.
- *	This is usually set by a USB_DEVICE_*() macro, which sets all
- *	other fields in this structure except for driver_info.
- * @idVendor: USB vendor ID for a device; numbers are assigned
- *	by the USB forum to its members.
- * @idProduct: Vendor-assigned product ID.
- * @bcdDevice_lo: Low end of range of vendor-assigned product version numbers.
- *	This is also used to identify individual product versions, for
- *	a range consisting of a single device.
- * @bcdDevice_hi: High end of version number range.  The range of product
- *	versions is inclusive.
- * @bDeviceClass: Class of device; numbers are assigned
- *	by the USB forum.  Products may choose to implement classes,
- *	or be vendor-specific.  Device classes specify behavior of all
- *	the interfaces on a device.
- * @bDeviceSubClass: Subclass of device; associated with bDeviceClass.
- * @bDeviceProtocol: Protocol of device; associated with bDeviceClass.
- * @bInterfaceClass: Class of interface; numbers are assigned
- *	by the USB forum.  Products may choose to implement classes,
- *	or be vendor-specific.  Interface classes specify behavior only
- *	of a given interface; other interfaces may support other classes.
- * @bInterfaceSubClass: Subclass of interface; associated with bInterfaceClass.
- * @bInterfaceProtocol: Protocol of interface; associated with bInterfaceClass.
- * @bInterfaceNumber: Number of interface; composite devices may use
- *	fixed interface numbers to differentiate between vendor-specific
- *	interfaces.
- * @driver_info: Holds information used by the driver.  Usually it holds
- *	a pointer to a descriptor understood by the driver, or perhaps
- *	device flags.
- *
- * In most cases, drivers will create a table of device IDs by using
- * USB_DEVICE(), or similar macros designed for that purpose.
- * They will then export it to userspace using MODULE_DEVICE_TABLE(),
- * and provide it to the USB core through their usb_driver structure.
- *
- * See the usb_match_id() function for information about how matches are
- * performed.  Briefly, you will normally use one of several macros to help
- * construct these entries.  Each entry you provide will either identify
- * one or more specific products, or will identify a class of products
- * which have agreed to behave the same.  You should put the more specific
- * matches towards the beginning of your table, so that driver_info can
- * record quirks of specific products.
- */
-struct usb_device_id {
-	/* which fields to match against? */
-	u16 match_flags;
-
-	/* Used for product specific matches; range is inclusive */
-	u16 idVendor;
-	u16 idProduct;
-	u16 bcdDevice_lo;
-	u16 bcdDevice_hi;
-
-	/* Used for device class matches */
-	u8 bDeviceClass;
-	u8 bDeviceSubClass;
-	u8 bDeviceProtocol;
-
-	/* Used for interface class matches */
-	u8 bInterfaceClass;
-	u8 bInterfaceSubClass;
-	u8 bInterfaceProtocol;
-
-	/* Used for vendor-specific interface matches */
-	u8 bInterfaceNumber;
-
-	/* not matched against */
-	ULONG driver_info;
-};
-
-/* Some useful macros to use to create struct usb_device_id */
-#define USB_DEVICE_ID_MATCH_VENDOR		0x0001
-#define USB_DEVICE_ID_MATCH_PRODUCT		0x0002
-#define USB_DEVICE_ID_MATCH_DEV_LO		0x0004
-#define USB_DEVICE_ID_MATCH_DEV_HI		0x0008
-#define USB_DEVICE_ID_MATCH_DEV_CLASS		0x0010
-#define USB_DEVICE_ID_MATCH_DEV_SUBCLASS	0x0020
-#define USB_DEVICE_ID_MATCH_DEV_PROTOCOL	0x0040
-#define USB_DEVICE_ID_MATCH_INT_CLASS		0x0080
-#define USB_DEVICE_ID_MATCH_INT_SUBCLASS	0x0100
-#define USB_DEVICE_ID_MATCH_INT_PROTOCOL	0x0200
-#define USB_DEVICE_ID_MATCH_INT_NUMBER		0x0400
-
-/* Match anything, indicates this is a valid entry even if everything is 0 */
-#define USB_DEVICE_ID_MATCH_NONE		0x0800
-#define USB_DEVICE_ID_MATCH_ALL			0x07ff
-
-/**
- * struct usb_driver_entry - Matches a driver to its usb_device_ids
- * @driver: Driver to use
- * @match: List of match records for this driver, terminated by {}
- */
-struct usb_driver_entry {
-	struct driver *driver;
-	const struct usb_device_id *match;
-};
-
-#define USB_DEVICE_ID_MATCH_DEVICE \
-		(USB_DEVICE_ID_MATCH_VENDOR | USB_DEVICE_ID_MATCH_PRODUCT)
-
-/**
- * USB_DEVICE - macro used to describe a specific usb device
- * @vend: the 16 bit USB Vendor ID
- * @prod: the 16 bit USB Product ID
- *
- * This macro is used to create a struct usb_device_id that matches a
- * specific device.
- */
-#define USB_DEVICE(vend, prod) \
-	.match_flags = USB_DEVICE_ID_MATCH_DEVICE, \
-	.idVendor = (vend), \
-	.idProduct = (prod)
-
-#define U_BOOT_USB_DEVICE(__name, __match) \
-	ll_entry_declare(struct usb_driver_entry, __name, usb_driver_entry) = {\
-		.driver = llsym(struct driver, __name, driver), \
-		.match = __match, \
-		}
 
 /*************************************************************************
  * Hub Stuff
  */
-struct usb_port_status {
-	unsigned short wPortStatus;
-	unsigned short wPortChange;
-} __attribute__ ((packed));
-
-struct usb_hub_status {
-	unsigned short wHubStatus;
-	unsigned short wHubChange;
-} __attribute__ ((packed));
 
 /*
  * Hub Device descriptor
@@ -495,25 +297,7 @@ struct usb_hub_descriptor {
 	} u;
 } __attribute__ ((packed));
 
-struct usb_hub_device {
-	struct usb_device *pusb_dev;
-	struct usb_hub_descriptor desc;
-
-	ULONG connect_timeout;		/* Device connection timeout in ms */
-	ULONG query_delay;		/* Device query delay in ms */
-	int overcurrent_count[USB_MAXCHILDREN];	/* Over-current counter */
-	int hub_depth;			/* USB 3.0 hub depth */
-	struct usb_tt tt;		/* Transaction Translator */
-};
 
 struct xhci_ctrl;
-
-/**
- * usb_kbd_remove_for_test() - Remove any USB keyboard
- *
- * This can only be called from test_pre_run(). It removes the USB keyboard from
- * the console system so that the USB device can be dropped
- */
-static inline int usb_kbd_remove_for_test(void) { return 0; }
 
 #endif /*_USB_H_ */

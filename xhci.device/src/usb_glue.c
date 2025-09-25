@@ -29,6 +29,108 @@ static inline struct glue_state *gst(struct XHCIUnit *unit) {
     return (struct glue_state *)unit->xhci_ctrl->privptr; /* reuse privptr */
 }
 
+static inline void copy_bytes(void *dst, const void *src, ULONG len)
+{
+    UBYTE *d = (UBYTE *)dst;
+    const UBYTE *s = (const UBYTE *)src;
+    for (ULONG i = 0; i < len; ++i)
+        d[i] = s[i];
+}
+
+static void cache_config_descriptor(struct usb_device *udev, const UBYTE *buf, ULONG len)
+{
+    if (!udev || !buf || len < 2)
+        return;
+
+    struct usb_config *cfg = &udev->config;
+    const UBYTE *ptr = buf;
+    const UBYTE *end = buf + len;
+    struct usb_interface *current_if = NULL;
+
+    while (ptr + 2 <= end) {
+        UBYTE dlen = ptr[0];
+        UBYTE dtype = ptr[1];
+        if (dlen == 0)
+            break;
+        if (ptr + dlen > end)
+            break;
+
+        switch (dtype) {
+        case USB_DT_CONFIG: {
+            _memset(cfg, 0, sizeof(*cfg));
+            ULONG copy = dlen;
+            if (copy > sizeof(cfg->desc))
+                copy = sizeof(cfg->desc);
+            copy_bytes(&cfg->desc, ptr, copy);
+            UBYTE iface_count = 0;
+            if (copy > 4)
+                iface_count = cfg->desc.bNumInterfaces;
+            if (iface_count > USB_MAXINTERFACES)
+                iface_count = USB_MAXINTERFACES;
+            cfg->no_of_if = iface_count;
+            current_if = NULL;
+            break;
+        }
+        case USB_DT_INTERFACE: {
+            if (dlen < sizeof(struct usb_interface_descriptor))
+                break;
+            UBYTE ifnum = ptr[2];
+            UBYTE alt = ptr[3];
+            if (ifnum >= USB_MAXINTERFACES) {
+                current_if = NULL;
+                break;
+            }
+            struct usb_interface *iface = &cfg->if_desc[ifnum];
+            if (alt != 0) {
+                if (iface->num_altsetting < 0xFF)
+                    iface->num_altsetting++;
+                current_if = NULL;
+                break;
+            }
+            _memset(iface, 0, sizeof(*iface));
+            ULONG copy = sizeof(struct usb_interface_descriptor);
+            if (dlen < copy)
+                copy = dlen;
+            copy_bytes(&iface->desc, ptr, copy);
+            iface->no_of_ep = 0;
+            iface->num_altsetting = 1;
+            iface->act_altsetting = iface->desc.bAlternateSetting;
+            current_if = iface;
+            if (cfg->no_of_if <= ifnum)
+                cfg->no_of_if = ifnum + 1;
+            break;
+        }
+        case USB_DT_ENDPOINT: {
+            if (!current_if)
+                break;
+            if (current_if->no_of_ep >= USB_MAXENDPOINTS)
+                break;
+            ULONG copy = sizeof(struct usb_endpoint_descriptor);
+            if (dlen < copy)
+                copy = dlen;
+            copy_bytes(&current_if->ep_desc[current_if->no_of_ep], ptr, copy);
+            current_if->no_of_ep++;
+            break;
+        }
+        case USB_DT_SS_ENDPOINT_COMP: {
+            if (!current_if)
+                break;
+            if (!current_if->no_of_ep)
+                break;
+            ULONG copy = sizeof(struct usb_ss_ep_comp_descriptor);
+            if (dlen < copy)
+                copy = dlen;
+            copy_bytes(&current_if->ss_ep_comp_desc[current_if->no_of_ep - 1], ptr, copy);
+            break;
+        }
+        default:
+            break;
+        }
+
+        ptr += dlen;
+    }
+}
+
 static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
 {
     if (devaddr > 127)
@@ -151,12 +253,25 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 
     int ret;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT) && io->iouh_NakTimeout)
-        ret = submit_control_msg_tmo(udev, pipe, buf, len, &req, (unsigned int)io->iouh_NakTimeout);
+        ret = submit_control_msg(udev, pipe, buf, len, &req, (unsigned int)io->iouh_NakTimeout);
     else
-        ret = submit_control_msg(udev, pipe, buf, len, &req);
+        ret = submit_control_msg(udev, pipe, buf, len, &req, XHCI_TIMEOUT);
     int uherr = map_status_to_uhio(udev->status);
     io->iouh_Actual = (ULONG)udev->act_len;
     io->iouh_Req.io_Error = (ret == 0) ? UHIOERR_NO_ERROR : uherr;
+
+    if (ret == 0 && buf && udev->act_len > 0 &&
+        req.request == USB_REQ_GET_DESCRIPTOR &&
+        (req.requesttype & USB_DIR_IN) &&
+        ((req.requesttype & USB_TYPE_MASK) == USB_TYPE_STANDARD) &&
+        (((LE16(req.value)) >> 8) == USB_DT_CONFIG)) {
+        cache_config_descriptor(udev, (const UBYTE *)buf, (ULONG)udev->act_len);
+    }
+
+    // if (ret == 0 && req.request == USB_REQ_SET_CONFIGURATION &&
+    //     ((req.requesttype & USB_TYPE_MASK) == USB_TYPE_STANDARD)) {
+    //     udev->configno = (int)(LE16(req.value) & 0xff);
+    // }
 
     /* If this was a successful GET_DESCRIPTOR(STRING) IN transfer and we got
      * an odd number of bytes, clamp to even to avoid a dangling half UTF-16
@@ -243,7 +358,7 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT) && io->iouh_NakTimeout)
-        ret = xhci_bulk_tx_tmo(udev, pipe, len, buf, (unsigned int)io->iouh_NakTimeout);
+        ret = xhci_bulk_tx(udev, pipe, len, buf, (unsigned int)io->iouh_NakTimeout);
     else
         ret = submit_bulk_msg(udev, pipe, buf, len);
     uherr = map_status_to_uhio(udev->status);
@@ -291,7 +406,7 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
             udev->epmaxpacketout[ep] = mps;
     }
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT) && io->iouh_NakTimeout)
-        ret = xhci_bulk_tx_tmo(udev, pipe, len, buf, (unsigned int)io->iouh_NakTimeout);
+        ret = xhci_bulk_tx(udev, pipe, len, buf, (unsigned int)io->iouh_NakTimeout);
     else
         ret = submit_int_msg(udev, pipe, buf, len, interval, nonblock);
     int uherr = map_status_to_uhio(udev->status);
@@ -322,7 +437,7 @@ int usb_glue_bus_reset(struct XHCIUnit *unit)
         req.value = cpu_to_le16(USB_PORT_FEAT_RESET);
         req.index = cpu_to_le16(p);
         req.length = cpu_to_le16(0);
-        if (submit_control_msg(udev, pipe, NULL, 0, &req) != 0)
+        if (submit_control_msg(udev, pipe, NULL, 0, &req, XHCI_TIMEOUT) != 0)
             return UHIOERR_HOSTERROR;
     }
     return UHIOERR_NO_ERROR;
@@ -342,7 +457,7 @@ int usb_glue_bus_suspend(struct XHCIUnit *unit)
         req.request = USB_REQ_SET_FEATURE;
         req.value = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
         req.index = cpu_to_le16(p);
-        if (submit_control_msg(udev, pipe, NULL, 0, &req) != 0)
+        if (submit_control_msg(udev, pipe, NULL, 0, &req, XHCI_TIMEOUT) != 0)
             return UHIOERR_HOSTERROR;
     }
     return UHIOERR_NO_ERROR;
@@ -362,7 +477,7 @@ int usb_glue_bus_resume(struct XHCIUnit *unit)
         req.request = USB_REQ_CLEAR_FEATURE;
         req.value = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
         req.index = cpu_to_le16(p);
-        if (submit_control_msg(udev, pipe, NULL, 0, &req) != 0)
+        if (submit_control_msg(udev, pipe, NULL, 0, &req, XHCI_TIMEOUT) != 0)
             return UHIOERR_HOSTERROR;
     }
     return UHIOERR_NO_ERROR;
@@ -383,7 +498,7 @@ int usb_glue_bus_oper(struct XHCIUnit *unit)
         req.request = USB_REQ_SET_FEATURE;
         req.value = cpu_to_le16(USB_PORT_FEAT_POWER);
         req.index = cpu_to_le16(p);
-        if (submit_control_msg(udev, pipe, NULL, 0, &req) != 0)
+        if (submit_control_msg(udev, pipe, NULL, 0, &req, XHCI_TIMEOUT) != 0)
             return UHIOERR_HOSTERROR;
     }
     return UHIOERR_NO_ERROR;
