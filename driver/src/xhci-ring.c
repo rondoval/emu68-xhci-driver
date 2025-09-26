@@ -818,6 +818,8 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 
 	running_total = 0;
 	maxpacketsize = usb_maxpacket(udev, pipe);
+	Kprintf("xhci_bulk_tx: maxpacketsize=%ld num_trbs=%ld\n",
+		(LONG)maxpacketsize, (LONG)num_trbs);
 
 	/* How much data is in the first TRB? */
 	/*
@@ -1041,8 +1043,6 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	start_cycle = ep_ring->cycle_state;
 	Kprintf("xhci_ctrl_tx: start_trb=%lx start_cycle=%ld\n", (ULONG)start_trb, (LONG)start_cycle);
 
-	Kprintf("start_trb %lx, start_cycle %ld\n", start_trb, start_cycle);
-
 	/* Queue setup TRB - see section 6.4.1.2.1 */
 	/* FIXME better way to translate setup_packet into two u32 fields? */
 	field = 0;
@@ -1059,10 +1059,6 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 				field |= TRB_TX_TYPE(TRB_DATA_OUT);
 		}
 	}
-
-	Kprintf("req->requesttype = %ld, req->request = %ld, req->value = %ld, req->index = %ld, req->length = %ld\n",
-	      req->requesttype, req->request, LE16(req->value),
-	      LE16(req->index), LE16(req->length));
 
 	trb_fields[0] = req->requesttype | req->request << 8 |
 				LE16(req->value) << 16;

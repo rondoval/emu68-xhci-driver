@@ -145,7 +145,7 @@ struct usb_device {
 #define usb_reset_root_port(dev)
 
 int submit_bulk_msg(struct usb_device *dev, unsigned long pipe,
-			void *buffer, int transfer_len);
+			void *buffer, int transfer_len, unsigned int timeout_ms);
 int submit_control_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
 			int transfer_len, struct devrequest *setup, unsigned int timeout_ms);
 int submit_int_msg(struct usb_device *dev, unsigned long pipe, void *buffer,

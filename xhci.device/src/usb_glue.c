@@ -266,12 +266,9 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         ((req.requesttype & USB_TYPE_MASK) == USB_TYPE_STANDARD) &&
         (((LE16(req.value)) >> 8) == USB_DT_CONFIG)) {
         cache_config_descriptor(udev, (const UBYTE *)buf, (ULONG)udev->act_len);
+        Kprintf("usb_glue_ctrl: cached config descriptor, ifaces=%ld\n",
+                (LONG)udev->config.no_of_if);
     }
-
-    // if (ret == 0 && req.request == USB_REQ_SET_CONFIGURATION &&
-    //     ((req.requesttype & USB_TYPE_MASK) == USB_TYPE_STANDARD)) {
-    //     udev->configno = (int)(LE16(req.value) & 0xff);
-    // }
 
     /* If this was a successful GET_DESCRIPTOR(STRING) IN transfer and we got
      * an odd number of bytes, clamp to even to avoid a dangling half UTF-16
@@ -291,7 +288,8 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
             (LONG)ret, (LONG)io->iouh_Req.io_Error, (LONG)udev->status, (LONG)udev->act_len);
 
     /* If this was a successful standard SET_ADDRESS, migrate the glue context
-     * from old devaddr to the new one so subsequent transfers use the same slot.
+     * from the old devaddr to the new one so subsequent transfers reuse the
+     * same slot and endpoint state.
      */
     if (ret == 0 &&
         (req.request == USB_REQ_SET_ADDRESS) &&
@@ -299,29 +297,28 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         UWORD old_addr = io->iouh_DevAddr & 0x7F;
         UWORD new_addr = (UWORD)(LE16(req.value) & 0x7F);
         if (new_addr != old_addr) {
-            /* Unlock before moving so we don't copy a locked flag */
-            ep_unlock(dc, 0, 1);
-
             struct glue_state *st = gst(unit);
             struct glue_devctx *from = &st->devs[old_addr];
             struct glue_devctx *to = &st->devs[new_addr];
 
-            /* If destination was in use (shouldn't for enumeration), reset it */
             if (to->used) {
+                Kprintf("usb_glue_ctrl: overwriting existing ctx for addr %ld\n", (LONG)new_addr);
                 _memset(to, 0, sizeof(*to));
             }
 
-            /* Move the whole context, then fix up address fields */
+            /* Copy the entire device context so slot/endpoint state follows the device. */
             *to = *from;
             to->used = 1;
             to->udev.devnum = new_addr;
-            /* Clear any in-flight guards after address change */
-            _memset(to->in_flight, 0, sizeof(to->in_flight));
 
-            /* Clear the old slot */
+            /* Ensure the EP0 IN guard stays locked until we drop it below. */
+            to->in_flight[0][1] = from->in_flight[0][1];
+
+            /* Clear the old address entry to avoid stale references. */
             _memset(from, 0, sizeof(*from));
 
-            return COMMAND_PROCESSED;
+            dc = to;
+            udev = &dc->udev;
         }
     }
 
@@ -358,10 +355,12 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT) && io->iouh_NakTimeout)
-        ret = xhci_bulk_tx(udev, pipe, len, buf, (unsigned int)io->iouh_NakTimeout);
+        ret = submit_bulk_msg(udev, pipe, buf, len, (unsigned int)io->iouh_NakTimeout);
     else
-        ret = submit_bulk_msg(udev, pipe, buf, len);
+        ret = submit_bulk_msg(udev, pipe, buf, len, XHCI_TIMEOUT);
     uherr = map_status_to_uhio(udev->status);
+    Kprintf("usb_glue_bulk: ret=%ld uherr=%ld udev->status=%ld act_len=%ld\n",
+            (LONG)ret, (LONG)uherr, (LONG)udev->status, (LONG)udev->act_len);
     io->iouh_Actual = (ULONG)udev->act_len;
     io->iouh_Req.io_Error = (ret == 0) ? UHIOERR_NO_ERROR : uherr;
     ep_unlock(dc, ep, dir);
@@ -377,18 +376,19 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     struct glue_devctx *dc = &gst(unit)->devs[io->iouh_DevAddr];
     if (!ep_try_lock(dc, ep, dir)) { io->iouh_Req.io_Error = UHIOERR_HOSTERROR; return COMMAND_PROCESSED; }
 
-    Kprintf("usb_glue_int: dev=%ld addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx tmo=%ld\n",
-        (ULONG)udev, (ULONG)udev->devnum, (LONG)ep, dir ? "IN" : "OUT",
-        (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
-        (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout);
-
     /* Root hub doesn't have a real interrupt endpoint ring here; synthesize success */
     if (udev->devnum == unit->xhci_ctrl->rootdev) {
         io->iouh_Actual = 0;
         io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
         ep_unlock(dc, ep, dir);
+        //TODO do we need to process it somehow?
         return COMMAND_PROCESSED;
     }
+
+    Kprintf("usb_glue_int: dev=%ld addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx tmo=%ld\n",
+        (ULONG)udev, (ULONG)udev->devnum, (LONG)ep, dir ? "IN" : "OUT",
+        (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
+        (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout);
 
     unsigned long pipe = (io->iouh_Dir == UHDIR_IN) ? usb_rcvintpipe(udev, ep)
                                                     : usb_sndintpipe(udev, ep);
