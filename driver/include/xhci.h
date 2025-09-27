@@ -1249,10 +1249,12 @@ void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr,
 void xhci_acknowledge_event(struct xhci_ctrl *ctrl);
 union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected, unsigned int timeout_ms);
 int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
-		 int length, void *buffer, unsigned int timeout_ms);
+	 int length, void *buffer, unsigned int maxpacket,
+	 unsigned int timeout_ms);
 int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
-		 struct devrequest *req, int length, void *buffer, unsigned int timeout_ms);
-int xhci_check_maxpacket(struct usb_device *udev);
+	 struct devrequest *req, int length, void *buffer,
+	 unsigned int maxpacket, unsigned int timeout_ms);
+int xhci_check_maxpacket(struct usb_device *udev, unsigned int maxpacket);
 void xhci_flush_cache(uintptr_t addr, u32 type_len);
 void xhci_inval_cache(uintptr_t addr, u32 type_len);
 void xhci_cleanup(struct xhci_ctrl *ctrl);

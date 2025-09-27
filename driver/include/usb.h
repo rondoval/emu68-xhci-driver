@@ -11,6 +11,8 @@
 #ifndef _USB_H_
 #define _USB_H_
 
+#include <exec/lists.h>
+
 #include <stdbool.h>
 #include <compat.h>
 #include <usb_defs.h>
@@ -79,6 +81,7 @@ struct usb_interface {
 
 /* Configuration information.. */
 struct usb_config {
+	struct MinNode node;
 	struct usb_config_descriptor desc;
 
 	__u8	no_of_if;	/* number of interfaces */
@@ -111,20 +114,10 @@ struct usb_device {
 	enum usb_device_speed speed;	/* full/low/high */
 
 	/* Maximum packet size; one of: PACKET_SIZE_* */
-	int maxpacketsize;
-	/* one bit for each endpoint ([0] = IN, [1] = OUT) */
-	// unsigned int toggle[2];
-	/* endpoint halts; one bit per endpoint # & direction;
-	 * [0] = IN, [1] = OUT
-	 */
-	// unsigned int halted[2];
-	int epmaxpacketin[16];		/* INput endpoint specific maximums */
-	int epmaxpacketout[16];		/* OUTput endpoint specific maximums */
+	int maxpacketsize0;
 
-	// int configno;			/* selected config number */
-	struct usb_config config; /* config descriptor */
+	struct MinList configurations; /* configurations captured from GET_CONFIGURATION replies */
 
-	void *privptr;
 	/*
 	 * Child devices -  if this is a hub device
 	 * Each instance needs its own set of data structures.
@@ -145,11 +138,13 @@ struct usb_device {
 #define usb_reset_root_port(dev)
 
 int submit_bulk_msg(struct usb_device *dev, unsigned long pipe,
-			void *buffer, int transfer_len, unsigned int timeout_ms);
+		void *buffer, int transfer_len, unsigned int maxpacket,
+		unsigned int timeout_ms);
 int submit_control_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
-			int transfer_len, struct devrequest *setup, unsigned int timeout_ms);
+		int transfer_len, struct devrequest *setup, unsigned int maxpacket,
+		unsigned int timeout_ms);
 int submit_int_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
-			int transfer_len, int interval, bool nonblock);
+		int transfer_len, unsigned int maxpacket, int interval, bool nonblock);
 
 
 /* Defines */
@@ -190,7 +185,7 @@ int submit_int_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
 /* Create various pipes... */
 #define create_pipe(dev,endpoint) \
 		(((dev)->devnum << 8) | ((endpoint) << 15) | \
-		(dev)->maxpacketsize)
+		(dev)->maxpacketsize0)
 #define default_pipe(dev) ((dev)->speed << 26)
 
 #define usb_sndctrlpipe(dev, endpoint)	((PIPE_CONTROL << 30) | \

@@ -697,19 +697,6 @@ static void record_transfer_result(struct usb_device *udev,
 		(LONG)udev->status);
 }
 
-/*
- * returns the max packet size, depending on the pipe direction and
- * the configurations values
- */
-int usb_maxpacket(struct usb_device *dev, unsigned long pipe)
-{
-	/* direction is out -> use emaxpacket out */
-	if ((pipe & USB_DIR_IN) == 0)
-		return dev->epmaxpacketout[((pipe>>15) & 0xf)];
-	else
-		return dev->epmaxpacketin[((pipe>>15) & 0xf)];
-}
-
 /**** Bulk and Control transfer methods ****/
 /**
  * Queues up the BULK Request
@@ -721,7 +708,8 @@ int usb_maxpacket(struct usb_device *dev, unsigned long pipe)
  * Return: returns 0 if successful else -1 on failure
  */
 int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
-			int length, void *buffer, unsigned int timeout_ms)
+		int length, void *buffer, unsigned int maxpacket,
+		unsigned int timeout_ms)
 {
 	int num_trbs = 0;
 	struct xhci_generic_trb *start_trb;
@@ -739,7 +727,6 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 
 	int running_total, trb_buff_len;
 	bool more_trbs_coming = true;
-	int maxpacketsize;
 	u64 addr;
 	int ret;
 	u32 trb_fields[4];
@@ -771,8 +758,10 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 		reset_ep(udev, ep_index);
 
 	ring = virt_dev->eps[ep_index].ring;
-	if (!ring)
+	if (!ring) {
+		Kprintf("xhci_bulk_tx: no ring for ep %ld\n", (LONG)ep_index);
 		return -EINVAL;
+	}
 
 	/*
 	 * How much data is (potentially) left before the 64KB boundary?
@@ -817,9 +806,8 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 	start_cycle = ring->cycle_state;
 
 	running_total = 0;
-	maxpacketsize = usb_maxpacket(udev, pipe);
 	Kprintf("xhci_bulk_tx: maxpacketsize=%ld num_trbs=%ld\n",
-		(LONG)maxpacketsize, (LONG)num_trbs);
+		(LONG)maxpacket, (LONG)num_trbs);
 
 	/* How much data is in the first TRB? */
 	/*
@@ -868,7 +856,7 @@ int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
 
 		/* Set the TRB length, TD size, and interrupter fields. */
 		remainder = xhci_td_remainder(ctrl, running_total, trb_buff_len,
-					      length, maxpacketsize,
+				      length, (int)maxpacket,
 					      more_trbs_coming);
 
 		length_field = (TRB_LEN(trb_buff_len) |
@@ -962,8 +950,9 @@ again:
  * Return: returns 0 if successful else error code on failure
  */
 int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
-			struct devrequest *req,	int length,
-			void *buffer, unsigned int timeout_ms)
+		struct devrequest *req,	int length,
+		void *buffer, unsigned int maxpacket,
+		unsigned int timeout_ms)
 {
 	Kprintf("xhci_ctrl_tx: slot=%ld ep_index=%ld length=%ld dir=%s\n",
 		(LONG)udev->slot_id, (LONG)usb_pipe_ep_index(pipe), (LONG)length,
@@ -1001,7 +990,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	 * endpoint changed during FS device enumeration
 	 */
 	if (udev->speed == USB_SPEED_FULL) {
-		ret = xhci_check_maxpacket(udev);
+		ret = xhci_check_maxpacket(udev, maxpacket);
 		if (ret < 0)
 			return ret;
 	}
@@ -1082,7 +1071,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 		field = TRB_TYPE(TRB_DATA);
 
 	remainder = xhci_td_remainder(ctrl, 0, length, length,
-				      usb_maxpacket(udev, pipe), true);
+			      (int)maxpacket, true);
 	length_field = TRB_LEN(length) | TRB_TD_SIZE(remainder) |
 		       TRB_INTR_TARGET(0);
 	Kprintf("length_field = %ld, length = %ld,"

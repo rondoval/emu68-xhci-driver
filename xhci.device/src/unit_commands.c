@@ -237,7 +237,7 @@ static inline int Do_UHCMD_ISOXFER(struct IOUsbHWReq *io)
 static inline int Do_UHCMD_INTXFER(struct IOUsbHWReq *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: UHCMD_INTXFER\n", __func__);
+    KprintfH("[xhci] %s: UHCMD_INTXFER\n", __func__);
 
     return usb_glue_int(unit, io);
 }
