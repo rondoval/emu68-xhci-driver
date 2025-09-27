@@ -250,7 +250,7 @@ static int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
 		return -EINVAL;
 	case EP_STATE_STOPPED:
 	case EP_STATE_RUNNING:
-		Kprintf("EP STATE RUNNING.\n");
+		KprintfH("EP STATE RUNNING.\n");
 		break;
 	default:
 		Kprintf("ERROR unknown endpoint state for ep\n");
@@ -664,7 +664,7 @@ static void record_transfer_result(struct usb_device *udev,
 	udev->act_len = min(length, length -
 		(int)EVENT_TRB_LEN(LE32(event->trans_event.transfer_len)));
 
-	Kprintf("record_transfer_result: comp=%ld length=%ld act_len=%ld transfer_len=%ld\n",
+	KprintfH("record_transfer_result: comp=%ld length=%ld act_len=%ld transfer_len=%ld\n",
 		(LONG)comp, (LONG)length, (LONG)udev->act_len,
 		(LONG)EVENT_TRB_LEN(LE32(event->trans_event.transfer_len)));
 
@@ -693,7 +693,7 @@ static void record_transfer_result(struct usb_device *udev,
 		udev->status = 0x80;  /* USB_ST_TOO_LAZY_TO_MAKE_A_NEW_MACRO */
 	}
 
-	Kprintf("record_transfer_result: mapped status=%ld (0=OK)\n",
+	KprintfH("record_transfer_result: mapped status=%ld (0=OK)\n",
 		(LONG)udev->status);
 }
 
@@ -973,7 +973,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	union xhci_trb *event;
 	u32 remainder;
 
-	Kprintf("req=%lu (%lx), type=%lu (%lx), value=%lu (%lx), index=%lu\n",
+	KprintfH("req=%lu (%lx), type=%lu (%lx), value=%lu (%lx), index=%lu\n",
 		req->request, req->request,
 		req->requesttype, req->requesttype,
 		LE16(req->value), LE16(req->value),
@@ -1016,7 +1016,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	 * prepare_trasfer() as there in 'Linux' since we are not
 	 * maintaining multiple TDs/transfer at the same time.
 	 */
-	Kprintf("xhci_ctrl_tx: prepare_ring ep_state=%lx\n", (ULONG)(LE32(ep_ctx->ep_info) & EP_STATE_MASK));
+	KprintfH("xhci_ctrl_tx: prepare_ring ep_state=%lx\n", (ULONG)(LE32(ep_ctx->ep_info) & EP_STATE_MASK));
 	ret = prepare_ring(ctrl, ep_ring,
 				LE32(ep_ctx->ep_info) & EP_STATE_MASK);
 
@@ -1030,7 +1030,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	 */
 	start_trb = &ep_ring->enqueue->generic;
 	start_cycle = ep_ring->cycle_state;
-	Kprintf("xhci_ctrl_tx: start_trb=%lx start_cycle=%ld\n", (ULONG)start_trb, (LONG)start_cycle);
+	KprintfH("xhci_ctrl_tx: start_trb=%lx start_cycle=%ld\n", (ULONG)start_trb, (LONG)start_cycle);
 
 	/* Queue setup TRB - see section 6.4.1.2.1 */
 	/* FIXME better way to translate setup_packet into two u32 fields? */
@@ -1057,7 +1057,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	trb_fields[2] = (TRB_LEN(8) | TRB_INTR_TARGET(0));
 	/* Immediate data in pointer */
 	trb_fields[3] = field;
-	Kprintf("xhci_ctrl_tx: setup TRB fields: %08lx %08lx %08lx %08lx\n",
+	KprintfH("xhci_ctrl_tx: setup TRB fields: %08lx %08lx %08lx %08lx\n",
 		(ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
 	queue_trb(ctrl, ep_ring, true, trb_fields);
 
@@ -1074,7 +1074,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 			      (int)maxpacket, true);
 	length_field = TRB_LEN(length) | TRB_TD_SIZE(remainder) |
 		       TRB_INTR_TARGET(0);
-	Kprintf("length_field = %ld, length = %ld,"
+	KprintfH("length_field = %ld, length = %ld,"
 		"xhci_td_remainder(length) = %ld , TRB_INTR_TARGET(0) = %ld\n",
 		length_field, TRB_LEN(length),
 		TRB_TD_SIZE(remainder), 0);
@@ -1090,7 +1090,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 		trb_fields[3] = field | ep_ring->cycle_state;
 
 		xhci_flush_cache((uintptr_t)buffer, length);
-		Kprintf("xhci_ctrl_tx: data TRB fields: %08lx %08lx %08lx %08lx\n",
+		KprintfH("xhci_ctrl_tx: data TRB fields: %08lx %08lx %08lx %08lx\n",
 			(ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
 		queue_trb(ctrl, ep_ring, true, trb_fields);
 	}
@@ -1114,7 +1114,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	trb_fields[3] = field | TRB_IOC |
 			TRB_TYPE(TRB_STATUS) | ep_ring->cycle_state;
 
-	Kprintf("xhci_ctrl_tx: status TRB fields: %08lx %08lx %08lx %08lx\n",
+	KprintfH("xhci_ctrl_tx: status TRB fields: %08lx %08lx %08lx %08lx\n",
 		(ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
 	queue_trb(ctrl, ep_ring, false, trb_fields);
 
@@ -1124,7 +1124,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	if (!event)
 		goto abort;
 	field = LE32(event->trans_event.flags);
-	Kprintf("xhci_ctrl_tx: first event flags=%08lx status=%08lx buf=%08lx%08lx\n",
+	KprintfH("xhci_ctrl_tx: first event flags=%08lx status=%08lx buf=%08lx%08lx\n",
 		(ULONG)LE32(event->generic.field[3]),
 		(ULONG)LE32(event->generic.field[2]),
 		(ULONG)upper_32_bits(LE64(event->trans_event.buffer)),
@@ -1144,7 +1144,7 @@ int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
 	}
 
 	record_transfer_result(udev, event, length);
-	Kprintf("xhci_ctrl_tx: result status=%ld act_len=%ld comp=%ld\n",
+	KprintfH("xhci_ctrl_tx: result status=%ld act_len=%ld comp=%ld\n",
 		(LONG)udev->status, (LONG)udev->act_len,
 		(LONG)GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
 	xhci_acknowledge_event(ctrl);

@@ -118,6 +118,12 @@ struct usb_device {
 
 	struct MinList configurations; /* configurations captured from GET_CONFIGURATION replies */
 
+	struct usb_device *parent;    /* Parent hub device, NULL for root */
+	unsigned int portnr;          /* Downstream port number on parent hub (1-based) */
+	unsigned int route;           /* xHCI route string nibble-packed */
+	unsigned int tt_slot;         /* Parent hub slot ID for TT scheduling */
+	unsigned int tt_port;         /* Parent hub downstream port for TT scheduling */
+
 	/*
 	 * Child devices -  if this is a hub device
 	 * Each instance needs its own set of data structures.

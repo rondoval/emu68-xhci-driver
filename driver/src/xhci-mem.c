@@ -538,7 +538,7 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 		Kprintf("Failed to allocate out context for virt dev\n");
 		return -ENOMEM;
 	}
-	Kprintf("xhci_alloc_virt_device: out_ctx bytes=%lx dma=%lx size=%ld\n",
+	KprintfH("xhci_alloc_virt_device: out_ctx bytes=%lx dma=%lx size=%ld\n",
 		(ULONG)virt_dev->out_ctx->bytes, (ULONG)virt_dev->out_ctx->dma, (ULONG)virt_dev->out_ctx->size);
 
 	/* Allocate the (input) device context for address device command */
@@ -557,7 +557,7 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 		Kprintf("xhci_alloc_virt_device: EP0 ring alloc failed\n");
 		return -ENOMEM;
 	}
-	Kprintf("xhci_alloc_virt_device: ep0 ring first_seg=%lx dma=%lx cycle=%ld\n",
+	KprintfH("xhci_alloc_virt_device: ep0 ring first_seg=%lx dma=%lx cycle=%ld\n",
 		(ULONG)virt_dev->eps[0].ring->first_seg,
 		(ULONG)virt_dev->eps[0].ring->first_seg->dma,
 		(ULONG)virt_dev->eps[0].ring->cycle_state);
@@ -569,7 +569,7 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 
 	xhci_flush_cache((uintptr_t)&ctrl->dcbaa->dev_context_ptrs[slot_id],
 			 sizeof(__le64));
-	Kprintf("xhci_alloc_virt_device: DCBAA[%ld]=%lx (dcbaap=%lx)\n",
+	KprintfH("xhci_alloc_virt_device: DCBAA[%ld]=%lx (dcbaap=%lx)\n",
 		(ULONG)slot_id,
 		(ULONG)LE64(ctrl->dcbaa->dev_context_ptrs[slot_id]),
 		(ULONG)ctrl->dcbaa->dma);
@@ -816,7 +816,6 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	u64 trb_64 = 0;
 	int slot_id = udev->slot_id;
 	int speed = udev->speed;
-	int route = 0;
 
 	virt_dev = ctrl->devs[slot_id];
 
@@ -833,34 +832,56 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 		(ULONG)ep0_ctx, (ULONG)slot_ctx);
 
 	/* Only the control endpoint is valid - one endpoint context */
-	slot_ctx->dev_info |= LE32(LAST_CTX(1));
-
-	slot_ctx->dev_info |= LE32(route);
+	u32 dev_info = LE32(slot_ctx->dev_info);
+	dev_info &= ~(ROUTE_STRING_MASK | DEV_SPEED | DEV_MTT | LAST_CTX_MASK);
+	dev_info |= LAST_CTX(1);
+	dev_info |= (udev->route & ROUTE_STRING_MASK);
 
 	switch (speed) {
 	case USB_SPEED_SUPER:
-		slot_ctx->dev_info |= LE32(SLOT_SPEED_SS);
+	case USB_SPEED_SUPER_PLUS:
+		dev_info |= SLOT_SPEED_SS;
 		break;
 	case USB_SPEED_HIGH:
-		slot_ctx->dev_info |= LE32(SLOT_SPEED_HS);
+		dev_info |= SLOT_SPEED_HS;
 		break;
 	case USB_SPEED_FULL:
-		slot_ctx->dev_info |= LE32(SLOT_SPEED_FS);
+		dev_info |= SLOT_SPEED_FS;
 		break;
 	case USB_SPEED_LOW:
-		slot_ctx->dev_info |= LE32(SLOT_SPEED_LS);
+		dev_info |= SLOT_SPEED_LS;
 		break;
 	default:
 		/* Speed was set earlier, this shouldn't happen. */
 		Kprintf("Unknown device speed %ld\n", (ULONG)speed);
 	}
 
-	port_num = hop_portnr;
-	Kprintf("xhci_setup_addressable_virt_dev: port_num=%ld speed=%ld route=%ld\n", port_num, (ULONG)speed, (ULONG)route);
+	/* Low/full-speed devices behind a high-speed hub need TT info */
+	bool needs_tt = (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) &&
+		udev->parent &&
+		(udev->parent->speed == USB_SPEED_HIGH ||
+		 udev->parent->speed == USB_SPEED_SUPER ||
+		 udev->parent->speed == USB_SPEED_SUPER_PLUS);
+	bool have_tt_info = needs_tt && udev->tt_slot && udev->tt_port;
 
-	slot_ctx->dev_info2 |=
-			LE32(((port_num & ROOT_HUB_PORT_MASK) <<
-				ROOT_HUB_PORT_SHIFT));
+	slot_ctx->dev_info = LE32(dev_info);
+
+	port_num = hop_portnr;
+	Kprintf("xhci_setup_addressable_virt_dev: port_num=%ld speed=%ld route=%ld\n",
+		port_num, (ULONG)speed, (ULONG)udev->route);
+
+	u32 dev_info2 = LE32(slot_ctx->dev_info2);
+	dev_info2 &= ~((ROOT_HUB_PORT_MASK) << ROOT_HUB_PORT_SHIFT);
+	dev_info2 |= ROOT_HUB_PORT(port_num);
+	slot_ctx->dev_info2 = LE32(dev_info2);
+
+	u32 tt_info = 0;
+	if (have_tt_info)
+		tt_info = TT_SLOT(udev->tt_slot) | TT_PORT(udev->tt_port);
+	Kprintf("xhci_setup_addressable_virt_dev: needs_tt=%ld have_tt_info=%ld tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
+		(int)needs_tt, (int)have_tt_info,
+		(int)udev->tt_slot, (int)udev->tt_port, (ULONG)tt_info);
+	slot_ctx->tt_info = LE32(tt_info);
 
 	/* Step 4 - ring already allocated */
 	/* Step 5 */

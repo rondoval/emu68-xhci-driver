@@ -598,13 +598,8 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 static int xhci_set_configuration(struct usb_device *udev, int config_value)
 {
 	Kprintf("xhci_set_configuration: config_val=%ld\n", (LONG)config_value);
-	Kprintf("  udev=%lx\n", udev);
 
 	struct usb_config *cfg = NULL;
-	Kprintf("head=%lx tail=%lx tailPred=%lx\n",
-        (ULONG)udev->configurations.mlh_Head,
-        (ULONG)udev->configurations.mlh_Tail,
-        (ULONG)udev->configurations.mlh_TailPred);
 	for(struct MinNode *node = udev->configurations.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
 	{
 		struct usb_config *checking = (struct usb_config *)node;
@@ -751,13 +746,13 @@ static int xhci_address_device(struct usb_device *udev, int root_portnr)
 			u32 ps = xhci_readl(&hcor->portregs[p - 1].or_portsc);
 			if (ps & PORT_CONNECT) {
 				root_portnr = p;
-				/* Set speed hint for setup, if unknown */
-				switch (ps & DEV_SPEED_MASK) {
-				case XDEV_LS: udev->speed = USB_SPEED_LOW; break;
-				case XDEV_FS: udev->speed = USB_SPEED_FULL; break;
-				case XDEV_HS: udev->speed = USB_SPEED_HIGH; break;
-				case XDEV_SS: udev->speed = USB_SPEED_SUPER; break;
-				}
+				// /* Set speed hint for setup, if unknown */
+				// switch (ps & DEV_SPEED_MASK) {
+				// case XDEV_LS: udev->speed = USB_SPEED_LOW; break;
+				// case XDEV_FS: udev->speed = USB_SPEED_FULL; break;
+				// case XDEV_HS: udev->speed = USB_SPEED_HIGH; break;
+				// case XDEV_SS: udev->speed = USB_SPEED_SUPER; break;
+				// }
 				Kprintf("xhci_address_device: autodetected root_portnr=%ld speed=%ld\n", (ULONG)root_portnr, (ULONG)udev->speed);
 				break;
 			}
@@ -801,7 +796,7 @@ static int xhci_address_device(struct usb_device *udev, int root_portnr)
 	xhci_setup_addressable_virt_dev(ctrl, udev, root_portnr);
 
 	ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
-	Kprintf("xhci_address_device: ctrl_ctx=%lx in_ctx=%lx out_ctx=%lx\n",
+	KprintfH("xhci_address_device: ctrl_ctx=%lx in_ctx=%lx out_ctx=%lx\n",
 		(ULONG)ctrl_ctx, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx);
 	ctrl_ctx->add_flags = LE32(SLOT_FLAG | EP0_FLAG);
 	ctrl_ctx->drop_flags = 0;
@@ -882,16 +877,6 @@ static int _xhci_alloc_device(struct usb_device *udev)
 	struct xhci_ctrl *ctrl = xhci_get_ctrl(udev);
 	union xhci_trb *event;
 	int ret;
-
-	/*
-	 * Root hub will be first device to be initailized.
-	 * If this device is root-hub, don't do any xHC related
-	 * stuff.
-	 */
-	if (ctrl->rootdev == 0) {
-		udev->speed = USB_SPEED_SUPER;
-		return 0;
-	}
 
 	Kprintf("_xhci_alloc_device: queue ENABLE_SLOT\n");
 	xhci_queue_command(ctrl, 0, 0, 0, TRB_ENABLE_SLOT);
@@ -1145,6 +1130,7 @@ static int xhci_submit_root(struct usb_device *udev, void *buffer, struct devreq
 		break;
 	case USB_REQ_SET_ADDRESS | (USB_RECIP_DEVICE << 8):
 		Kprintf("USB_REQ_SET_ADDRESS rootdev=%ld\n", (LONG)LE16(req->value));
+		udev->speed = USB_SPEED_SUPER;
 		ctrl->rootdev = LE16(req->value);
 		break;
 	case DeviceOutRequest | USB_REQ_SET_CONFIGURATION:

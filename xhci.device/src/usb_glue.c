@@ -36,6 +36,78 @@ static inline struct glue_state *gst(struct XHCIUnit *unit) {
     return (struct glue_state *)unit->xhci_ctrl->privptr; /* reuse privptr */
 }
 
+static unsigned int route_depth(unsigned int route)
+{
+    unsigned int depth = 0;
+    while (route && depth < 5) {
+        route >>= 4;
+        depth++;
+    }
+    return depth;
+}
+
+static unsigned int build_route_string(struct usb_device *parent, unsigned int port)
+{
+    if (!parent)
+        return 0;
+
+    unsigned int depth = route_depth(parent->route);
+    if (depth >= 5)
+        return parent->route;
+
+    unsigned int nibble = port & 0xF;
+    if (nibble == 0)
+        return parent->route;
+
+    return parent->route | (nibble << (depth * 4));
+}
+
+static struct usb_device *resolve_parent(struct XHCIUnit *unit, UWORD addr)
+{
+    if (addr > 127)
+        return NULL;
+
+    struct glue_state *st = gst(unit);
+    struct glue_devctx *dc = &st->devs[addr];
+    if (!dc->used)
+        return NULL;
+
+    return &dc->udev;
+}
+
+static void update_device_topology(struct XHCIUnit *unit, struct usb_device *udev,
+                                   const struct IOUsbHWReq *io)
+{
+    if (io->iouh_Flags & UHFF_SPLITTRANS) {
+        struct usb_device *parent = resolve_parent(unit, io->iouh_SplitHubAddr & 0x7F);
+        if (parent) {
+            unsigned int port = io->iouh_SplitHubPort & 0xFF;
+            udev->parent = parent;
+            udev->portnr = port;
+            udev->route = build_route_string(parent, port);
+            udev->tt_slot = parent->slot_id;
+            udev->tt_port = port;
+            return;
+        }
+        /* Fall back to default routing if the parent isn't known yet */
+        udev->parent = NULL;
+        udev->portnr = 0;
+        udev->route = 0;
+        udev->tt_slot = 0;
+        udev->tt_port = 0;
+        return;
+    }
+
+    if (io->iouh_DevAddr == 0) {
+        /* Default-address transfers without split data target the root hub path */
+        udev->parent = NULL;
+        udev->portnr = 0;
+        udev->route = 0;
+        udev->tt_slot = 0;
+        udev->tt_port = 0;
+    }
+}
+
 
 static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
 {
@@ -129,15 +201,30 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
     }
     _memset(conf, 0, sizeof(*conf));
 
-    //TODO no data length validation
     struct usb_config_descriptor *desc = (struct usb_config_descriptor *)data;
     if (desc->bDescriptorType != USB_DT_CONFIG)
     {
         Kprintf("parse_config_descriptor: bad desc type %ld\n", (LONG)desc->bDescriptorType);
         goto error;
     }
-    CopyMem(desc, &conf->desc, sizeof(*desc));
-    data += desc->bLength;
+
+    UWORD total_len = LE16(desc->wTotalLength);
+    if ((UWORD)len < total_len)
+    {
+        Kprintf("parse_config_descriptor: short buffer len=%ld total_len=%ld\n", (LONG)len, (LONG)total_len);
+        total_len = (UWORD)len;
+    }
+
+    UBYTE *cursor = data;
+    UBYTE *end = data + total_len;
+    if (cursor + desc->bLength > end)
+    {
+        Kprintf("parse_config_descriptor: bad desc length %ld\n", (LONG)desc->bLength);
+        goto error;
+    }
+
+    CopyMem(desc, &conf->desc, sizeof(struct usb_config_descriptor));
+    cursor += desc->bLength;
 
     Kprintf("parse_config_descriptor: wTotalLength=%ld bNumInterfaces=%ld bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
         (LONG)LE16(desc->wTotalLength),
@@ -146,56 +233,120 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         (LONG)desc->iConfiguration,
         (LONG)desc->bmAttributes,
         (LONG)desc->bMaxPower);
-    Kprintf("parse_config_descriptor: udev=%lx\n", udev);
 
     // TODO in 3.x there are association descriptors here
-
     conf->no_of_if = desc->bNumInterfaces;
-    for(int i = 0; i < conf->no_of_if; i++)
+    int if_index = 0;
+    int ep_index = 0;
+    struct usb_interface *current_if = NULL;
+
+    while(cursor + 2 <= end)
     {
-        struct usb_interface_descriptor *ifd = (struct usb_interface_descriptor *)data;
-        if (ifd->bDescriptorType != USB_DT_INTERFACE)
+        UBYTE dlen = cursor[0];
+        UBYTE dtype = cursor[1];
+        if (dlen == 0)
         {
-            Kprintf("parse_config_descriptor: bad if desc type %ld\n", (LONG)ifd->bDescriptorType);
-            goto error;
+            Kprintf("parse_config_descriptor: zero length descriptor, aborting\n");
+            break;
         }
-        CopyMem(ifd, &conf->if_desc[i].desc, sizeof(*ifd));
-        data += ifd->bLength;
-
-        conf->if_desc[i].no_of_ep = ifd->bNumEndpoints;
-        conf->if_desc[i].num_altsetting = ifd->bAlternateSetting;
-        Kprintf("parse_config_descriptor: interface %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
-            (LONG)i,
-            (LONG)ifd->bInterfaceNumber,
-            (LONG)ifd->bAlternateSetting,
-            (LONG)ifd->bNumEndpoints,
-            (LONG)ifd->bInterfaceClass,
-            (LONG)ifd->bInterfaceSubClass,
-            (LONG)ifd->bInterfaceProtocol,
-            (LONG)ifd->iInterface);
-
-        for(int j = 0; j < conf->if_desc[i].no_of_ep; j++)
+        if (cursor + dlen > end)
         {
-            struct usb_endpoint_descriptor *epd = (struct usb_endpoint_descriptor *)data;
-            if (epd->bDescriptorType != USB_DT_ENDPOINT)
+            Kprintf("parse_config_descriptor: descriptor overruns buffer (type=%ld len=%ld)\n",
+                (LONG)dtype, (LONG)dlen);
+            break;
+        }
+
+        switch(dtype)
+        {
+            case USB_DT_INTERFACE:
             {
-                Kprintf("parse_config_descriptor: bad ep desc type %ld\n", (LONG)epd->bDescriptorType);
-                goto error;
+                struct usb_interface_descriptor *ifd = (struct usb_interface_descriptor *)cursor;
+                if (if_index >= USB_MAXINTERFACES)
+                {
+                    Kprintf("parse_config_descriptor: too many interfaces (%ld)\n", (LONG)if_index);
+                    goto error;
+                }
+
+                CopyMem(ifd, &conf->if_desc[if_index].desc, sizeof(struct usb_interface_descriptor));
+                conf->if_desc[if_index].no_of_ep = ifd->bNumEndpoints;
+                conf->if_desc[if_index].num_altsetting = ifd->bAlternateSetting;
+                Kprintf("parse_config_descriptor: interface %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
+                    (LONG)if_index,
+                    (LONG)ifd->bInterfaceNumber,
+                    (LONG)ifd->bAlternateSetting,
+                    (LONG)ifd->bNumEndpoints,
+                    (LONG)ifd->bInterfaceClass,
+                    (LONG)ifd->bInterfaceSubClass,
+                    (LONG)ifd->bInterfaceProtocol,
+                    (LONG)ifd->iInterface);
+
+                current_if = &conf->if_desc[if_index];
+                if_index++;
+                ep_index = 0; // reset endpoint index for new interface
+                break;
             }
-            CopyMem(epd, &conf->if_desc[i].ep_desc[j], sizeof(*epd));
-            data += epd->bLength;
-            Kprintf("  parse_config_descriptor: endpoint %ld: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%ld bInterval=%ld\n",
-                (LONG)j,
-                (LONG)epd->bEndpointAddress,
-                (LONG)epd->bmAttributes,
-                (LONG)LE16(epd->wMaxPacketSize),
-                (LONG)epd->bInterval);
-            // TODO copy usb_ss_ep_comp_descriptor associated with this endpoint
+            case USB_DT_ENDPOINT:
+            {
+                if (!current_if)
+                {
+                    Kprintf("parse_config_descriptor: endpoint without interface\n");
+                    break;
+                }
+                if (ep_index >= USB_MAXENDPOINTS)
+                {
+                    Kprintf("parse_config_descriptor: too many endpoints for interface %ld\n", (LONG)(if_index - 1));
+                    break;
+                }
+
+                struct usb_endpoint_descriptor *epd = (struct usb_endpoint_descriptor *)cursor;
+                CopyMem(epd, &current_if->ep_desc[ep_index], sizeof(struct usb_endpoint_descriptor));
+                Kprintf("  parse_config_descriptor: endpoint %ld: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%ld bInterval=%ld\n",
+                    (LONG)ep_index,
+                    (LONG)epd->bEndpointAddress,
+                    (LONG)epd->bmAttributes,
+                    (LONG)LE16(epd->wMaxPacketSize),
+                    (LONG)epd->bInterval);
+
+                ep_index++;
+                break;
+            }
+            case USB_DT_SS_ENDPOINT_COMP:
+            {
+                Kprintf("parse_config_descriptor: found SS EP COMP descriptor\n");
+                if (current_if && ep_index > 0)
+                {
+                    struct usb_ss_ep_comp_descriptor *comp = (struct usb_ss_ep_comp_descriptor *)cursor;
+                    CopyMem(comp, &current_if->ss_ep_comp_desc[ep_index - 1], sizeof(struct usb_ss_ep_comp_descriptor));
+                }
+                break;
+            }
+            default:
+                // Skip class- or vendor-specific descriptors gracefully.
+                Kprintf("parse_config_descriptor: found class/vendor-specific descriptor 0x%lx, len=%ld\n", (ULONG)dtype, (LONG)dlen);
+                break;
         }
-        Kprintf("parse_config_descriptor: interface %ld has %ld endpoints\n", i, conf->if_desc[i].no_of_ep);
-    }   
+
+        cursor += dlen;
+    }
     Kprintf("parse_config_descriptor: parsed config with %ld interfaces\n", (LONG)conf->no_of_if);
 
+    if(conf->no_of_if != if_index)
+    {
+        Kprintf("parse_config_descriptor: interface count mismatch %ld != %ld\n", (LONG)conf->no_of_if, (LONG)if_index);
+        goto error;
+    }
+
+    for(struct MinNode *n = udev->configurations.mlh_Head; n->mln_Succ; n = n->mln_Succ)
+    {
+        struct usb_config *oldconf = (struct usb_config *)n;
+        if (oldconf->desc.bConfigurationValue == conf->desc.bConfigurationValue)
+        {
+            Kprintf("parse_config_descriptor: removing old config with value %ld\n", (LONG)oldconf->desc.bConfigurationValue);
+            RemoveMinNode(n);
+            FreeVecPooled(udev->controller->memoryPool, oldconf);
+            break;
+        }
+    }
     AddHeadMinList(&udev->configurations, (struct MinNode*)conf);
     //TODO why AddTailMinList doesn't work here?
 
@@ -225,6 +376,15 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
                ? usb_rcvctrlpipe(udev, 0)
                : usb_sndctrlpipe(udev, 0);
 
+    if(io->iouh_Flags & UHFF_HIGHSPEED)
+        udev->speed = USB_SPEED_HIGH;
+    else if(io->iouh_Flags & UHFF_LOWSPEED)
+        udev->speed = USB_SPEED_LOW;
+    else
+        udev->speed = USB_SPEED_FULL;
+
+    update_device_topology(unit, udev, io);
+
     Kprintf("usb_glue_ctrl: dev=%lx addr=%ld pipe=%lx bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx flags=%lx timeout=%ld maxPktSize=%ld\n",
         (ULONG)udev, (ULONG)udev->devnum, pipe,
         (ULONG)io->iouh_SetupData.bmRequestType,
@@ -235,6 +395,20 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         (ULONG)io->iouh_Flags,
         (ULONG)io->iouh_NakTimeout,
         (ULONG)io->iouh_MaxPktSize);
+
+    Kprintf("usb_glue_ctrl: split_hub_addr=%lx split_hub_port=%ld\n", 
+        (ULONG)io->iouh_SplitHubAddr,
+        (ULONG)io->iouh_SplitHubPort);
+
+    Kprintf("usb_glue_ctrl: parent=%lx portnr=%ld route=%ld tt_slot=%ld tt_port=%ld\n",
+        (ULONG)udev->parent,
+        (ULONG)udev->portnr,
+        (ULONG)udev->route,
+        (ULONG)udev->tt_slot,
+        (ULONG)udev->tt_port);
+    Kprintf("usb_glue_ctrl: maxpacketsize0=%lx speed=%ld\n",
+        (ULONG)udev->maxpacketsize0,
+        (LONG)udev->speed);
 
     struct devrequest req;
     req.requesttype = io->iouh_SetupData.bmRequestType;
