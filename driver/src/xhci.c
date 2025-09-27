@@ -108,14 +108,6 @@ static struct descriptor {
 	},
 };
 
-static inline void xhci_copy_bytes(void *dst, const void *src, unsigned int len)
-{
-	unsigned char *d = (unsigned char *)dst;
-	const unsigned char *s = (const unsigned char *)src;
-	for (unsigned int i = 0; i < len; ++i)
-		d[i] = s[i];
-}
-
 struct xhci_ctrl *xhci_get_ctrl(struct usb_device *udev)
 {
 	return udev->controller;
@@ -721,12 +713,10 @@ static int xhci_set_configuration(struct usb_device *udev, int config_value)
 		ifdesc = &cfg->if_desc[ifnum];
 		err = xhci_init_ep_contexts_if(udev, ctrl, virt_dev, ifdesc);
 		if (err < 0) {
-			FreeVecPooled(udev->controller->memoryPool, cfg);
 			return err;
 		}
 	}
 
-	FreeVecPooled(udev->controller->memoryPool, cfg);
 	return xhci_configure_endpoints(udev, false);
 }
 
