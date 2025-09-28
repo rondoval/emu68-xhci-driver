@@ -1197,6 +1197,14 @@ static inline void xhci_writeq(__le64 volatile *regs, const u64 val)
 /* true: Controller Not Ready to accept doorbell or op reg writes after reset */
 #define XHCI_STS_CNR		(1 << 11)
 
+struct xhci_dma_bounce {
+	struct xhci_dma_bounce *next;
+	void *orig;
+	void *bounce;
+	size_t size;
+	size_t alloc_len;
+};
+
 struct xhci_ctrl {
 	struct xhci_hccr *hccr;	/* R/O registers, not need for volatile */
 	struct xhci_hcor *hcor;
@@ -1218,6 +1226,7 @@ struct xhci_ctrl {
 	u16 hci_version;
 	int page_size;
 	u32 quirks;
+	struct xhci_dma_bounce *dma_bounce_list;
 
 	APTR memoryPool; //TODO initialize somewhere, then clean up
 	struct pci_device *pci_dev; //TODO: set somewhere
@@ -1258,6 +1267,10 @@ int xhci_check_maxpacket(struct usb_device *udev, unsigned int maxpacket);
 void xhci_flush_cache(uintptr_t addr, u32 type_len);
 void xhci_inval_cache(uintptr_t addr, u32 type_len);
 void xhci_cleanup(struct xhci_ctrl *ctrl);
+dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr,
+			  size_t size);
+void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr,
+		     size_t size);
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 				  BOOL link_trbs);
 int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);
@@ -1286,24 +1299,5 @@ int xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 extern struct dm_usb_ops xhci_usb_ops;
 
 struct xhci_ctrl *xhci_get_ctrl(struct usb_device *udev);
-
-static inline dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr,
-				      size_t size)
-{
-	(void)size;
-	(void)ctrl;
-	/*return dev_phys_to_bus(xhci_to_dev(ctrl), virt_to_phys(addr));*/
-	// i think we have identity mapping <4GB
-	return (dma_addr_t)addr;
-}
-
-static inline void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr,
-				  size_t size)
-{
-	(void)size;
-	(void)ctrl;
-	(void)addr;
-	/* do nothing */
-}
 
 #endif /* HOST_XHCI_H_ */

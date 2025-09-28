@@ -113,6 +113,75 @@ struct xhci_ctrl *xhci_get_ctrl(struct usb_device *udev)
 	return udev->controller;
 }
 
+dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, size_t size)
+{
+	if (!ctrl || !addr || size == 0)
+		return (dma_addr_t)(uintptr_t)addr;
+
+	if ((((uintptr_t)addr) & ARCH_DMA_MINALIGN_MASK) == 0)
+		return (dma_addr_t)(uintptr_t)addr;
+
+	if (!ctrl->memoryPool)
+		return (dma_addr_t)(uintptr_t)addr;
+
+	size_t alloc_len = ALIGN(size, ARCH_DMA_MINALIGN);
+	struct xhci_dma_bounce *bounce =
+		AllocVecPooled(ctrl->memoryPool, sizeof(*bounce));
+	if (!bounce) {
+		Kprintf("xhci_dma_map: failed to allocate metadata for %lx len=%ld\n",
+			(ULONG)addr, (LONG)size);
+		return (dma_addr_t)(uintptr_t)addr;
+	}
+
+	void *aligned = memalign(ctrl->memoryPool, ARCH_DMA_MINALIGN, alloc_len);
+	if (!aligned) {
+		Kprintf("xhci_dma_map: failed to allocate bounce buffer for %lx len=%ld\n",
+			(ULONG)addr, (LONG)size);
+		FreeVecPooled(ctrl->memoryPool, bounce);
+		return (dma_addr_t)(uintptr_t)addr;
+	}
+
+	CopyMem(addr, aligned, size);
+	xhci_flush_cache((uintptr_t)aligned, alloc_len);
+
+	bounce->orig = addr;
+	bounce->bounce = aligned;
+	bounce->size = size;
+	bounce->alloc_len = alloc_len;
+	bounce->next = ctrl->dma_bounce_list;
+	ctrl->dma_bounce_list = bounce;
+
+	KprintfH("xhci_dma_map: bounce %lx -> %lx len=%ld\n",
+		 (ULONG)addr, (ULONG)aligned, (LONG)size);
+
+	return (dma_addr_t)(uintptr_t)aligned;
+}
+
+void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, size_t size)
+{
+	if (!ctrl || addr == 0)
+		return;
+
+	(void)size;
+
+	struct xhci_dma_bounce **link = &ctrl->dma_bounce_list;
+	while (*link) {
+		struct xhci_dma_bounce *node = *link;
+		if ((dma_addr_t)(uintptr_t)node->bounce == addr) {
+			xhci_inval_cache((uintptr_t)node->bounce, node->alloc_len);
+			if (node->size)
+				CopyMem(node->bounce, node->orig, node->size);
+			memalign_free(ctrl->memoryPool, node->bounce);
+			*link = node->next;
+			FreeVecPooled(ctrl->memoryPool, node);
+			KprintfH("xhci_dma_unmap: restored %lx from %lx len=%ld\n",
+				 (ULONG)node->orig, (ULONG)addr, (LONG)size);
+			return;
+		}
+		link = &(*link)->next;
+	}
+}
+
 /**
  * Waits for as per specified amount of time
  * for the "result" to match with "done"
