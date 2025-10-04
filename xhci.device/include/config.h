@@ -17,4 +17,8 @@
 #define DEVICE_REVISION 1
 #endif
 
+#define STACK_SIZE 65535
+#define UNIT_TASK_PRIORITY 0
+#define UNIT_TASK_POLL_DELAY_MS 200
+
 #endif
