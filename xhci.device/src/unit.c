@@ -23,15 +23,10 @@
 #include <devices/usbhardware.h>
 #include <pci_types.h>
 #include <pci.h>
-#include <usb.h>
-#include <xhci.h>
-/* glue */
+#include <xhci/usb.h>
+#include <xhci/xhci.h>
 #include <usb_glue.h>
 
-// #include <exec/memory.h>
-// #include <utility/utility.h>
-// #include <devtree.h>
-// #include <pcie_brcmstb.h>
 
 static struct pci_controller *pcie = NULL;
 extern struct MinList pci_bus_list;
@@ -258,12 +253,6 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	}
 
 	unit->xhci_ctrl = xhci_ctrl;
-	/* Initialize glue mapping */
-	result = usb_glue_init(unit);
-	if (result != UHIOERR_NO_ERROR) {
-		Kprintf("[xhci] %s: usb_glue_init failed: %ld\n", __func__, result);
-		goto err_deregister;
-	}
 
 	result = UnitTaskStart(unit);
 	if (result != UHIOERR_NO_ERROR)
@@ -273,7 +262,6 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	}
 	return UHIOERR_NO_ERROR;
 
-err_deregister:
 	xhci_deregister(xhci_ctrl);
 err_del_ctrl:
 	FreeMem(xhci_ctrl, sizeof(*xhci_ctrl));
@@ -293,7 +281,6 @@ int UnitClose(struct XHCIUnit *unit)
 	{
 		Kprintf("[xhci] %s: Last opener closed, cleaning up unit\n", __func__);
 		UnitTaskStop(unit);
-		usb_glue_shutdown(unit);
 		xhci_deregister(unit->xhci_ctrl);
 		FreeMem(unit->xhci_ctrl, sizeof(*unit->xhci_ctrl));
 		DeletePool(unit->memoryPool);
