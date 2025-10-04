@@ -13,10 +13,11 @@
 
 #include <exec/lists.h>
 
-#include <stdbool.h>
 #include <compat.h>
-#include <usb_defs.h>
-#include <ch9.h>
+#include <xhci/usb_defs.h>
+#include <xhci/ch9.h>
+#include <xhci/xhci-events.h>
+#include <devices/usbhardware.h>
 
 /*
  * The EHCI spec says that we must align to at least 32 bytes.  However,
@@ -53,15 +54,6 @@
  */
 #define USB_MAX_ACTIVE_INTERFACES	2
 
-/* device request (setup) */
-struct devrequest {
-	__u8	requesttype;
-	__u8	request;
-	__le16	value;
-	__le16	index;
-	__le16	length;
-} __attribute__ ((packed));
-
 /* Interface */
 struct usb_interface {
 	struct usb_interface_descriptor desc;
@@ -96,6 +88,17 @@ enum {
 	PACKET_SIZE_64  = 3,
 };
 
+
+enum usb_device_state {
+	USB_DEV_STATE_DETACHED = 0,
+	USB_DEV_STATE_SLOT_ENABLED,
+	USB_DEV_STATE_ADDRESSED,
+	USB_DEV_STATE_CONFIGURING,
+	USB_DEV_STATE_OPERATIONAL,
+	USB_DEV_STATE_FAILED,
+	USB_DEV_STATE_RECOVERING
+};
+
 /**
  * struct usb_device - information about a USB device
  *
@@ -110,7 +113,9 @@ enum {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
+	BOOL used;
 	unsigned int	devnum;			/* Device number on USB bus */
+	unsigned int	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */
 
 	/* Maximum packet size; one of: PACKET_SIZE_* */
@@ -118,21 +123,17 @@ struct usb_device {
 
 	struct MinList configurations; /* configurations captured from GET_CONFIGURATION replies */
 
+	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
 	unsigned int portnr;          /* Downstream port number on parent hub (1-based) */
 	unsigned int route;           /* xHCI route string nibble-packed */
 	unsigned int tt_slot;         /* Parent hub slot ID for TT scheduling */
 	unsigned int tt_port;         /* Parent hub downstream port for TT scheduling */
 
-	/*
-	 * Child devices -  if this is a hub device
-	 * Each instance needs its own set of data structures.
-	 */
-	unsigned long status;
-	int act_len;			/* transferred bytes */
-	/* slot_id - for xHCI enabled devices */
-	unsigned int slot_id;
-
+	/* Requests state data */
+	struct ep_context ep_context[USB_MAXENDPOINTS];
+	enum usb_device_state state;
+	
 	struct xhci_ctrl *controller; /* xHCI controller */
 };
 
@@ -142,16 +143,6 @@ struct usb_device {
  */
 
 #define usb_reset_root_port(dev)
-
-int submit_bulk_msg(struct usb_device *dev, unsigned long pipe,
-		void *buffer, int transfer_len, unsigned int maxpacket,
-		unsigned int timeout_ms);
-int submit_control_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
-		int transfer_len, struct devrequest *setup, unsigned int maxpacket,
-		unsigned int timeout_ms);
-int submit_int_msg(struct usb_device *dev, unsigned long pipe, void *buffer,
-		int transfer_len, unsigned int maxpacket, int interval, bool nonblock);
-
 
 /* Defines */
 

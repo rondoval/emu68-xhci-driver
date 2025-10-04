@@ -34,9 +34,6 @@
 #define __LINUX_USB_CH9_H
 
 #include <compat.h>
-// #include <linux/types.h>	/* __u8 etc */
-// #include <asm/byteorder.h>	/* LE16 */
-// #include <asm/unaligned.h>	/* get_unaligned() */
 
 /*-------------------------------------------------------------------------*/
 
