@@ -164,15 +164,11 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     if (cmd->req)
     {
-        unsigned long pipe = (cmd->req->iouh_SetupData.bmRequestType & URTF_IN)
-                                 ? usb_rcvctrlpipe(cmd->udev, 0)
-                                 : usb_sndctrlpipe(cmd->udev, 0);
-
         unsigned int timeout = XHCI_TIMEOUT;
         if (cmd->req->iouh_Flags * UHFF_NAKTIMEOUT)
             timeout = cmd->req->iouh_NakTimeout;
 
-        xhci_ctrl_tx(cmd->udev, pipe, &cmd->req->iouh_SetupData, cmd->req->iouh_Length, cmd->req->iouh_Data, cmd->req->iouh_MaxPktSize, timeout);
+        xhci_ctrl_tx(cmd->udev, cmd->req, timeout);
     }
 }
 
