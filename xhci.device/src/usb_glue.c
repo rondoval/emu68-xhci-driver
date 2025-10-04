@@ -10,8 +10,9 @@
 #include <devices/usb.h>
 #include <devices/usbhardware.h>
 
-#include <usb.h>
-#include <xhci.h>
+#include <xhci/usb.h>
+#include <xhci/xhci.h>
+#include <xhci/xhci-commands.h>
 
 #include <device.h>
 #include <debug.h>
@@ -20,26 +21,11 @@
 
 #include "usb_glue.h"
 
-/* Minimal per-device context bound to a devaddr */
-struct glue_devctx {
-    struct usb_device udev;         /* driver-visible device */
-    UBYTE used;
-    UBYTE in_flight[USB_MAXENDPOINTS][2]; /* [ep][dir] boolean */
-};
-
-/* Keep a small table for devaddr 0..127 */
-struct glue_state {
-    struct glue_devctx devs[128];
-};
-
-static inline struct glue_state *gst(struct XHCIUnit *unit) {
-    return (struct glue_state *)unit->xhci_ctrl->privptr; /* reuse privptr */
-}
-
 static unsigned int route_depth(unsigned int route)
 {
     unsigned int depth = 0;
-    while (route && depth < 5) {
+    while (route && depth < 5)
+    {
         route >>= 4;
         depth++;
     }
@@ -67,20 +53,21 @@ static struct usb_device *resolve_parent(struct XHCIUnit *unit, UWORD addr)
     if (addr > 127)
         return NULL;
 
-    struct glue_state *st = gst(unit);
-    struct glue_devctx *dc = &st->devs[addr];
-    if (!dc->used)
+    struct usb_device *udev = &unit->xhci_ctrl->devices[addr];
+    if (!udev->used)
         return NULL;
 
-    return &dc->udev;
+    return udev;
 }
 
 static void update_device_topology(struct XHCIUnit *unit, struct usb_device *udev,
                                    const struct IOUsbHWReq *io)
 {
-    if (io->iouh_Flags & UHFF_SPLITTRANS) {
+    if (io->iouh_Flags & UHFF_SPLITTRANS)
+    {
         struct usb_device *parent = resolve_parent(unit, io->iouh_SplitHubAddr & 0x7F);
-        if (parent) {
+        if (parent)
+        {
             unsigned int port = io->iouh_SplitHubPort & 0xFF;
             udev->parent = parent;
             udev->portnr = port;
@@ -98,7 +85,8 @@ static void update_device_topology(struct XHCIUnit *unit, struct usb_device *ude
         return;
     }
 
-    if (io->iouh_DevAddr == 0) {
+    if (io->iouh_DevAddr == 0)
+    {
         /* Default-address transfers without split data target the root hub path */
         udev->parent = NULL;
         udev->portnr = 0;
@@ -108,81 +96,28 @@ static void update_device_topology(struct XHCIUnit *unit, struct usb_device *ude
     }
 }
 
-
 static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
 {
     if (devaddr > 127)
         return NULL;
-    struct glue_state *st = gst(unit);
-    struct glue_devctx *dc = &st->devs[devaddr];
-    if (!dc->used) {
-        _memset(dc, 0, sizeof(*dc));
-        dc->used = 1;
-        dc->udev.devnum = devaddr;
-        dc->udev.controller = unit->xhci_ctrl;
+
+    struct usb_device *udev = &unit->xhci_ctrl->devices[devaddr];
+    if (!udev->used)
+    {
+        _memset(udev, 0, sizeof(struct usb_device));
+        udev->used = 1;
+        udev->devnum = devaddr;
+        udev->controller = unit->xhci_ctrl;
         /* Default EP0 packet size for new address (8) */
-        dc->udev.maxpacketsize0 = PACKET_SIZE_8;
+        udev->maxpacketsize0 = PACKET_SIZE_8;
         /* Default toggles cleared */
 
-        _NewMinList(&dc->udev.configurations);
+        _NewMinList(&udev->configurations);
+
+        for (int i = 0; i < USB_MAXENDPOINTS; ++i)
+            _NewMinList(&udev->ep_context[i].req_list);
     }
-    return &dc->udev;
-}
-
-static inline int map_status_to_uhio(int usb_status)
-{
-    switch (usb_status) {
-    case 0:
-        return UHIOERR_NO_ERROR;
-    case USB_ST_STALLED:
-        return UHIOERR_STALL;
-    case USB_ST_NAK_REC:
-        return UHIOERR_NAKTIMEOUT; /* best fit */
-    case USB_ST_CRC_ERR:
-        return UHIOERR_CRCERROR;
-    case USB_ST_BABBLE_DET:
-        return UHIOERR_OVERFLOW;
-    case USB_ST_BIT_ERR:
-        return UHIOERR_HOSTERROR;
-    default:
-        return UHIOERR_HOSTERROR;
-    }
-}
-
-int usb_glue_init(struct XHCIUnit *unit)
-{
-    if (!unit || !unit->xhci_ctrl)
-        return UHIOERR_BADPARAMS;
-    if (!unit->xhci_ctrl->privptr) {
-        struct glue_state *st = AllocMem(sizeof(struct glue_state), MEMF_PUBLIC|MEMF_CLEAR);
-        if (!st)
-            return UHIOERR_OUTOFMEMORY;
-        unit->xhci_ctrl->privptr = st;
-    }
-    return UHIOERR_NO_ERROR;
-}
-
-void usb_glue_shutdown(struct XHCIUnit *unit)
-{
-    //TODO clean up and remove usb_device structures
-    if (unit && unit->xhci_ctrl && unit->xhci_ctrl->privptr) {
-        FreeMem(unit->xhci_ctrl->privptr, sizeof(struct glue_state));
-        unit->xhci_ctrl->privptr = NULL;
-    }
-}
-
-/* Per-endpoint serialization (simple guard). dir: 0=OUT,1=IN */
-static BOOL ep_try_lock(struct glue_devctx *dc, UWORD ep, UWORD dir)
-{
-    if (ep >= USB_MAXENDPOINTS) return FALSE;
-    if (dc->in_flight[ep][dir]) return FALSE;
-    dc->in_flight[ep][dir] = 1;
-    return TRUE;
-}
-
-static void ep_unlock(struct glue_devctx *dc, UWORD ep, UWORD dir)
-{
-    if (ep < USB_MAXENDPOINTS) dc->in_flight[ep][dir] = 0;
+    return udev;
 }
 
 static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD len)
@@ -227,12 +162,12 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
     cursor += desc->bLength;
 
     Kprintf("parse_config_descriptor: wTotalLength=%ld bNumInterfaces=%ld bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
-        (LONG)LE16(desc->wTotalLength),
-        (LONG)desc->bNumInterfaces,
-        (LONG)desc->bConfigurationValue,
-        (LONG)desc->iConfiguration,
-        (LONG)desc->bmAttributes,
-        (LONG)desc->bMaxPower);
+            (LONG)LE16(desc->wTotalLength),
+            (LONG)desc->bNumInterfaces,
+            (LONG)desc->bConfigurationValue,
+            (LONG)desc->iConfiguration,
+            (LONG)desc->bmAttributes,
+            (LONG)desc->bMaxPower);
 
     // TODO in 3.x there are association descriptors here
     conf->no_of_if = desc->bNumInterfaces;
@@ -240,7 +175,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
     int ep_index = 0;
     struct usb_interface *current_if = NULL;
 
-    while(cursor + 2 <= end)
+    while (cursor + 2 <= end)
     {
         UBYTE dlen = cursor[0];
         UBYTE dtype = cursor[1];
@@ -252,25 +187,25 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         if (cursor + dlen > end)
         {
             Kprintf("parse_config_descriptor: descriptor overruns buffer (type=%ld len=%ld)\n",
-                (LONG)dtype, (LONG)dlen);
+                    (LONG)dtype, (LONG)dlen);
             break;
         }
 
-        switch(dtype)
+        switch (dtype)
         {
-            case USB_DT_INTERFACE:
+        case USB_DT_INTERFACE:
+        {
+            struct usb_interface_descriptor *ifd = (struct usb_interface_descriptor *)cursor;
+            if (if_index >= USB_MAXINTERFACES)
             {
-                struct usb_interface_descriptor *ifd = (struct usb_interface_descriptor *)cursor;
-                if (if_index >= USB_MAXINTERFACES)
-                {
-                    Kprintf("parse_config_descriptor: too many interfaces (%ld)\n", (LONG)if_index);
-                    goto error;
-                }
+                Kprintf("parse_config_descriptor: too many interfaces (%ld)\n", (LONG)if_index);
+                goto error;
+            }
 
-                CopyMem(ifd, &conf->if_desc[if_index].desc, sizeof(struct usb_interface_descriptor));
-                conf->if_desc[if_index].no_of_ep = ifd->bNumEndpoints;
-                conf->if_desc[if_index].num_altsetting = ifd->bAlternateSetting;
-                Kprintf("parse_config_descriptor: interface %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
+            CopyMem(ifd, &conf->if_desc[if_index].desc, sizeof(struct usb_interface_descriptor));
+            conf->if_desc[if_index].no_of_ep = ifd->bNumEndpoints;
+            conf->if_desc[if_index].num_altsetting = ifd->bAlternateSetting;
+            Kprintf("parse_config_descriptor: interface %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
                     (LONG)if_index,
                     (LONG)ifd->bInterfaceNumber,
                     (LONG)ifd->bAlternateSetting,
@@ -280,63 +215,63 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
                     (LONG)ifd->bInterfaceProtocol,
                     (LONG)ifd->iInterface);
 
-                current_if = &conf->if_desc[if_index];
-                if_index++;
-                ep_index = 0; // reset endpoint index for new interface
+            current_if = &conf->if_desc[if_index];
+            if_index++;
+            ep_index = 0; // reset endpoint index for new interface
+            break;
+        }
+        case USB_DT_ENDPOINT:
+        {
+            if (!current_if)
+            {
+                Kprintf("parse_config_descriptor: endpoint without interface\n");
                 break;
             }
-            case USB_DT_ENDPOINT:
+            if (ep_index >= USB_MAXENDPOINTS)
             {
-                if (!current_if)
-                {
-                    Kprintf("parse_config_descriptor: endpoint without interface\n");
-                    break;
-                }
-                if (ep_index >= USB_MAXENDPOINTS)
-                {
-                    Kprintf("parse_config_descriptor: too many endpoints for interface %ld\n", (LONG)(if_index - 1));
-                    break;
-                }
+                Kprintf("parse_config_descriptor: too many endpoints for interface %ld\n", (LONG)(if_index - 1));
+                break;
+            }
 
-                struct usb_endpoint_descriptor *epd = (struct usb_endpoint_descriptor *)cursor;
-                CopyMem(epd, &current_if->ep_desc[ep_index], sizeof(struct usb_endpoint_descriptor));
-                Kprintf("  parse_config_descriptor: endpoint %ld: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%ld bInterval=%ld\n",
+            struct usb_endpoint_descriptor *epd = (struct usb_endpoint_descriptor *)cursor;
+            CopyMem(epd, &current_if->ep_desc[ep_index], sizeof(struct usb_endpoint_descriptor));
+            Kprintf("  parse_config_descriptor: endpoint %ld: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%ld bInterval=%ld\n",
                     (LONG)ep_index,
                     (LONG)epd->bEndpointAddress,
                     (LONG)epd->bmAttributes,
                     (LONG)LE16(epd->wMaxPacketSize),
                     (LONG)epd->bInterval);
 
-                ep_index++;
-                break;
-            }
-            case USB_DT_SS_ENDPOINT_COMP:
+            ep_index++;
+            break;
+        }
+        case USB_DT_SS_ENDPOINT_COMP:
+        {
+            Kprintf("parse_config_descriptor: found SS EP COMP descriptor\n");
+            if (current_if && ep_index > 0)
             {
-                Kprintf("parse_config_descriptor: found SS EP COMP descriptor\n");
-                if (current_if && ep_index > 0)
-                {
-                    struct usb_ss_ep_comp_descriptor *comp = (struct usb_ss_ep_comp_descriptor *)cursor;
-                    CopyMem(comp, &current_if->ss_ep_comp_desc[ep_index - 1], sizeof(struct usb_ss_ep_comp_descriptor));
-                }
-                break;
+                struct usb_ss_ep_comp_descriptor *comp = (struct usb_ss_ep_comp_descriptor *)cursor;
+                CopyMem(comp, &current_if->ss_ep_comp_desc[ep_index - 1], sizeof(struct usb_ss_ep_comp_descriptor));
             }
-            default:
-                // Skip class- or vendor-specific descriptors gracefully.
-                Kprintf("parse_config_descriptor: found class/vendor-specific descriptor 0x%lx, len=%ld\n", (ULONG)dtype, (LONG)dlen);
-                break;
+            break;
+        }
+        default:
+            // Skip class- or vendor-specific descriptors gracefully.
+            Kprintf("parse_config_descriptor: found class/vendor-specific descriptor 0x%lx, len=%ld\n", (ULONG)dtype, (LONG)dlen);
+            break;
         }
 
         cursor += dlen;
     }
     Kprintf("parse_config_descriptor: parsed config with %ld interfaces\n", (LONG)conf->no_of_if);
 
-    if(conf->no_of_if != if_index)
+    if (conf->no_of_if != if_index)
     {
         Kprintf("parse_config_descriptor: interface count mismatch %ld != %ld\n", (LONG)conf->no_of_if, (LONG)if_index);
         goto error;
     }
 
-    for(struct MinNode *n = udev->configurations.mlh_Head; n->mln_Succ; n = n->mln_Succ)
+    for (struct MinNode *n = udev->configurations.mlh_Head; n->mln_Succ; n = n->mln_Succ)
     {
         struct usb_config *oldconf = (struct usb_config *)n;
         if (oldconf->desc.bConfigurationValue == conf->desc.bConfigurationValue)
@@ -347,230 +282,183 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
             break;
         }
     }
-    AddHeadMinList(&udev->configurations, (struct MinNode*)conf);
-    //TODO why AddTailMinList doesn't work here?
+    AddHeadMinList(&udev->configurations, (struct MinNode *)conf);
+    // TODO why AddTailMinList doesn't work here?
 
     return;
 
 error:
     FreeVecPooled(udev->controller->memoryPool, conf);
-
 }
 
 int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
-    if (!udev) { io->iouh_Req.io_Error = UHIOERR_BADPARAMS; return COMMAND_PROCESSED; }
-
-    struct glue_devctx *dc = &gst(unit)->devs[io->iouh_DevAddr];
-    if (!ep_try_lock(dc, 0, 1)) { io->iouh_Req.io_Error = UHIOERR_HOSTERROR; return COMMAND_PROCESSED; }
+    if (!udev)
+    {
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return COMMAND_PROCESSED;
+    }
 
     /* Update EP0 MPS hint from IO if provided */
     unsigned int maxpkt_hint = (unsigned int)io->iouh_MaxPktSize;
-    if (maxpkt_hint == 8) udev->maxpacketsize0 = PACKET_SIZE_8;
-    else if (maxpkt_hint == 16) udev->maxpacketsize0 = PACKET_SIZE_16;
-    else if (maxpkt_hint == 32) udev->maxpacketsize0 = PACKET_SIZE_32;
-    else udev->maxpacketsize0 = PACKET_SIZE_64;
+    if (maxpkt_hint == 8)
+        udev->maxpacketsize0 = PACKET_SIZE_8;
+    else if (maxpkt_hint == 16)
+        udev->maxpacketsize0 = PACKET_SIZE_16;
+    else if (maxpkt_hint == 32)
+        udev->maxpacketsize0 = PACKET_SIZE_32;
+    else
+        udev->maxpacketsize0 = PACKET_SIZE_64;
 
-    unsigned long pipe = (io->iouh_SetupData.bmRequestType & URTF_IN)
-               ? usb_rcvctrlpipe(udev, 0)
-               : usb_sndctrlpipe(udev, 0);
-
-    if(io->iouh_Flags & UHFF_HIGHSPEED)
+    if (io->iouh_Flags & UHFF_HIGHSPEED)
         udev->speed = USB_SPEED_HIGH;
-    else if(io->iouh_Flags & UHFF_LOWSPEED)
+    else if (io->iouh_Flags & UHFF_LOWSPEED)
         udev->speed = USB_SPEED_LOW;
     else
         udev->speed = USB_SPEED_FULL;
 
     update_device_topology(unit, udev, io);
 
-    Kprintf("usb_glue_ctrl: dev=%lx addr=%ld pipe=%lx bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx flags=%lx timeout=%ld maxPktSize=%ld\n",
-        (ULONG)udev, (ULONG)udev->devnum, pipe,
-        (ULONG)io->iouh_SetupData.bmRequestType,
-        (ULONG)io->iouh_SetupData.bRequest,
-        (ULONG)io->iouh_SetupData.wValue,
-        (ULONG)io->iouh_SetupData.wIndex,
-        (ULONG)io->iouh_SetupData.wLength,
-        (ULONG)io->iouh_Flags,
-        (ULONG)io->iouh_NakTimeout,
-        (ULONG)io->iouh_MaxPktSize);
+    {
+        Kprintf("usb_glue_ctrl: dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx flags=%lx timeout=%ld maxPktSize=%ld\n",
+                (ULONG)udev, (ULONG)udev->devnum,
+                (ULONG)io->iouh_SetupData.bmRequestType,
+                (ULONG)io->iouh_SetupData.bRequest,
+                (ULONG)io->iouh_SetupData.wValue,
+                (ULONG)io->iouh_SetupData.wIndex,
+                (ULONG)io->iouh_SetupData.wLength,
+                (ULONG)io->iouh_Flags,
+                (ULONG)io->iouh_NakTimeout,
+                (ULONG)io->iouh_MaxPktSize);
 
-    Kprintf("usb_glue_ctrl: split_hub_addr=%lx split_hub_port=%ld\n", 
-        (ULONG)io->iouh_SplitHubAddr,
-        (ULONG)io->iouh_SplitHubPort);
+        Kprintf("usb_glue_ctrl: split_hub_addr=%lx split_hub_port=%ld\n",
+                (ULONG)io->iouh_SplitHubAddr,
+                (ULONG)io->iouh_SplitHubPort);
 
-    Kprintf("usb_glue_ctrl: parent=%lx portnr=%ld route=%ld tt_slot=%ld tt_port=%ld\n",
-        (ULONG)udev->parent,
-        (ULONG)udev->portnr,
-        (ULONG)udev->route,
-        (ULONG)udev->tt_slot,
-        (ULONG)udev->tt_port);
-    Kprintf("usb_glue_ctrl: maxpacketsize0=%lx speed=%ld\n",
-        (ULONG)udev->maxpacketsize0,
-        (LONG)udev->speed);
-
-    struct devrequest req;
-    req.requesttype = io->iouh_SetupData.bmRequestType;
-    req.request = io->iouh_SetupData.bRequest;
-    req.value = io->iouh_SetupData.wValue;
-    req.index = io->iouh_SetupData.wIndex;
-    req.length = io->iouh_SetupData.wLength;
-
-    void *buf = io->iouh_Data;
-    int len = (int)io->iouh_Length;
-
-    int ret;
-    if ((io->iouh_Flags & UHFF_NAKTIMEOUT) && io->iouh_NakTimeout)
-        ret = submit_control_msg(udev, pipe, buf, len, &req, maxpkt_hint,
-                                 (unsigned int)io->iouh_NakTimeout);
-    else
-        ret = submit_control_msg(udev, pipe, buf, len, &req, maxpkt_hint, XHCI_TIMEOUT);
-    int uherr = map_status_to_uhio(udev->status);
-    io->iouh_Actual = (ULONG)udev->act_len;
-    io->iouh_Req.io_Error = (ret == 0) ? UHIOERR_NO_ERROR : uherr;
-
-    /* If this was a successful GET_DESCRIPTOR(STRING) IN transfer and we got
-     * an odd number of bytes, clamp to even to avoid a dangling half UTF-16
-     * code unit, which Poseidon may display as a trailing '?'.
-     */
-    if (ret == 0 && (req.request == USB_REQ_GET_DESCRIPTOR) &&
-        (req.requesttype & USB_DIR_IN) && (((LE16(req.value)) >> 8) == USB_DT_STRING)) {
-        if ((udev->act_len & 1) != 0) {
-            Kprintf("usb_glue_ctrl: clamping odd string length %ld to %ld\n",
-                    (LONG)udev->act_len, (LONG)(udev->act_len - 1));
-            udev->act_len -= 1;
-            io->iouh_Actual = (ULONG)udev->act_len;
-        }
+        Kprintf("usb_glue_ctrl: parent=%lx portnr=%ld route=%ld tt_slot=%ld tt_port=%ld\n",
+                (ULONG)udev->parent,
+                (ULONG)udev->portnr,
+                (ULONG)udev->route,
+                (ULONG)udev->tt_slot,
+                (ULONG)udev->tt_port);
+        Kprintf("usb_glue_ctrl: maxpacketsize0=%lx speed=%ld\n",
+                (ULONG)udev->maxpacketsize0,
+                (LONG)udev->speed);
     }
 
-    Kprintf("usb_glue_ctrl: ret=%ld uherr=%ld udev->status=%ld act_len=%ld\n",
-            (LONG)ret, (LONG)io->iouh_Req.io_Error, (LONG)udev->status, (LONG)udev->act_len);
+	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+	struct UsbSetupData *setup = &io->iouh_SetupData;
 
-    /* If this was a successful GET_DESCRIPTOR(CONFIGURATION),
-     * cache the configuration descriptor for later use.
-     */
-    if (ret == 0 && (req.request == USB_REQ_GET_DESCRIPTOR) && (req.requesttype & USB_DIR_IN) && (((LE16(req.value)) >> 8) == USB_DT_CONFIG)) {
-        parse_config_descriptor(udev, (UBYTE *)buf, (UWORD)udev->act_len);
+	if (io->iouh_DevAddr == ctrl->rootdev)
+	{
+		xhci_submit_root(udev, io);
+		return COMMAND_PROCESSED;
+	}
+
+	if (setup->bRequest == USB_REQ_SET_ADDRESS && (setup->bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD)
+	{
+		xhci_address_device(udev, io);
+		return COMMAND_SCHEDULED;
+	}
+
+	if (setup->bRequest == USB_REQ_SET_CONFIGURATION &&
+		(setup->bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD)
+	{
+		int ret = xhci_set_configuration(udev, LE16(setup->wValue) & 0xff);
+		if (ret != UHIOERR_NO_ERROR)
+		{
+			Kprintf("Failed to configure xHCI endpoint\n");
+            io->iouh_Req.io_Error = ret;
+			return COMMAND_PROCESSED;
+		}
+
+		// this will trigger a chain of commands and control xfer
+		xhci_configure_endpoints(udev, FALSE, io);
+		return COMMAND_SCHEDULED;
+	}
+
+	unsigned int timeout_ms = XHCI_TIMEOUT;
+	if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
+		timeout_ms = io->iouh_NakTimeout;
+
+	int ret = xhci_ctrl_tx(udev, io, timeout_ms);
+    if (ret != UHIOERR_NO_ERROR)
+    {
+        io->iouh_Req.io_Error = ret;
+        return COMMAND_PROCESSED;
     }
 
-    /* If this was a successful standard SET_ADDRESS, migrate the glue context
-     * from the old devaddr to the new one so subsequent transfers reuse the
-     * same slot and endpoint state.
-     */
-    if (ret == 0 &&
-        (req.request == USB_REQ_SET_ADDRESS) &&
-        ((req.requesttype & USB_TYPE_MASK) == USB_TYPE_STANDARD)) {
-        UWORD old_addr = io->iouh_DevAddr & 0x7F;
-        UWORD new_addr = (UWORD)(LE16(req.value) & 0x7F);
-        if (new_addr != old_addr) {
-            struct glue_state *st = gst(unit);
-            struct glue_devctx *from = &st->devs[old_addr];
-            struct glue_devctx *to = &st->devs[new_addr];
-
-            if (to->used) {
-                Kprintf("usb_glue_ctrl: overwriting existing ctx for addr %ld\n", (LONG)new_addr);
-                _memset(to, 0, sizeof(*to));
-            }
-
-            /* Copy the entire device context so slot/endpoint state follows the device. */
-            *to = *from;
-            to->used = 1;
-            to->udev.devnum = new_addr;
-
-            /* Ensure the EP0 IN guard stays locked until we drop it below. */
-            to->in_flight[0][1] = from->in_flight[0][1];
-
-            /* Clear the old address entry to avoid stale references. */
-            _memset(from, 0, sizeof(*from));
-
-            dc = to;
-            udev = &dc->udev;
-        }
-    }
-
-    ep_unlock(dc, 0, 1);
-    return COMMAND_PROCESSED;
+    return COMMAND_SCHEDULED;
 }
 
 int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
-    if (!udev) { io->iouh_Req.io_Error = UHIOERR_BADPARAMS; return COMMAND_PROCESSED; }
+    if (!udev)
+    {
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return COMMAND_PROCESSED;
+    }
     UWORD ep = io->iouh_Endpoint & 0x0F;
     UWORD dir = (io->iouh_Dir == UHDIR_IN) ? 1 : 0;
-    struct glue_devctx *dc = &gst(unit)->devs[io->iouh_DevAddr];
-    if (!ep_try_lock(dc, ep, dir)) { io->iouh_Req.io_Error = UHIOERR_HOSTERROR; return COMMAND_PROCESSED; }
 
     Kprintf("usb_glue_bulk: dev=%ld addr=%ld ep=%ld dir=%s len=%ld flags=%lx tmo=%ld\n",
-        (ULONG)udev, (ULONG)udev->devnum, (LONG)ep, dir ? "IN" : "OUT",
-        (LONG)io->iouh_Length, (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout);
+            (ULONG)udev, (ULONG)udev->devnum, (LONG)ep, dir ? "IN" : "OUT",
+            (LONG)io->iouh_Length, (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout);
 
-    unsigned long pipe = (io->iouh_Dir == UHDIR_IN) ? usb_rcvbulkpipe(udev, ep)
-                                                    : usb_sndbulkpipe(udev, ep);
-    void *buf = io->iouh_Data;
-    int len = (int)io->iouh_Length;
-    int ret;
-    int uherr;
+    unsigned int timeout_ms = io->iouh_NakTimeout;
 
-    unsigned int maxpkt = (unsigned int)io->iouh_MaxPktSize;
+    if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
+        timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
-    if ((io->iouh_Flags & UHFF_NAKTIMEOUT) && io->iouh_NakTimeout)
-        ret = submit_bulk_msg(udev, pipe, buf, len, maxpkt,
-                              (unsigned int)io->iouh_NakTimeout);
-    else
-        ret = submit_bulk_msg(udev, pipe, buf, len, maxpkt, XHCI_TIMEOUT);
-    uherr = map_status_to_uhio(udev->status);
-    Kprintf("usb_glue_bulk: ret=%ld uherr=%ld udev->status=%ld act_len=%ld\n",
-            (LONG)ret, (LONG)uherr, (LONG)udev->status, (LONG)udev->act_len);
-    io->iouh_Actual = (ULONG)udev->act_len;
-    io->iouh_Req.io_Error = (ret == 0) ? UHIOERR_NO_ERROR : uherr;
-    ep_unlock(dc, ep, dir);
-    return COMMAND_PROCESSED;
+    int ret = xhci_bulk_tx(udev, io, timeout_ms);
+    if (ret != UHIOERR_NO_ERROR)
+    {
+        io->iouh_Req.io_Error = ret;
+        return COMMAND_PROCESSED;
+    }
+
+    return COMMAND_SCHEDULED;
 }
 
 int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
-    if (!udev) { io->iouh_Req.io_Error = UHIOERR_BADPARAMS; return COMMAND_PROCESSED; }
+    if (!udev)
+    {
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return COMMAND_PROCESSED;
+    }
     UWORD ep = io->iouh_Endpoint & 0x0F;
     UWORD dir = (io->iouh_Dir == UHDIR_IN) ? 1 : 0;
-    struct glue_devctx *dc = &gst(unit)->devs[io->iouh_DevAddr];
-    if (!ep_try_lock(dc, ep, dir)) { io->iouh_Req.io_Error = UHIOERR_HOSTERROR; return COMMAND_PROCESSED; }
 
     /* Root hub doesn't have a real interrupt endpoint ring here; synthesize success */
-    if (udev->devnum == unit->xhci_ctrl->rootdev) {
+    if (udev->devnum == unit->xhci_ctrl->rootdev)
+    {
         io->iouh_Actual = 0;
         io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-        ep_unlock(dc, ep, dir);
-        //TODO do we need to process it somehow?
+        // TODO do we need to process it somehow? - yes, these are port state changes
         return COMMAND_PROCESSED;
     }
 
     Kprintf("usb_glue_int: dev=%lx addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx timeout=%ld maxpkt=%ld\n",
-        (ULONG)udev, (ULONG)udev->devnum, (LONG)ep, dir ? "IN" : "OUT",
-        (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
-        (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout, (LONG)io->iouh_MaxPktSize);
+            (ULONG)udev, (ULONG)udev->devnum, (LONG)ep, dir ? "IN" : "OUT",
+            (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
+            (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout, (LONG)io->iouh_MaxPktSize);
 
-    unsigned long pipe = (io->iouh_Dir == UHDIR_IN) ? usb_rcvintpipe(udev, ep)
-                                                    : usb_sndintpipe(udev, ep);
-    void *buf = io->iouh_Data;
-    int len = (int)io->iouh_Length;
-    int interval = (int)io->iouh_Interval; /* TODO: microframe vs ms */
-    bool nonblock = false; /* synchronous for now */
-    int ret;
+    unsigned int timeout_ms = (unsigned int)io->iouh_Interval;
+    if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
+        timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
-    unsigned int maxpkt = (unsigned int)io->iouh_MaxPktSize;
-    if ((io->iouh_Flags & UHFF_NAKTIMEOUT) && io->iouh_NakTimeout)
-        ret = xhci_bulk_tx(udev, pipe, len, buf, maxpkt,
-                           (unsigned int)io->iouh_NakTimeout);
-    else
-        ret = submit_int_msg(udev, pipe, buf, len, maxpkt, interval, nonblock);
-    int uherr = map_status_to_uhio(udev->status);
-    io->iouh_Actual = (ULONG)udev->act_len;
-    io->iouh_Req.io_Error = (ret == 0) ? UHIOERR_NO_ERROR : uherr;
-    ep_unlock(dc, ep, dir);
-    return COMMAND_PROCESSED;
+    int ret = xhci_bulk_tx(udev, io, timeout_ms);
+    if (ret != UHIOERR_NO_ERROR)
+    {
+        io->iouh_Req.io_Error = ret;
+        return COMMAND_PROCESSED;
+    }
+
+    return COMMAND_SCHEDULED;
 }
 
 static inline int root_hub_max_ports(struct xhci_ctrl *ctrl)
@@ -583,20 +471,22 @@ int usb_glue_bus_reset(struct XHCIUnit *unit)
     /* Issue SET_FEATURE(RESET) on all root hub ports */
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
-    if (!udev) return UHIOERR_HOSTERROR;
+    if (!udev)
+        return UHIOERR_HOSTERROR;
     int maxp = root_hub_max_ports(ctrl);
-    unsigned long pipe = usb_sndctrlpipe(udev, 0);
-    unsigned int ctrl_maxpkt = 8U << udev->maxpacketsize0;
-    for (int p = 1; p <= maxp; ++p) {
-        struct devrequest req;
+    for (int p = 1; p <= maxp; ++p)
+    {
+        struct IOUsbHWReq req;
         _memset(&req, 0, sizeof(req));
-        req.requesttype = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
-        req.request = USB_REQ_SET_FEATURE;
-        req.value = cpu_to_le16(USB_PORT_FEAT_RESET);
-        req.index = cpu_to_le16(p);
-        req.length = cpu_to_le16(0);
-        if (submit_control_msg(udev, pipe, NULL, 0, &req, ctrl_maxpkt, XHCI_TIMEOUT) != 0)
-            return UHIOERR_HOSTERROR;
+        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
+        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
+        req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_RESET);
+        req.iouh_SetupData.wIndex = cpu_to_le16(p);
+        req.iouh_SetupData.wLength = cpu_to_le16(0);
+        req.iouh_DevAddr = udev->devnum;
+        req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
+
+        xhci_submit_root(udev, &req);
     }
     return UHIOERR_NO_ERROR;
 }
@@ -605,19 +495,21 @@ int usb_glue_bus_suspend(struct XHCIUnit *unit)
 {
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
-    if (!udev) return UHIOERR_HOSTERROR;
+    if (!udev)
+        return UHIOERR_HOSTERROR;
     int maxp = root_hub_max_ports(ctrl);
-    unsigned long pipe = usb_sndctrlpipe(udev, 0);
-    unsigned int ctrl_maxpkt = 8U << udev->maxpacketsize0;
-    for (int p = 1; p <= maxp; ++p) {
-        struct devrequest req;
+    for (int p = 1; p <= maxp; ++p)
+    {
+        struct IOUsbHWReq req;
         _memset(&req, 0, sizeof(req));
-        req.requesttype = USB_DIR_OUT | USB_RT_PORT;
-        req.request = USB_REQ_SET_FEATURE;
-        req.value = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
-        req.index = cpu_to_le16(p);
-        if (submit_control_msg(udev, pipe, NULL, 0, &req, ctrl_maxpkt, XHCI_TIMEOUT) != 0)
-            return UHIOERR_HOSTERROR;
+        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
+        req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
+        req.iouh_SetupData.wIndex = cpu_to_le16(p);
+        req.iouh_DevAddr = udev->devnum;
+        req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
+
+        xhci_submit_root(udev, &req);
     }
     return UHIOERR_NO_ERROR;
 }
@@ -626,19 +518,21 @@ int usb_glue_bus_resume(struct XHCIUnit *unit)
 {
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
-    if (!udev) return UHIOERR_HOSTERROR;
+    if (!udev)
+        return UHIOERR_HOSTERROR;
     int maxp = root_hub_max_ports(ctrl);
-    unsigned long pipe = usb_sndctrlpipe(udev, 0);
-    unsigned int ctrl_maxpkt = 8U << udev->maxpacketsize0;
-    for (int p = 1; p <= maxp; ++p) {
-        struct devrequest req;
+    for (int p = 1; p <= maxp; ++p)
+    {
+        struct IOUsbHWReq req;
         _memset(&req, 0, sizeof(req));
-        req.requesttype = USB_DIR_OUT | USB_RT_PORT;
-        req.request = USB_REQ_CLEAR_FEATURE;
-        req.value = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
-        req.index = cpu_to_le16(p);
-        if (submit_control_msg(udev, pipe, NULL, 0, &req, ctrl_maxpkt, XHCI_TIMEOUT) != 0)
-            return UHIOERR_HOSTERROR;
+        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.iouh_SetupData.bRequest = USB_REQ_CLEAR_FEATURE;
+        req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
+        req.iouh_SetupData.wIndex = cpu_to_le16(p);
+        req.iouh_DevAddr = udev->devnum;
+        req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
+
+        xhci_submit_root(udev, &req);
     }
     return UHIOERR_NO_ERROR;
 }
@@ -648,19 +542,105 @@ int usb_glue_bus_oper(struct XHCIUnit *unit)
     /* Ensure port power is on for all ports */
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
-    if (!udev) return UHIOERR_HOSTERROR;
+    if (!udev)
+        return UHIOERR_HOSTERROR;
     int maxp = root_hub_max_ports(ctrl);
-    unsigned long pipe = usb_sndctrlpipe(udev, 0);
-    unsigned int ctrl_maxpkt = 8U << udev->maxpacketsize0;
-    for (int p = 1; p <= maxp; ++p) {
-        struct devrequest req;
+    for (int p = 1; p <= maxp; ++p)
+    {
+        struct IOUsbHWReq req;
         _memset(&req, 0, sizeof(req));
-        req.requesttype = USB_DIR_OUT | USB_RT_PORT;
-        req.request = USB_REQ_SET_FEATURE;
-        req.value = cpu_to_le16(USB_PORT_FEAT_POWER);
-        req.index = cpu_to_le16(p);
-        if (submit_control_msg(udev, pipe, NULL, 0, &req, ctrl_maxpkt, XHCI_TIMEOUT) != 0)
-            return UHIOERR_HOSTERROR;
+        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
+        req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_POWER);
+        req.iouh_SetupData.wIndex = cpu_to_le16(p);
+        req.iouh_DevAddr = udev->devnum;
+        req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
+
+        xhci_submit_root(udev, &req);
     }
     return UHIOERR_NO_ERROR;
+}
+
+static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
+{
+    
+    /* If this was a successful GET_DESCRIPTOR(STRING) IN transfer and we got
+     * an odd number of bytes, clamp to even to avoid a dangling half UTF-16
+     * code unit, which Poseidon may display as a trailing '?'.
+     */
+    if ((io->iouh_SetupData.bRequest == USB_REQ_GET_DESCRIPTOR) &&
+        (io->iouh_SetupData.bmRequestType & USB_DIR_IN) && (((LE16(io->iouh_SetupData.wValue)) >> 8) == USB_DT_STRING))
+    {
+        if ((io->iouh_Actual & 1) != 0)
+        {
+            Kprintf("usb_glue_ctrl: clamping odd string length %ld to %ld\n",
+                    (LONG)io->iouh_Actual, (LONG)(io->iouh_Actual - 1));
+            io->iouh_Actual -= 1;
+        }
+    }
+
+    /* If this was a successful GET_DESCRIPTOR(CONFIGURATION),
+     * cache the configuration descriptor for later use.
+     */
+    if ((io->iouh_SetupData.bRequest == USB_REQ_GET_DESCRIPTOR) && (io->iouh_SetupData.bmRequestType & USB_DIR_IN) && (((LE16(io->iouh_SetupData.wValue)) >> 8) == USB_DT_CONFIG))
+    {
+        parse_config_descriptor(udev, (UBYTE *)io->iouh_Data, (UWORD)io->iouh_Actual);
+    }
+
+    /* If this was a successful standard SET_ADDRESS, migrate the glue context
+     * from the old devaddr to the new one so subsequent transfers reuse the
+     * same slot and endpoint state.
+     */
+    if ((io->iouh_SetupData.bRequest == USB_REQ_SET_ADDRESS) &&
+        ((io->iouh_SetupData.bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD))
+    {
+        UWORD old_addr = io->iouh_DevAddr & 0x7F;
+        UWORD new_addr = (UWORD)(LE16(io->iouh_SetupData.wValue) & 0x7F);
+        if (new_addr != old_addr)
+        {
+            struct xhci_ctrl *ctrl = udev->controller;
+            struct usb_device *from = &ctrl->devices[old_addr];
+            struct usb_device *to = &ctrl->devices[new_addr];
+
+            if (to->used)
+            {
+                Kprintf("usb_glue_ctrl: overwriting existing ctx for addr %ld\n", (LONG)new_addr);
+                _memset(to, 0, sizeof(*to));
+            }
+
+            /* Copy the entire device context so slot/endpoint state follows the device. */
+            *to = *from;
+            to->used = 1;
+            to->devnum = new_addr;
+
+            /* Clear the old address entry to avoid stale references. */
+            _memset(from, 0, sizeof(*from));
+            Kprintf("usb_glue_ctrl: migrated ctx from addr %ld to %ld\n", (LONG)old_addr, (LONG)new_addr);
+        }
+    }
+}
+
+/* Hooks for responding to requests for lower layer */
+void io_reply_failed(struct IOUsbHWReq *io, int err)
+{
+    if (io)
+    {
+        io->iouh_Req.io_Error = err;
+        ReplyMsg((struct Message *)io);
+    }
+}
+
+void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual)
+{
+    if (!io)
+        return;
+
+    io->iouh_Actual = actual;
+    io->iouh_Req.io_Error = err;
+
+    if (io->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+        parse_control_msg(udev, io);
+
+
+    ReplyMsg((struct Message *)io);
 }
