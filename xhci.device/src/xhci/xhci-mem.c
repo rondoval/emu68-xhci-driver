@@ -22,8 +22,8 @@
 #include <compat.h>
 #include <debug.h>
 
-#include <usb.h>
-#include <xhci.h>
+#include <xhci/usb.h>
+#include <xhci/xhci.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -562,7 +562,7 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 		(ULONG)virt_dev->in_ctx->bytes, (ULONG)virt_dev->in_ctx->dma, (ULONG)virt_dev->in_ctx->size);
 
 	/* Allocate endpoint 0 ring */
-	virt_dev->eps[0].ring = xhci_ring_alloc(ctrl, 1, true);
+	virt_dev->eps[0].ring = xhci_ring_alloc(ctrl, 1, TRUE);
 	if (!virt_dev->eps[0].ring) {
 		Kprintf("xhci_alloc_virt_device: EP0 ring alloc failed\n");
 		return -ENOMEM;
@@ -618,7 +618,7 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	xhci_writeq(&hcor->or_dcbaap, ctrl->dcbaa->dma);
 
 	/* Command ring control pointer register initialization */
-	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, true);
+	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, TRUE);
 
 	/* Set the address in the Command Ring Control register */
 	trb_64 = ctrl->cmd_ring->first_seg->dma;
@@ -642,7 +642,7 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	ctrl->ir_set = &ctrl->run_regs->ir_set[0];
 
 	/* Event ring does not maintain link TRB */
-	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, false);
+	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, FALSE);
 	ctrl->erst.entries = xhci_malloc(ctrl, sizeof(struct xhci_erst_entry) *
 					 ERST_NUM_SEGS);
 	ctrl->erst.erst_dma_addr = xhci_dma_map(ctrl, ctrl->erst.entries,
@@ -867,12 +867,12 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	}
 
 	/* Low/full-speed devices behind a high-speed hub need TT info */
-	bool needs_tt = (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) &&
+	BOOL needs_tt = (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) &&
 		udev->parent &&
 		(udev->parent->speed == USB_SPEED_HIGH ||
 		 udev->parent->speed == USB_SPEED_SUPER ||
 		 udev->parent->speed == USB_SPEED_SUPER_PLUS);
-	bool have_tt_info = needs_tt && udev->tt_slot && udev->tt_port;
+	BOOL have_tt_info = needs_tt && udev->tt_slot && udev->tt_port;
 
 	slot_ctx->dev_info = LE32(dev_info);
 
