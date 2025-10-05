@@ -22,7 +22,7 @@ struct Device *TimerBase = NULL;
 
 void ScheduleWork(struct XHCIUnit *unit)
 {
-
+    (void)unit;
     // TODO temporary
     //  go through all devices and all endpoints
     //  if there is one that is idle, has pending requests, and is not halted,

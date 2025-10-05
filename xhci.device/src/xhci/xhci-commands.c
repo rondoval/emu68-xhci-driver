@@ -24,9 +24,10 @@ static const command_handler command_handlers[];
  * @param ep_index	Endpoint index to encode in the flags field (opt.)
  * @param cmd		Command type to enqueue
  * @param req       Optional IOUsbHWReq to continue control transfers after configuring endpoints
+ * @param udev      Optional usb_device for slot/endpoint checks
  * Return: none
  */
-static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u32 ep_index, trb_type cmd, struct IOUsbHWReq *req)
+static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u32 ep_index, trb_type cmd, struct IOUsbHWReq *req, struct usb_device *udev)
 {
     u32 fields[4];
 
@@ -50,7 +51,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     if (cmd >= TRB_RESET_EP && cmd <= TRB_SET_DEQ)
         fields[3] |= EP_ID_FOR_TRB(ep_index);
 
-    queue_trb(ctrl, ctrl->cmd_ring, FALSE, fields);
+    dma_addr_t trb_dma = queue_trb(ctrl, ctrl->cmd_ring, FALSE, fields);
 
     /* Add command handler to pending list */
     struct pending_command *pending_cmd = AllocVecPooled(ctrl->memoryPool, sizeof(struct pending_command));
@@ -60,17 +61,9 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
         return;
     }
 
-    pending_cmd->cmd_trb_dma = addr;
-
-    if (slot_id)
-        pending_cmd->udev = ctrl->devs[slot_id]->udev;
-    else
-        pending_cmd->udev = NULL;
-
-    if (req)
-    {
-        pending_cmd->req = req;
-    }
+    pending_cmd->cmd_trb_dma = trb_dma;
+    pending_cmd->udev = udev;
+    pending_cmd->req = req;
 
     pending_cmd->complete = command_handlers[cmd];
     AddTailMinList(&ctrl->pending_commands, (struct MinNode *)pending_cmd);
@@ -91,7 +84,7 @@ static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd,
 
     if (TRB_TO_SLOT_ID(flags) != slot_id)
     {
-        Kprintf("handle_reset_ep: Expected a TRB for slot %ld, got %ld\n", slot_id, TRB_TO_SLOT_ID(flags));
+        Kprintf("Expected a TRB for slot %ld, got %ld\n", slot_id, TRB_TO_SLOT_ID(flags));
         xhci_ep_set_failed(cmd->udev, ep_index);
 
         goto error;
@@ -100,7 +93,7 @@ static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd,
     struct xhci_ring *ring = ctrl->devs[slot_id]->eps[ep_index].ring;
 
     u64 addr = xhci_trb_virt_to_dma(ring->enq_seg, (void *)((uintptr_t)ring->enqueue | ring->cycle_state));
-    xhci_queue_command(ctrl, addr, slot_id, ep_index, TRB_SET_DEQ, NULL); // handle_set_deq
+    xhci_queue_command(ctrl, addr, slot_id, ep_index, TRB_SET_DEQ, NULL, cmd->udev); // handle_set_deq
 
 error:
     xhci_acknowledge_event(cmd->udev->controller);
@@ -137,14 +130,14 @@ static void handle_abort_stop_ring(struct xhci_ctrl *ctrl, struct pending_comman
 
     if (type != TRB_COMPLETION || TRB_TO_SLOT_ID(flags) != slot_id || (comp != COMP_SUCCESS && comp != COMP_CTX_STATE))
     {
-        Kprintf("abort_td: Expected a TRB for slot %ld with SUCCESS or CTX_STATE, got %ld with %ld\n", slot_id, TRB_TO_SLOT_ID(flags), comp);
+        Kprintf("Expected a TRB for slot %ld with SUCCESS or CTX_STATE, got %ld with %ld\n", slot_id, TRB_TO_SLOT_ID(flags), comp);
         return;
     }
     xhci_acknowledge_event(ctrl);
 
     struct xhci_ring *ring = ctrl->devs[slot_id]->eps[ep_index].ring;
     dma_addr_t addr = xhci_trb_virt_to_dma(ring->enq_seg, (void *)((uintptr_t)ring->enqueue | ring->cycle_state));
-    xhci_queue_command(ctrl, addr, slot_id, ep_index, TRB_SET_DEQ, NULL); // handle_set_deq
+    xhci_queue_command(ctrl, addr, slot_id, ep_index, TRB_SET_DEQ, NULL, cmd->udev); // handle_set_deq
 }
 
 /*
@@ -280,7 +273,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
     for (struct MinNode *node = ctrl->pending_commands.mlh_Head; node->mln_Succ; node = node->mln_Succ)
     {
         struct pending_command *cmd = (struct pending_command *)node;
-        dma_addr_t trb_addr = event->event_cmd.cmd_trb;
+        dma_addr_t trb_addr = (dma_addr_t)LE64(event->event_cmd.cmd_trb);
         if ((trb_addr == cmd->cmd_trb_dma))
         {
             // Found the command
@@ -302,6 +295,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
             (ULONG)LE32(event->generic.field[1]),
             (ULONG)LE32(event->generic.field[2]),
             (ULONG)LE32(event->generic.field[3]));
+    xhci_acknowledge_event(ctrl);
 }
 
 /*
@@ -316,7 +310,7 @@ void xhci_reset_ep(struct usb_device *udev, int ep_index)
     io_reply_failed(udev->ep_context[ep_index].current_req, UHIOERR_STALL);
     udev->ep_context[ep_index].current_req = NULL;
     xhci_ep_set_resetting(udev, ep_index);
-    xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_RESET_EP, NULL); // handle_reset_ep
+    xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_RESET_EP, NULL, udev); // handle_reset_ep
 }
 
 /*
@@ -334,7 +328,7 @@ void xhci_abort_td(struct usb_device *udev, unsigned int ep_index)
     io_reply_failed(udev->ep_context[ep_index].current_req, UHIOERR_TIMEOUT);
     udev->ep_context[ep_index].current_req = NULL;
     xhci_ep_set_aborting(udev, ep_index);
-    xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL); // handle_abort_stop_ring
+    xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL, udev); // handle_abort_stop_ring
 }
 
 /**
@@ -354,9 +348,9 @@ void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct I
     virt_dev = ctrl->devs[udev->slot_id];
     in_ctx = virt_dev->in_ctx;
 
-    Kprintf("xhci_configure_endpoints: about to issue EVAL_CONTEXT or CONFIG_EP\n");
+    Kprintf("about to issue EVAL_CONTEXT or CONFIG_EP\n");
     xhci_flush_cache((uintptr_t)in_ctx->bytes, in_ctx->size);
-    xhci_queue_command(ctrl, in_ctx->dma, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req);
+    xhci_queue_command(ctrl, in_ctx->dma, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
 }
 
 /**
@@ -373,7 +367,7 @@ static void xhci_enable_slot(struct usb_device *udev, struct IOUsbHWReq *req)
     struct xhci_ctrl *ctrl = udev->controller;
 
     Kprintf("queue ENABLE_SLOT\n");
-    xhci_queue_command(ctrl, 0, 0, 0, TRB_ENABLE_SLOT, req);
+    xhci_queue_command(ctrl, 0, 0, 0, TRB_ENABLE_SLOT, req, udev);
 }
 
 void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
@@ -389,6 +383,7 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     /* Determine root port if not provided */
     // if (root_portnr == 0)
     // {
+    //TODO doesn't work
     int max_ports = HCS_MAX_PORTS(xhci_readl(&hccr->cr_hcsparams1));
     for (int p = 1; p <= max_ports; ++p)
     {
@@ -403,17 +398,17 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
             // case XDEV_HS: udev->speed = USB_SPEED_HIGH; break;
             // case XDEV_SS: udev->speed = USB_SPEED_SUPER; break;
             // }
-            Kprintf("xhci_address_device: autodetected root_portnr=%ld speed=%ld\n", (ULONG)root_portnr, (ULONG)udev->speed);
+            Kprintf("autodetected root_portnr=%ld speed=%ld\n", (ULONG)root_portnr, (ULONG)udev->speed);
             break;
         }
     }
     // }
 
     virt_dev = ctrl->devs[slot_id];
-    Kprintf("xhci_address_device: virt_dev=%lx, slot_id=%ld\n", (ULONG)virt_dev, (LONG)slot_id);
+    Kprintf("virt_dev=%lx, slot_id=%ld\n", (ULONG)virt_dev, (LONG)slot_id);
     if (!virt_dev)
     {
-        Kprintf("xhci_address_device: ERROR: no virt_dev for slot %ld\n", (ULONG)slot_id);
+        Kprintf("ERROR: no virt_dev for slot %ld\n", (ULONG)slot_id);
         io_reply_failed(req, UHIOERR_OUTOFMEMORY);
         return;
     }
@@ -424,7 +419,7 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
         struct xhci_slot_ctx *sc = xhci_get_slot_ctx(ctrl, virt_dev->out_ctx);
         if ((LE32(sc->dev_state) & DEV_ADDR_MASK) != 0)
         {
-            Kprintf("xhci_address_device: slot %ld already addressed (dev_state=%08lx), skipping.\n",
+            Kprintf("slot %ld already addressed (dev_state=%08lx), skipping.\n",
                     (ULONG)slot_id, (ULONG)LE32(sc->dev_state));
             io_reply_data(udev, req, UHIOERR_NO_ERROR, 0);
             return;
@@ -439,13 +434,13 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     xhci_setup_addressable_virt_dev(ctrl, udev, root_portnr);
 
     ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
-    KprintfH("xhci_address_device: ctrl_ctx=%lx in_ctx=%lx out_ctx=%lx\n",
+    KprintfH("ctrl_ctx=%lx in_ctx=%lx out_ctx=%lx\n",
              (ULONG)ctrl_ctx, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx);
     ctrl_ctx->add_flags = LE32(SLOT_FLAG | EP0_FLAG);
     ctrl_ctx->drop_flags = 0;
 
-    Kprintf("xhci_address_device: queue ADDR_DEV cmd, in_ctx->dma=%lx\n", (ULONG)virt_dev->in_ctx->dma);
-    xhci_queue_command(ctrl, virt_dev->in_ctx->dma, slot_id, 0, TRB_ADDR_DEV, req);
+    Kprintf("queue ADDR_DEV cmd, in_ctx->dma=%lx\n", (ULONG)virt_dev->in_ctx->dma);
+    xhci_queue_command(ctrl, virt_dev->in_ctx->dma, slot_id, 0, TRB_ADDR_DEV, req, udev);
 }
 
 void xhci_address_device(struct usb_device *udev, struct IOUsbHWReq *req)
@@ -453,7 +448,7 @@ void xhci_address_device(struct usb_device *udev, struct IOUsbHWReq *req)
     /* If we don't have a slot yet, enable one and allocate Virt Dev */
     if (udev->slot_id == 0)
     {
-        Kprintf("xhci_address_device: no slot_id yet; enabling slot...\n");
+        Kprintf("no slot_id yet; enabling slot...\n");
         xhci_enable_slot(udev, req);
         return;
     }

@@ -154,7 +154,7 @@ dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, size_t size)
 	bounce->next = ctrl->dma_bounce_list;
 	ctrl->dma_bounce_list = bounce;
 
-	KprintfH("xhci_dma_map: bounce %lx -> %lx len=%ld\n",
+	Kprintf("xhci_dma_map: bounce %lx -> %lx len=%ld\n",
 			 (ULONG)addr, (ULONG)aligned, (LONG)size);
 
 	return (dma_addr_t)(uintptr_t)aligned;
@@ -974,6 +974,9 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		Kprintf("USB_REQ_SET_ADDRESS rootdev=%ld\n", (LONG)LE16(req->wValue));
 		udev->speed = USB_SPEED_SUPER;
 		ctrl->rootdev = LE16(req->wValue);
+		ctrl->devices[ctrl->rootdev] = *udev;
+		_memset(udev, 0, sizeof(struct usb_device));
+		ctrl->devices[ctrl->rootdev].devnum = ctrl->rootdev;
 		break;
 	case DeviceOutRequest | USB_REQ_SET_CONFIGURATION:
 		Kprintf("USB_REQ_SET_CONFIGURATION\n");

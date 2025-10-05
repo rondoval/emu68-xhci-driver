@@ -560,7 +560,7 @@ int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		(ULONG)upper_32_bits((u64)last_transfer_trb_addr),
 		(ULONG)lower_32_bits((u64)last_transfer_trb_addr), (LONG)start_cycle);
 
-	xhci_ep_set_receiving(udev, ep_index, USB_DEV_EP_STATE_RECEIVING_BULK, last_transfer_trb_addr, length, timeout_ms);
+	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING_BULK, last_transfer_trb_addr, timeout_ms);
 	return UHIOERR_NO_ERROR;
 }
 
@@ -742,6 +742,6 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 
 	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
 
-	xhci_ep_set_receiving(udev, ep_index, USB_DEV_EP_STATE_RECEIVING_CONTROL, event_trb, length, timeout_ms);
+	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING_CONTROL, event_trb, timeout_ms);
 	return UHIOERR_NO_ERROR;
 }

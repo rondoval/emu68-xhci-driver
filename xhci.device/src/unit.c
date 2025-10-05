@@ -238,7 +238,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 		goto err_del_pool;
 	}
 
-	struct xhci_ctrl *xhci_ctrl = AllocMem(sizeof(*xhci_ctrl), MEMF_CLEAR | MEMF_PUBLIC);
+	struct xhci_ctrl *xhci_ctrl = AllocMem(sizeof(struct xhci_ctrl), MEMF_CLEAR | MEMF_PUBLIC);
 	if (!xhci_ctrl) {
 		Kprintf("[xhci] %s: Failed to allocate memory for xhci_ctrl\n", __func__);
 		result = UHIOERR_OUTOFMEMORY;

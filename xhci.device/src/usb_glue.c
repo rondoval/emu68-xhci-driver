@@ -104,6 +104,7 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
     struct usb_device *udev = &unit->xhci_ctrl->devices[devaddr];
     if (!udev->used)
     {
+        Kprintf("get_or_init_udev: new device addr=%ld\n", (LONG)devaddr);
         _memset(udev, 0, sizeof(struct usb_device));
         udev->used = 1;
         udev->devnum = devaddr;
@@ -116,6 +117,10 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
 
         for (int i = 0; i < USB_MAXENDPOINTS; ++i)
             _NewMinList(&udev->ep_context[i].req_list);
+    }
+    else
+    {
+        Kprintf("get_or_init_udev: existing device addr=%ld\n", (LONG)devaddr);
     }
     return udev;
 }
@@ -332,17 +337,17 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
                 (ULONG)io->iouh_NakTimeout,
                 (ULONG)io->iouh_MaxPktSize);
 
-        Kprintf("usb_glue_ctrl: split_hub_addr=%lx split_hub_port=%ld\n",
+        KprintfH("usb_glue_ctrl: split_hub_addr=%lx split_hub_port=%ld\n",
                 (ULONG)io->iouh_SplitHubAddr,
                 (ULONG)io->iouh_SplitHubPort);
 
-        Kprintf("usb_glue_ctrl: parent=%lx portnr=%ld route=%ld tt_slot=%ld tt_port=%ld\n",
+        KprintfH("usb_glue_ctrl: parent=%lx portnr=%ld route=%ld tt_slot=%ld tt_port=%ld\n",
                 (ULONG)udev->parent,
                 (ULONG)udev->portnr,
                 (ULONG)udev->route,
                 (ULONG)udev->tt_slot,
                 (ULONG)udev->tt_port);
-        Kprintf("usb_glue_ctrl: maxpacketsize0=%lx speed=%ld\n",
+        KprintfH("usb_glue_ctrl: maxpacketsize0=%lx speed=%ld\n",
                 (ULONG)udev->maxpacketsize0,
                 (LONG)udev->speed);
     }
@@ -612,6 +617,7 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             *to = *from;
             to->used = 1;
             to->devnum = new_addr;
+            ctrl->devs[to->slot_id]->udev = to;
 
             /* Clear the old address entry to avoid stale references. */
             _memset(from, 0, sizeof(*from));
@@ -625,6 +631,7 @@ void io_reply_failed(struct IOUsbHWReq *io, int err)
 {
     if (io)
     {
+        Kprintf("io_reply_failed: err=%ld\n", (LONG)err);
         io->iouh_Req.io_Error = err;
         ReplyMsg((struct Message *)io);
     }
@@ -638,9 +645,9 @@ void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULON
     io->iouh_Actual = actual;
     io->iouh_Req.io_Error = err;
 
-    if (io->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+    if (io->iouh_Req.io_Command == UHCMD_CONTROLXFER && err == UHIOERR_NO_ERROR)
         parse_control_msg(udev, io);
 
-
+    Kprintf("io_reply_data: err=%ld actual=%ld\n", (LONG)err, (LONG)actual);
     ReplyMsg((struct Message *)io);
 }

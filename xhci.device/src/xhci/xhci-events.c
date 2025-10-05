@@ -88,8 +88,9 @@ void xhci_ep_set_idle(struct usb_device *udev, int ep_index)
     ep_ctx->current_req = NULL;
 }
 
-void xhci_ep_set_receiving(struct usb_device *udev, int ep_index, enum ep_state state, dma_addr_t trb_addr, ULONG trb_length, ULONG timeout_ms)
+void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t trb_addr, ULONG timeout_ms)
 {
+    int ep_index = req->iouh_Endpoint & 0xf;
     if (ep_index < 0 || ep_index >= USB_MAXENDPOINTS)
     {
         Kprintf("xhci_ep_set_receiving: Invalid endpoint %ld\n", (LONG)ep_index);
@@ -105,17 +106,11 @@ void xhci_ep_set_receiving(struct usb_device *udev, int ep_index, enum ep_state 
         return;
     }
 
-    if (ep_ctx->current_req == NULL)
-    {
-        Kprintf("xhci_ep_set_receiving: EP %ld current_req is NULL\n", (LONG)ep_index);
-        xhci_ep_set_failed(udev, ep_index);
-        return;
-    }
-
     ep_ctx->state = state;
+    ep_ctx->current_req = req;
     ep_ctx->trb_addr = trb_addr;
-    ep_ctx->trb_length = trb_length;
-    ep_ctx->trb_available_length = trb_length;
+    ep_ctx->trb_length = req->iouh_Length;
+    ep_ctx->trb_available_length = req->iouh_Length;
     ep_ctx->timeout_stamp = get_time() + timeout_ms * 1000;
 }
 
@@ -298,6 +293,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
                     (ULONG)LE32(event->generic.field[1]),
                     (ULONG)LE32(event->generic.field[2]),
                     (ULONG)LE32(event->generic.field[3]));
+            xhci_acknowledge_event(ctrl);
             break;
         default:
             Kprintf("Unexpected XHCI event type %ld, skipping... (%08lx %08lx %08lx %08lx)\n",
@@ -306,6 +302,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
                     (ULONG)LE32(event->generic.field[1]),
                     (ULONG)LE32(event->generic.field[2]),
                     (ULONG)LE32(event->generic.field[3]));
+            xhci_acknowledge_event(ctrl);
             break;
         }
     }
@@ -409,14 +406,14 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
 
     u32 flags = LE32(event->trans_event.flags);
     int ep_index = TRB_TO_EP_INDEX(flags);
-    u64 buf_64 = event->trans_event.buffer;
+    u64 buf_64 = LE64(event->trans_event.buffer);
     int length = udev->ep_context[ep_index].trb_length;
 
     KprintfH("xhci_ctrl_tx: first event flags=%08lx status=%08lx buf=%08lx%08lx\n",
              (ULONG)LE32(event->generic.field[3]),
              (ULONG)LE32(event->generic.field[2]),
-             (ULONG)upper_32_bits(LE64(event->trans_event.buffer)),
-             (ULONG)lower_32_bits(LE64(event->trans_event.buffer)));
+             (ULONG)upper_32_bits(buf_64),
+             (ULONG)lower_32_bits(buf_64));
 
     ULONG status;
     int act_len;

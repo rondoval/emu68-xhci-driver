@@ -216,7 +216,7 @@ void xhci_cleanup(struct xhci_ctrl *ctrl)
 	xhci_dma_unmap(ctrl, ctrl->dcbaa->dma,
 		       sizeof(struct xhci_device_context_array));
 	memalign_free(ctrl->memoryPool, ctrl->dcbaa);
-	_memset(ctrl, '\0', sizeof(struct xhci_ctrl));
+	_memset(ctrl, 0, sizeof(struct xhci_ctrl));
 }
 
 /**
