@@ -88,6 +88,7 @@ void xhci_ep_set_idle(struct usb_device *udev, int ep_index)
     if (ep_ctx->current_req)
         Kprintf("xhci_ep_set_idle: WARNING: current_req not NULL (%lx)\n", (LONG)ep_ctx->current_req);
     ep_ctx->current_req = NULL;
+    xhci_ep_schedule_next(udev, ep_index);
 }
 
 void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t trb_addr, ULONG timeout_ms)
@@ -171,28 +172,6 @@ void xhci_ep_set_aborting(struct usb_device *udev, int ep_index)
     ep_ctx->state = USB_DEV_EP_STATE_ABORTING;
     ep_ctx->timeout_stamp = get_time() + XHCI_TIMEOUT * 1000;
     ep_ctx->timeout_active = TRUE;
-}
-
-struct IOUsbHWReq *xhci_ep_get_next_request(struct usb_device *udev, int ep_index)
-{
-    if (ep_index < 0 || ep_index >= USB_MAXENDPOINTS)
-    {
-        Kprintf("xhci_ep_get_next_request: Invalid endpoint %ld\n", (LONG)ep_index);
-        return NULL;
-    }
-
-    struct ep_context *ep_ctx = &udev->ep_context[ep_index];
-    if (ep_ctx->state != USB_DEV_EP_STATE_IDLE || ep_ctx->current_req)
-    {
-        Kprintf("xhci_ep_get_next_request: EP %ld not IDLE (state %ld, req %lx)\n", (LONG)ep_index, (LONG)ep_ctx->state, (LONG)ep_ctx->current_req);
-        return NULL;
-    }
-
-    struct MinNode *req = RemHeadMinList(&ep_ctx->req_list);
-    if (!req)
-        return NULL;
-    ep_ctx->current_req = (struct IOUsbHWReq *)req;
-    return ep_ctx->current_req;
 }
 
 /**

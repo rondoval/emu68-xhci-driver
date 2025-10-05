@@ -125,6 +125,55 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
     return udev;
 }
 
+static int queue_request_if_busy(struct usb_device *udev, struct IOUsbHWReq *io)
+{
+    unsigned int ep_index = io->iouh_Endpoint & 0x0F;
+    if (ep_index >= USB_MAXENDPOINTS)
+    {
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return -1;
+    }
+
+    struct ep_context *ep_ctx = &udev->ep_context[ep_index];
+
+    if (ep_ctx->state == USB_DEV_EP_STATE_IDLE)
+        return 0;
+
+    AddTailMinList(&ep_ctx->req_list, (struct MinNode *)io);
+    Kprintf("queue_request_if_busy: queued request cmd=%ld ep=%ld\n",
+            (LONG)io->iouh_Req.io_Command, (LONG)ep_index);
+
+    return 1;
+}
+
+static void dispatch_request(struct IOUsbHWReq *req)
+{
+    struct XHCIUnit *unit = (struct XHCIUnit *)req->iouh_Req.io_Unit;
+    if (!unit)
+    {
+        Kprintf("dispatch_request: missing unit pointer for cmd=%ld\n", (LONG)req->iouh_Req.io_Command);
+        io_reply_failed(req, UHIOERR_HOSTERROR);
+        return;
+    }
+
+    switch (req->iouh_Req.io_Command)
+    {
+    case UHCMD_CONTROLXFER:
+        usb_glue_ctrl(unit, req);
+        break;
+    case UHCMD_BULKXFER:
+        usb_glue_bulk(unit, req);
+        break;
+    case UHCMD_INTXFER:
+        usb_glue_int(unit, req);
+        break;
+    default:
+        Kprintf("dispatch_request: unsupported command %ld\n", (LONG)req->iouh_Req.io_Command);
+        io_reply_failed(req, UHIOERR_BADPARAMS);
+        return;
+    }
+}
+
 static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD len)
 {
     if (len < 2)
@@ -353,13 +402,19 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	struct UsbSetupData *setup = &io->iouh_SetupData;
-
 	if (io->iouh_DevAddr == ctrl->rootdev)
 	{
 		xhci_submit_root(udev, io);
 		return COMMAND_PROCESSED;
 	}
+
+    int queue_state = queue_request_if_busy(udev, io);
+    if (queue_state > 0)
+        return COMMAND_SCHEDULED;
+    if (queue_state < 0)
+        return COMMAND_PROCESSED;
+
+    struct UsbSetupData *setup = &io->iouh_SetupData;
 
 	if (setup->bRequest == USB_REQ_SET_ADDRESS && (setup->bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD)
 	{
@@ -412,6 +467,12 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
             (ULONG)udev, (ULONG)udev->devnum, (LONG)ep, dir ? "IN" : "OUT",
             (LONG)io->iouh_Length, (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout);
 
+    int queue_state = queue_request_if_busy(udev, io);
+    if (queue_state > 0)
+        return COMMAND_SCHEDULED;
+    if (queue_state < 0)
+        return COMMAND_PROCESSED;
+
     unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
@@ -451,6 +512,12 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
             (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
             (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout, (LONG)io->iouh_MaxPktSize);
 
+    int queue_state = queue_request_if_busy(udev, io);
+    if (queue_state > 0)
+        return COMMAND_SCHEDULED;
+    if (queue_state < 0)
+        return COMMAND_PROCESSED;
+
     unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
@@ -465,6 +532,25 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     return COMMAND_SCHEDULED;
 }
 
+void xhci_ep_schedule_next(struct usb_device *udev, int ep_index)
+{
+    if (ep_index < 0 || ep_index >= USB_MAXENDPOINTS)
+        return;
+
+    struct ep_context *ep_ctx = &udev->ep_context[ep_index];
+    struct MinNode *node = RemHeadMinList(&ep_ctx->req_list);
+    if (!node)
+        return;
+
+    struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
+
+    Kprintf("xhci_ep_schedule_next: starting queued request cmd=%ld ep=%ld\n",
+            (LONG)req->iouh_Req.io_Command, (LONG)(req->iouh_Endpoint & 0x0F));
+    dispatch_request(req);
+
+    if (ep_ctx->state == USB_DEV_EP_STATE_IDLE)
+        xhci_ep_schedule_next(udev, ep_index);
+}
 static inline int root_hub_max_ports(struct xhci_ctrl *ctrl)
 {
     return HCS_MAX_PORTS(xhci_readl(&ctrl->hccr->cr_hcsparams1));

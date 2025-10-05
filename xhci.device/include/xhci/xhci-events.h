@@ -40,8 +40,6 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
 void xhci_ep_set_resetting(struct usb_device *udev, int ep_index);
 void xhci_ep_set_aborting(struct usb_device *udev, int ep_index);
 
-struct IOUsbHWReq *xhci_ep_get_next_request(struct usb_device *udev, int ep_index);
-
 BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl);
 void xhci_process_event_timeouts(struct xhci_ctrl *ctrl);
 void xhci_acknowledge_event(struct xhci_ctrl *ctrl);
