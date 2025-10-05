@@ -104,7 +104,7 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
     struct usb_device *udev = &unit->xhci_ctrl->devices[devaddr];
     if (!udev->used)
     {
-        Kprintf("get_or_init_udev: new device addr=%ld\n", (LONG)devaddr);
+        KprintfH("get_or_init_udev: new device addr=%ld\n", (LONG)devaddr);
         _memset(udev, 0, sizeof(struct usb_device));
         udev->used = 1;
         udev->devnum = devaddr;
@@ -120,7 +120,7 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
     }
     else
     {
-        Kprintf("get_or_init_udev: existing device addr=%ld\n", (LONG)devaddr);
+        KprintfH("get_or_init_udev: existing device addr=%ld\n", (LONG)devaddr);
     }
     return udev;
 }
@@ -166,7 +166,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
     CopyMem(desc, &conf->desc, sizeof(struct usb_config_descriptor));
     cursor += desc->bLength;
 
-    Kprintf("parse_config_descriptor: wTotalLength=%ld bNumInterfaces=%ld bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
+    KprintfH("parse_config_descriptor: wTotalLength=%ld bNumInterfaces=%ld bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
             (LONG)LE16(desc->wTotalLength),
             (LONG)desc->bNumInterfaces,
             (LONG)desc->bConfigurationValue,
@@ -210,7 +210,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
             CopyMem(ifd, &conf->if_desc[if_index].desc, sizeof(struct usb_interface_descriptor));
             conf->if_desc[if_index].no_of_ep = ifd->bNumEndpoints;
             conf->if_desc[if_index].num_altsetting = ifd->bAlternateSetting;
-            Kprintf("parse_config_descriptor: interface %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
+            KprintfH("parse_config_descriptor: interface %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
                     (LONG)if_index,
                     (LONG)ifd->bInterfaceNumber,
                     (LONG)ifd->bAlternateSetting,
@@ -240,7 +240,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
 
             struct usb_endpoint_descriptor *epd = (struct usb_endpoint_descriptor *)cursor;
             CopyMem(epd, &current_if->ep_desc[ep_index], sizeof(struct usb_endpoint_descriptor));
-            Kprintf("  parse_config_descriptor: endpoint %ld: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%ld bInterval=%ld\n",
+            KprintfH("  parse_config_descriptor: endpoint %ld: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%ld bInterval=%ld\n",
                     (LONG)ep_index,
                     (LONG)epd->bEndpointAddress,
                     (LONG)epd->bmAttributes,
@@ -252,7 +252,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         }
         case USB_DT_SS_ENDPOINT_COMP:
         {
-            Kprintf("parse_config_descriptor: found SS EP COMP descriptor\n");
+            KprintfH("parse_config_descriptor: found SS EP COMP descriptor\n");
             if (current_if && ep_index > 0)
             {
                 struct usb_ss_ep_comp_descriptor *comp = (struct usb_ss_ep_comp_descriptor *)cursor;
@@ -262,13 +262,13 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         }
         default:
             // Skip class- or vendor-specific descriptors gracefully.
-            Kprintf("parse_config_descriptor: found class/vendor-specific descriptor 0x%lx, len=%ld\n", (ULONG)dtype, (LONG)dlen);
+            KprintfH("parse_config_descriptor: found class/vendor-specific descriptor 0x%lx, len=%ld\n", (ULONG)dtype, (LONG)dlen);
             break;
         }
 
         cursor += dlen;
     }
-    Kprintf("parse_config_descriptor: parsed config with %ld interfaces\n", (LONG)conf->no_of_if);
+    KprintfH("parse_config_descriptor: parsed config with %ld interfaces\n", (LONG)conf->no_of_if);
 
     if (conf->no_of_if != if_index)
     {
@@ -383,7 +383,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 		return COMMAND_SCHEDULED;
 	}
 
-	unsigned int timeout_ms = XHCI_TIMEOUT;
+	unsigned int timeout_ms = 0;
 	if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
 		timeout_ms = io->iouh_NakTimeout;
 
@@ -412,8 +412,7 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
             (ULONG)udev, (ULONG)udev->devnum, (LONG)ep, dir ? "IN" : "OUT",
             (LONG)io->iouh_Length, (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout);
 
-    unsigned int timeout_ms = io->iouh_NakTimeout;
-
+    unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
@@ -452,7 +451,7 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
             (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
             (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout, (LONG)io->iouh_MaxPktSize);
 
-    unsigned int timeout_ms = (unsigned int)io->iouh_Interval;
+    unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
@@ -568,21 +567,29 @@ int usb_glue_bus_oper(struct XHCIUnit *unit)
 
 static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
 {
+    KprintfH("parse_control_msg: dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx actual=%ld\n",
+            (ULONG)udev, (ULONG)udev->devnum,
+            (ULONG)io->iouh_SetupData.bmRequestType,
+            (ULONG)io->iouh_SetupData.bRequest,
+            (ULONG)io->iouh_SetupData.wValue,
+            (ULONG)io->iouh_SetupData.wIndex,
+            (ULONG)io->iouh_SetupData.wLength,
+            (LONG)io->iouh_Actual);
     
     /* If this was a successful GET_DESCRIPTOR(STRING) IN transfer and we got
      * an odd number of bytes, clamp to even to avoid a dangling half UTF-16
      * code unit, which Poseidon may display as a trailing '?'.
      */
-    if ((io->iouh_SetupData.bRequest == USB_REQ_GET_DESCRIPTOR) &&
-        (io->iouh_SetupData.bmRequestType & USB_DIR_IN) && (((LE16(io->iouh_SetupData.wValue)) >> 8) == USB_DT_STRING))
-    {
-        if ((io->iouh_Actual & 1) != 0)
-        {
-            Kprintf("usb_glue_ctrl: clamping odd string length %ld to %ld\n",
-                    (LONG)io->iouh_Actual, (LONG)(io->iouh_Actual - 1));
-            io->iouh_Actual -= 1;
-        }
-    }
+    // if ((io->iouh_SetupData.bRequest == USB_REQ_GET_DESCRIPTOR) &&
+    //     (io->iouh_SetupData.bmRequestType & USB_DIR_IN) && (((LE16(io->iouh_SetupData.wValue)) >> 8) == USB_DT_STRING))
+    // {
+    //     if ((io->iouh_Actual & 1) != 0)
+    //     {
+    //         Kprintf("usb_glue_ctrl: clamping odd string length %ld to %ld\n",
+    //                 (LONG)io->iouh_Actual, (LONG)(io->iouh_Actual - 1));
+    //         io->iouh_Actual -= 1;
+    //     }
+    // }
 
     /* If this was a successful GET_DESCRIPTOR(CONFIGURATION),
      * cache the configuration descriptor for later use.

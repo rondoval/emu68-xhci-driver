@@ -66,6 +66,7 @@ void xhci_ep_set_failed(struct usb_device *udev, int ep_index)
     ep_ctx->trb_length = 0;
     ep_ctx->trb_available_length = 0;
     ep_ctx->timeout_stamp = 0;
+    ep_ctx->timeout_active = FALSE;
     ep_ctx->current_req = NULL;
 }
 
@@ -83,6 +84,7 @@ void xhci_ep_set_idle(struct usb_device *udev, int ep_index)
     ep_ctx->trb_length = 0;
     ep_ctx->trb_available_length = 0;
     ep_ctx->timeout_stamp = 0;
+    ep_ctx->timeout_active = FALSE;
     if (ep_ctx->current_req)
         Kprintf("xhci_ep_set_idle: WARNING: current_req not NULL (%lx)\n", (LONG)ep_ctx->current_req);
     ep_ctx->current_req = NULL;
@@ -111,7 +113,16 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
     ep_ctx->trb_addr = trb_addr;
     ep_ctx->trb_length = req->iouh_Length;
     ep_ctx->trb_available_length = req->iouh_Length;
-    ep_ctx->timeout_stamp = get_time() + timeout_ms * 1000;
+    if (timeout_ms == 0)
+    {
+        ep_ctx->timeout_stamp = 0;
+        ep_ctx->timeout_active = FALSE;
+    }
+    else
+    {
+        ep_ctx->timeout_stamp = get_time() + timeout_ms * 1000;
+        ep_ctx->timeout_active = TRUE;
+    }
 }
 
 void xhci_ep_set_resetting(struct usb_device *udev, int ep_index)
@@ -126,6 +137,7 @@ void xhci_ep_set_resetting(struct usb_device *udev, int ep_index)
 
     ep_ctx->state = USB_DEV_EP_STATE_RESETTING;
     ep_ctx->timeout_stamp = get_time() + XHCI_TIMEOUT * 1000;
+    ep_ctx->timeout_active = TRUE;
 }
 
 void xhci_ep_set_aborting(struct usb_device *udev, int ep_index)
@@ -158,6 +170,7 @@ void xhci_ep_set_aborting(struct usb_device *udev, int ep_index)
 
     ep_ctx->state = USB_DEV_EP_STATE_ABORTING;
     ep_ctx->timeout_stamp = get_time() + XHCI_TIMEOUT * 1000;
+    ep_ctx->timeout_active = TRUE;
 }
 
 struct IOUsbHWReq *xhci_ep_get_next_request(struct usb_device *udev, int ep_index)
@@ -331,6 +344,8 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
                 xhci_reset_ep(udev, ep);
                 continue;
             }
+            if (!ep_ctx->timeout_active)
+                continue;
             if (ep_ctx->timeout_stamp > now)
                 continue;
 
@@ -407,9 +422,9 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
     u32 flags = LE32(event->trans_event.flags);
     int ep_index = TRB_TO_EP_INDEX(flags);
     u64 buf_64 = LE64(event->trans_event.buffer);
-    int length = udev->ep_context[ep_index].trb_length;
+    int length = ep_ctx->trb_length;
 
-    KprintfH("xhci_ctrl_tx: first event flags=%08lx status=%08lx buf=%08lx%08lx\n",
+    KprintfH("xhci_ctrl_tx: event flags=%08lx status=%08lx buf=%08lx%08lx\n",
              (ULONG)LE32(event->generic.field[3]),
              (ULONG)LE32(event->generic.field[2]),
              (ULONG)upper_32_bits(buf_64),
@@ -418,7 +433,7 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
     ULONG status;
     int act_len;
     record_transfer_result(event, length, &status, &act_len);
-    KprintfH("xhci_ctrl_tx: result status=%ld act_len=%ld comp=%ld\n",
+    Kprintf("xhci_ctrl_tx: result status=%ld act_len=%ld comp=%ld\n",
              (LONG)status, (LONG)act_len,
              (LONG)GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
 
@@ -428,7 +443,7 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
     if (length > 0)
     {
         xhci_inval_cache((uintptr_t)buf_64, length); // TODO dma_map should not realocate buffer... then revert to buffer
-        xhci_dma_unmap(ctrl, buf_64, length);
+        xhci_dma_unmap(ctrl, (dma_addr_t)ep_ctx->current_req->iouh_Data, length);
     }
 
     if (status == UHIOERR_STALL)
@@ -454,7 +469,7 @@ void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_contex
     (void)ep_ctx;
 
     /* Short data stage, clear up additional status stage event */
-    Kprintf("xhci_ctrl_tx: short-tx status event flags=%08lx status=%08lx\n",
+    KprintfH("xhci_ctrl_tx: short-tx status event flags=%08lx status=%08lx\n",
             (ULONG)LE32(event->generic.field[3]),
             (ULONG)LE32(event->generic.field[2]));
 
@@ -494,7 +509,7 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     record_transfer_result(event, ep_ctx->trb_available_length, &status, &act_len);
     xhci_acknowledge_event(ctrl);
     xhci_inval_cache((uintptr_t)buf_64, length);
-    xhci_dma_unmap(ctrl, buf_64, length);
+    xhci_dma_unmap(ctrl, (dma_addr_t)ep_ctx->current_req->iouh_Data, length);
     Kprintf("xhci_bulk_tx: done status=%ld act_len=%ld\n", (LONG)status, (LONG)act_len);
 
     io_reply_data(udev, ep_ctx->current_req, status, act_len);

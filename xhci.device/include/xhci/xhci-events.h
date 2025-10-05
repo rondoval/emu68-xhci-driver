@@ -24,6 +24,7 @@ struct ep_context
 
     struct IOUsbHWReq *current_req; /* current request being processed */
     ULONG timeout_stamp;            /* deadline of the request */
+    BOOL timeout_active;            /* whether timeout_stamp is valid */
     enum ep_state state;
 
     dma_addr_t trb_addr;
