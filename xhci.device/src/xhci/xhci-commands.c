@@ -168,7 +168,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     xhci_acknowledge_event(ctrl);
-    Kprintf("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
+    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
     if (GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
     {
         Kprintf("ERROR: Enable Slot command failed.\n");
@@ -197,7 +197,7 @@ void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, uni
 
 void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
-    Kprintf("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
+    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
 
     int err = UHIOERR_NO_ERROR;
     switch (GET_COMP_CODE(LE32(event->event_cmd.status)))
@@ -216,7 +216,7 @@ void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
         err = UHIOERR_BADPARAMS;
         break;
     case COMP_SUCCESS:
-        Kprintf("Successful Address Device command\n");
+        KprintfH("Successful Address Device command\n");
         break;
     default:
         Kprintf("ERROR: unexpected command completion code 0x%lx.\n",
@@ -243,7 +243,7 @@ void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
                      virt_dev->out_ctx->size);
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->out_ctx);
 
-    Kprintf("xHC internal address is: %ld dev_info=%08lx dev_info2=%08lx dev_state=%08lx\n",
+    KprintfH("xHC internal address is: %ld dev_info=%08lx dev_info2=%08lx dev_state=%08lx\n",
             (ULONG)(LE32(slot_ctx->dev_state) & DEV_ADDR_MASK),
             (ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2), (ULONG)LE32(slot_ctx->dev_state));
 
@@ -304,6 +304,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
  */
 void xhci_reset_ep(struct usb_device *udev, int ep_index)
 {
+    //TODO seems to fail... test and debug
     struct xhci_ctrl *ctrl = udev->controller;
 
     Kprintf("Resetting EP %ld...\n", ep_index);
@@ -348,7 +349,7 @@ void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct I
     virt_dev = ctrl->devs[udev->slot_id];
     in_ctx = virt_dev->in_ctx;
 
-    Kprintf("about to issue EVAL_CONTEXT or CONFIG_EP\n");
+    KprintfH("about to issue EVAL_CONTEXT or CONFIG_EP\n");
     xhci_flush_cache((uintptr_t)in_ctx->bytes, in_ctx->size);
     xhci_queue_command(ctrl, in_ctx->dma, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
 }
@@ -366,7 +367,7 @@ static void xhci_enable_slot(struct usb_device *udev, struct IOUsbHWReq *req)
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
-    Kprintf("queue ENABLE_SLOT\n");
+    KprintfH("queue ENABLE_SLOT\n");
     xhci_queue_command(ctrl, 0, 0, 0, TRB_ENABLE_SLOT, req, udev);
 }
 
@@ -405,7 +406,7 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     // }
 
     virt_dev = ctrl->devs[slot_id];
-    Kprintf("virt_dev=%lx, slot_id=%ld\n", (ULONG)virt_dev, (LONG)slot_id);
+    KprintfH("virt_dev=%lx, slot_id=%ld\n", (ULONG)virt_dev, (LONG)slot_id);
     if (!virt_dev)
     {
         Kprintf("ERROR: no virt_dev for slot %ld\n", (ULONG)slot_id);
@@ -430,7 +431,7 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
      * This is the first Set Address since device plug-in
      * so setting up the slot context.
      */
-    Kprintf("Setting up addressable device (slot %ld)\n", (ULONG)slot_id);
+    KprintfH("Setting up addressable device (slot %ld)\n", (ULONG)slot_id);
     xhci_setup_addressable_virt_dev(ctrl, udev, root_portnr);
 
     ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
@@ -439,7 +440,7 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     ctrl_ctx->add_flags = LE32(SLOT_FLAG | EP0_FLAG);
     ctrl_ctx->drop_flags = 0;
 
-    Kprintf("queue ADDR_DEV cmd, in_ctx->dma=%lx\n", (ULONG)virt_dev->in_ctx->dma);
+    KprintfH("queue ADDR_DEV cmd, in_ctx->dma=%lx\n", (ULONG)virt_dev->in_ctx->dma);
     xhci_queue_command(ctrl, virt_dev->in_ctx->dma, slot_id, 0, TRB_ADDR_DEV, req, udev);
 }
 

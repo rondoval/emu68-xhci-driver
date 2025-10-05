@@ -154,7 +154,7 @@ dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, size_t size)
 	bounce->next = ctrl->dma_bounce_list;
 	ctrl->dma_bounce_list = bounce;
 
-	Kprintf("xhci_dma_map: bounce %lx -> %lx len=%ld\n",
+	KprintfH("xhci_dma_map: bounce %lx -> %lx len=%ld\n",
 			 (ULONG)addr, (ULONG)aligned, (LONG)size);
 
 	return (dma_addr_t)(uintptr_t)aligned;
@@ -171,7 +171,7 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, size_t size)
 	while (*link)
 	{
 		struct xhci_dma_bounce *node = *link;
-		if ((dma_addr_t)(uintptr_t)node->bounce == addr)
+		if ((dma_addr_t)(uintptr_t)node->orig == addr)
 		{
 			xhci_inval_cache((uintptr_t)node->bounce, node->alloc_len);
 			if (node->size)
@@ -180,7 +180,7 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, size_t size)
 			*link = node->next;
 			FreeVecPooled(ctrl->memoryPool, node);
 			KprintfH("xhci_dma_unmap: restored %lx from %lx len=%ld\n",
-					 (ULONG)node->orig, (ULONG)addr, (LONG)size);
+					 (ULONG)node->orig, (ULONG)node->bounce, (LONG)size);
 			return;
 		}
 		link = &(*link)->next;
@@ -512,7 +512,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 									struct xhci_virt_device *virt_dev,
 									struct usb_interface *ifdesc)
 {
-	Kprintf("xhci_init_ep_contexts_if: enter\n");
+	KprintfH("xhci_init_ep_contexts_if: enter\n");
 	struct xhci_ep_ctx *ep_ctx[MAX_EP_CTX_NUM];
 	int cur_ep;
 	int ep_index;
@@ -628,13 +628,13 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
  */
 int xhci_set_configuration(struct usb_device *udev, int config_value)
 {
-	Kprintf("xhci_set_configuration: config_val=%ld\n", (LONG)config_value);
+	KprintfH("xhci_set_configuration: config_val=%ld\n", (LONG)config_value);
 
 	struct usb_config *cfg = NULL;
 	for (struct MinNode *node = udev->configurations.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
 	{
 		struct usb_config *checking = (struct usb_config *)node;
-		Kprintf("  found config: bConfigurationValue=%ld\n", (LONG)checking->desc.bConfigurationValue);
+		KprintfH("  found config: bConfigurationValue=%ld\n", (LONG)checking->desc.bConfigurationValue);
 		if (checking->desc.bConfigurationValue == config_value)
 		{
 			cfg = checking;
@@ -910,17 +910,17 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		switch (LE16(req->wValue) >> 8)
 		{
 		case USB_DT_DEVICE:
-			Kprintf("get USB_DT_DEVICE\n");
+			KprintfH("get USB_DT_DEVICE\n");
 			srcptr = &descriptor.device;
 			srclen = 0x12;
 			break;
 		case USB_DT_CONFIG:
-			Kprintf("get USB_DT_CONFIG\n");
+			KprintfH("get USB_DT_CONFIG\n");
 			srcptr = &descriptor.config;
 			srclen = 0x19;
 			break;
 		case USB_DT_STRING:
-			Kprintf("get USB_DT_STRING\n");
+			KprintfH("get USB_DT_STRING\n");
 			switch (LE16(req->wValue) & 0xff)
 			{
 			case 0: /* Language */
@@ -954,14 +954,14 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		tmpbuf[1] = 0; /* remote-wakeup disabled */
 		srcptr = tmpbuf;
 		srclen = 2;
-		Kprintf("USB_REQ_GET_STATUS\n");
+		KprintfH("USB_REQ_GET_STATUS\n");
 		break;
 	case USB_REQ_GET_DESCRIPTOR | ((USB_DIR_IN | USB_RT_HUB) << 8):
 		switch (LE16(req->wValue) >> 8)
 		{
 		case USB_DT_HUB:
 		case USB_DT_SS_HUB:
-			Kprintf("get USB_DT_HUB config\n");
+			KprintfH("get USB_DT_HUB config\n");
 			srcptr = &ctrl->hub_desc;
 			srclen = 0x8;
 			break;
@@ -971,7 +971,7 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		}
 		break;
 	case USB_REQ_SET_ADDRESS | (USB_RECIP_DEVICE << 8):
-		Kprintf("USB_REQ_SET_ADDRESS rootdev=%ld\n", (LONG)LE16(req->wValue));
+		KprintfH("USB_REQ_SET_ADDRESS rootdev=%ld\n", (LONG)LE16(req->wValue));
 		udev->speed = USB_SPEED_SUPER;
 		ctrl->rootdev = LE16(req->wValue);
 		ctrl->devices[ctrl->rootdev] = *udev;
@@ -979,7 +979,7 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		ctrl->devices[ctrl->rootdev].devnum = ctrl->rootdev;
 		break;
 	case DeviceOutRequest | USB_REQ_SET_CONFIGURATION:
-		Kprintf("USB_REQ_SET_CONFIGURATION\n");
+		KprintfH("USB_REQ_SET_CONFIGURATION\n");
 		/* Do nothing */
 		break;
 	case USB_REQ_GET_STATUS | ((USB_DIR_IN | USB_RT_HUB) << 8):
@@ -987,7 +987,7 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		tmpbuf[1] = 0;
 		srcptr = tmpbuf;
 		srclen = 2;
-		Kprintf("USB_REQ_GET_STATUS HUB\n");
+		KprintfH("USB_REQ_GET_STATUS HUB\n");
 		break;
 	case USB_REQ_GET_STATUS | ((USB_RT_PORT | USB_DIR_IN) << 8):
 		_memset(tmpbuf, 0, 4);

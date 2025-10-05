@@ -529,7 +529,7 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 		return -EEXIST;
 	}
 
-	Kprintf("xhci_alloc_virt_device: slot_id=%ld\n", (ULONG)slot_id);
+	KprintfH("xhci_alloc_virt_device: slot_id=%ld\n", (ULONG)slot_id);
 	ctrl->devs[slot_id] = AllocVecPooled(ctrl->memoryPool,
 					sizeof(struct xhci_virt_device));
 
@@ -558,7 +558,7 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 		Kprintf("Failed to allocate in context for virt dev\n");
 		return -ENOMEM;
 	}
-	Kprintf("xhci_alloc_virt_device: in_ctx bytes=%lx dma=%lx size=%ld\n",
+	KprintfH("xhci_alloc_virt_device: in_ctx bytes=%lx dma=%lx size=%ld\n",
 		(ULONG)virt_dev->in_ctx->bytes, (ULONG)virt_dev->in_ctx->dma, (ULONG)virt_dev->in_ctx->size);
 
 	/* Allocate endpoint 0 ring */
@@ -837,7 +837,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	/* Extract the EP0 and Slot Ctrl */
 	ep0_ctx = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, 0);
 	slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
-	Kprintf("xhci_setup_addressable_virt_dev: slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
+	KprintfH("xhci_setup_addressable_virt_dev: slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
 		(ULONG)slot_id, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx,
 		(ULONG)ep0_ctx, (ULONG)slot_ctx);
 
@@ -896,22 +896,22 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	/* Step 4 - ring already allocated */
 	/* Step 5 */
 	ep0_ctx->ep_info2 = LE32(EP_TYPE(CTRL_EP));
-	Kprintf("xhci_setup_addressable_virt_dev: SPEED=%ld\n", (ULONG)speed);
+	KprintfH("xhci_setup_addressable_virt_dev: SPEED=%ld\n", (ULONG)speed);
 
 	switch (speed) {
 	case USB_SPEED_SUPER:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(512));
-	Kprintf("xhci_setup_addressable_virt_dev: MPS=512\n");
+	KprintfH("xhci_setup_addressable_virt_dev: MPS=512\n");
 		break;
 	case USB_SPEED_HIGH:
 	/* USB core guesses at a 64-byte max packet first for FS devices */
 	case USB_SPEED_FULL:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(64));
-	Kprintf("xhci_setup_addressable_virt_dev: MPS=64\n");
+	KprintfH("xhci_setup_addressable_virt_dev: MPS=64\n");
 		break;
 	case USB_SPEED_LOW:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(8));
-	Kprintf("xhci_setup_addressable_virt_dev: MPS=8\n");
+	KprintfH("xhci_setup_addressable_virt_dev: MPS=8\n");
 		break;
 	default:
 		/* New speed? */
@@ -934,7 +934,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 
 	xhci_flush_cache((uintptr_t)ep0_ctx, sizeof(struct xhci_ep_ctx));
 	xhci_flush_cache((uintptr_t)slot_ctx, sizeof(struct xhci_slot_ctx));
-	Kprintf("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
+	KprintfH("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
 		(ULONG)LE64(ep0_ctx->deq), (ULONG)LE32(ep0_ctx->tx_info),
 		(ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2));
 }
