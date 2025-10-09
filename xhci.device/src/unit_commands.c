@@ -87,7 +87,7 @@ static int Do_CMD_RESET(struct IOUsbHWReq *io)
 
 static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
 {
-    Kprintf("[xhci] %s: UHCMD_QUERYDEVICE\n", __func__);
+    KprintfH("[xhci] %s: UHCMD_QUERYDEVICE\n", __func__);
 
     if(!io->iouh_Data) {
         io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
@@ -96,10 +96,10 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
 
     struct TagItem *tag, *tagList = (struct TagItem *)io->iouh_Data;
     int filled = 0;
-    Kprintf("[xhci] %s: Processing tag list at 0x%lx\n", __func__, tagList);
+    KprintfH("[xhci] %s: Processing tag list at 0x%lx\n", __func__, tagList);
     while((tag = NextTagItem(&tagList))) {
         if (!tag->ti_Data) {
-            Kprintf("[xhci] %s: Tag 0x%lx has NULL data ptr, skipping\n", __func__, tag->ti_Tag);
+            KprintfH("[xhci] %s: Tag 0x%lx has NULL data ptr, skipping\n", __func__, tag->ti_Tag);
             continue;
         }
         ULONG *out = (ULONG *)tag->ti_Data;
@@ -147,10 +147,10 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
                 // Unknown tag: leave untouched
                 break;
         }
-        Kprintf("[xhci] %s: Processed tag 0x%lx\n", __func__, tag->ti_Tag);
+        KprintfH("[xhci] %s: Processed tag 0x%lx\n", __func__, tag->ti_Tag);
     }
 
-    Kprintf("[xhci] %s: Completed UHCMD_QUERYDEVICE\n", __func__);
+    KprintfH("[xhci] %s: Completed UHCMD_QUERYDEVICE\n", __func__);
     io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
     io->iouh_Actual = filled;
     return COMMAND_PROCESSED;
@@ -214,7 +214,7 @@ static inline int Do_UHCMD_USBOPER(struct IOUsbHWReq *io)
 static inline int Do_UHCMD_CONTROLXFER(struct IOUsbHWReq *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: UHCMD_CONTROLXFER\n", __func__);
+    KprintfH("[xhci] %s: UHCMD_CONTROLXFER\n", __func__);
 
     return usb_glue_ctrl(unit, io);
 }
@@ -248,7 +248,7 @@ static inline int Do_UHCMD_INTXFER(struct IOUsbHWReq *io)
 static inline int Do_UHCMD_BULKXFER(struct IOUsbHWReq *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: UHCMD_BULKXFER\n", __func__);
+    KprintfH("[xhci] %s: UHCMD_BULKXFER\n", __func__);
 
     return usb_glue_bulk(unit, io);
 }

@@ -47,12 +47,8 @@ int UnitTaskStart(struct XHCIUnit *unit);
 void UnitTaskStop(struct XHCIUnit *unit);
 
 int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
-int UnitConfigure(struct XHCIUnit *unit);
-int UnitOnline(struct XHCIUnit *unit);
-void UnitOffline(struct XHCIUnit *unit);
 int UnitClose(struct XHCIUnit *unit);
 
-BOOL ReceiveFrame(struct XHCIUnit *unit, UBYTE *packet, ULONG packetLength);
 void ProcessCommand(struct IOUsbHWReq *io);
 
 #endif

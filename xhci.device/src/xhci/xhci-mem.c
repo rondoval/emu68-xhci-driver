@@ -22,8 +22,10 @@
 #include <compat.h>
 #include <debug.h>
 
-#include <usb.h>
-#include <xhci.h>
+#include <xhci/usb.h>
+#include <xhci/xhci.h>
+#include <xhci/xhci-commands.h>
+#include <xhci/xhci-debug.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -196,6 +198,16 @@ static void xhci_free_virt_devices(struct xhci_ctrl *ctrl)
  */
 void xhci_cleanup(struct xhci_ctrl *ctrl)
 {
+	struct xhci_dma_bounce *bounce = ctrl->dma_bounce_list;
+	while (bounce) {
+		struct xhci_dma_bounce *next = bounce->next;
+		if (bounce->bounce)
+			memalign_free(ctrl->memoryPool, bounce->bounce);
+		FreeVecPooled(ctrl->memoryPool, bounce);
+		bounce = next;
+	}
+	ctrl->dma_bounce_list = NULL;
+
 	xhci_ring_free(ctrl, ctrl->event_ring);
 	xhci_ring_free(ctrl, ctrl->cmd_ring);
 	xhci_scratchpad_free(ctrl);
@@ -206,7 +218,7 @@ void xhci_cleanup(struct xhci_ctrl *ctrl)
 	xhci_dma_unmap(ctrl, ctrl->dcbaa->dma,
 		       sizeof(struct xhci_device_context_array));
 	memalign_free(ctrl->memoryPool, ctrl->dcbaa);
-	_memset(ctrl, '\0', sizeof(struct xhci_ctrl));
+	_memset(ctrl, 0, sizeof(struct xhci_ctrl));
 }
 
 /**
@@ -519,7 +531,7 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 		return -EEXIST;
 	}
 
-	Kprintf("xhci_alloc_virt_device: slot_id=%ld\n", (ULONG)slot_id);
+	KprintfH("xhci_alloc_virt_device: slot_id=%ld\n", (ULONG)slot_id);
 	ctrl->devs[slot_id] = AllocVecPooled(ctrl->memoryPool,
 					sizeof(struct xhci_virt_device));
 
@@ -548,11 +560,11 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 		Kprintf("Failed to allocate in context for virt dev\n");
 		return -ENOMEM;
 	}
-	Kprintf("xhci_alloc_virt_device: in_ctx bytes=%lx dma=%lx size=%ld\n",
+	KprintfH("xhci_alloc_virt_device: in_ctx bytes=%lx dma=%lx size=%ld\n",
 		(ULONG)virt_dev->in_ctx->bytes, (ULONG)virt_dev->in_ctx->dma, (ULONG)virt_dev->in_ctx->size);
 
 	/* Allocate endpoint 0 ring */
-	virt_dev->eps[0].ring = xhci_ring_alloc(ctrl, 1, true);
+	virt_dev->eps[0].ring = xhci_ring_alloc(ctrl, 1, TRUE);
 	if (!virt_dev->eps[0].ring) {
 		Kprintf("xhci_alloc_virt_device: EP0 ring alloc failed\n");
 		return -ENOMEM;
@@ -608,7 +620,7 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	xhci_writeq(&hcor->or_dcbaap, ctrl->dcbaa->dma);
 
 	/* Command ring control pointer register initialization */
-	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, true);
+	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, TRUE);
 
 	/* Set the address in the Command Ring Control register */
 	trb_64 = ctrl->cmd_ring->first_seg->dma;
@@ -632,7 +644,7 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	ctrl->ir_set = &ctrl->run_regs->ir_set[0];
 
 	/* Event ring does not maintain link TRB */
-	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, false);
+	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, FALSE);
 	ctrl->erst.entries = xhci_malloc(ctrl, sizeof(struct xhci_erst_entry) *
 					 ERST_NUM_SEGS);
 	ctrl->erst.erst_dma_addr = xhci_dma_map(ctrl, ctrl->erst.entries,
@@ -827,7 +839,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	/* Extract the EP0 and Slot Ctrl */
 	ep0_ctx = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, 0);
 	slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
-	Kprintf("xhci_setup_addressable_virt_dev: slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
+	KprintfH("xhci_setup_addressable_virt_dev: slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
 		(ULONG)slot_id, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx,
 		(ULONG)ep0_ctx, (ULONG)slot_ctx);
 
@@ -857,12 +869,12 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	}
 
 	/* Low/full-speed devices behind a high-speed hub need TT info */
-	bool needs_tt = (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) &&
+	BOOL needs_tt = (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) &&
 		udev->parent &&
 		(udev->parent->speed == USB_SPEED_HIGH ||
 		 udev->parent->speed == USB_SPEED_SUPER ||
 		 udev->parent->speed == USB_SPEED_SUPER_PLUS);
-	bool have_tt_info = needs_tt && udev->tt_slot && udev->tt_port;
+	BOOL have_tt_info = needs_tt && udev->tt_slot && udev->tt_port;
 
 	slot_ctx->dev_info = LE32(dev_info);
 
@@ -877,31 +889,36 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 
 	u32 tt_info = 0;
 	if (have_tt_info)
-		tt_info = TT_SLOT(udev->tt_slot) | TT_PORT(udev->tt_port);
+	{
+		tt_info = TT_SLOT(udev->tt_slot) |
+				  TT_PORT(udev->tt_port);
+	}
+
 	Kprintf("xhci_setup_addressable_virt_dev: needs_tt=%ld have_tt_info=%ld tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
 		(int)needs_tt, (int)have_tt_info,
-		(int)udev->tt_slot, (int)udev->tt_port, (ULONG)tt_info);
+		(int)udev->tt_slot, (int)udev->tt_port,
+		(ULONG)tt_info);
 	slot_ctx->tt_info = LE32(tt_info);
 
 	/* Step 4 - ring already allocated */
 	/* Step 5 */
 	ep0_ctx->ep_info2 = LE32(EP_TYPE(CTRL_EP));
-	Kprintf("xhci_setup_addressable_virt_dev: SPEED=%ld\n", (ULONG)speed);
+	KprintfH("xhci_setup_addressable_virt_dev: SPEED=%ld\n", (ULONG)speed);
 
 	switch (speed) {
 	case USB_SPEED_SUPER:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(512));
-	Kprintf("xhci_setup_addressable_virt_dev: MPS=512\n");
+	KprintfH("xhci_setup_addressable_virt_dev: MPS=512\n");
 		break;
 	case USB_SPEED_HIGH:
 	/* USB core guesses at a 64-byte max packet first for FS devices */
 	case USB_SPEED_FULL:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(64));
-	Kprintf("xhci_setup_addressable_virt_dev: MPS=64\n");
+	KprintfH("xhci_setup_addressable_virt_dev: MPS=64\n");
 		break;
 	case USB_SPEED_LOW:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(8));
-	Kprintf("xhci_setup_addressable_virt_dev: MPS=8\n");
+	KprintfH("xhci_setup_addressable_virt_dev: MPS=8\n");
 		break;
 	default:
 		/* New speed? */
@@ -924,7 +941,56 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 
 	xhci_flush_cache((uintptr_t)ep0_ctx, sizeof(struct xhci_ep_ctx));
 	xhci_flush_cache((uintptr_t)slot_ctx, sizeof(struct xhci_slot_ctx));
-	Kprintf("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
+	KprintfH("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
 		(ULONG)LE64(ep0_ctx->deq), (ULONG)LE32(ep0_ctx->tx_info),
 		(ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2));
+}
+
+void xhci_update_hub_tt(struct usb_device *udev)
+{
+	if (!udev || !udev->controller)
+		return;
+
+	if (udev->slot_id == 0)
+		return;
+
+	struct xhci_ctrl *ctrl = udev->controller;
+	struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
+	if (!virt_dev || !virt_dev->in_ctx || !virt_dev->out_ctx)
+		return;
+
+	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+
+	/* Start from the controller's current view of the slot context */
+	xhci_slot_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx);
+
+	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
+	struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
+	if (!slot_ctx || !ctrl_ctx)
+		return;
+
+	u32 dev_info = LE32(slot_ctx->dev_info);
+	u32 tt_info = LE32(slot_ctx->tt_info);
+
+	dev_info |= DEV_HUB;
+
+	tt_info &= ~(TT_SLOT(0xff) | TT_PORT(0xff) | TT_THINK_TIME(0x3));
+	tt_info = TT_SLOT(udev->tt_slot) |
+			  TT_PORT(udev->tt_port) |
+			  TT_THINK_TIME(udev->tt_think_time & 0x3);
+
+	slot_ctx->dev_info = LE32(dev_info);
+	slot_ctx->tt_info = LE32(tt_info);
+
+	ctrl_ctx->add_flags = LE32(SLOT_FLAG);
+	ctrl_ctx->drop_flags = 0;
+
+	xhci_flush_cache((uintptr_t)slot_ctx, sizeof(*slot_ctx));
+	xhci_flush_cache((uintptr_t)ctrl_ctx, sizeof(*ctrl_ctx));
+	/* xhci_configure_endpoints will flush the full input context */
+
+	Kprintf("xhci_update_hub_tt: slot=%ld tt_code=%ld\n",
+		(ULONG)udev->slot_id, (LONG)udev->tt_think_time);
+
+	xhci_configure_endpoints(udev, TRUE, NULL);
 }

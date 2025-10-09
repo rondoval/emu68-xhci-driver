@@ -12,11 +12,17 @@ add_executable(xhci.device
     src/unit.c
     src/unit_task.c
     src/unit_commands.c
-    src/device_end.c
     src/usb_glue.c
+    src/xhci/xhci.c
+    src/xhci/xhci-ring.c
+    src/xhci/xhci-debug.c
+    src/xhci/xhci-mem.c
+    src/xhci/xhci-events.c
+    src/xhci/xhci-commands.c
+    src/device_end.c
 )
 
 target_include_directories(xhci.device PRIVATE include)
-target_link_libraries(xhci.device common xhci_driver pcie.library gcc)
+target_link_libraries(xhci.device common pcie.library gcc)
 
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device DESTINATION .)

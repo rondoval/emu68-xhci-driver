@@ -11,7 +11,6 @@ endif()
 
 add_subdirectory(common)
 add_subdirectory(pcie-lib/pcie.library)
-add_subdirectory(driver)
 add_subdirectory(xhci.device)
 
 # install(FILES ${CMAKE_SOURCE_DIR}/Install DESTINATION .)

@@ -17,13 +17,7 @@
 #define HOST_XHCI_H_
 
 #include <compat.h>
-// #include <iommu.h>
-// #include <phys2bus.h>
-// #include <asm/types.h>
-// #include <asm/cache.h>
-// #include <asm/io.h>
-// #include <linux/list.h>
-// #include <linux/compat.h>
+#include <devices/usbhardware.h>
 
 #define MAX_EP_CTX_NUM		31
 #define XHCI_ALIGNMENT		64
@@ -824,6 +818,8 @@ struct xhci_event_cmd {
 
 /* Stop Endpoint TRB - ep_index to endpoint ID for this TRB */
 #define TRB_TO_EP_INDEX(p)		((((p) & (0x1f << 16)) >> 16) - 1)
+#define TRB_TO_ENDPOINT(p)		((((p) & (0x1f << 16)) >> 17))
+#define EP_INDEX_TO_ENDPOINT(p) (((p) + 1) >> 1)
 #define	EP_ID_FOR_TRB(p)		((((p) + 1) & 0x1f) << 16)
 
 #define SUSPEND_PORT_FOR_TRB(p)		(((p) & 1) << 23)
@@ -1197,6 +1193,14 @@ static inline void xhci_writeq(__le64 volatile *regs, const u64 val)
 /* true: Controller Not Ready to accept doorbell or op reg writes after reset */
 #define XHCI_STS_CNR		(1 << 11)
 
+struct xhci_dma_bounce {
+	struct xhci_dma_bounce *next;
+	void *orig;
+	void *bounce;
+	size_t size;
+	size_t alloc_len;
+};
+
 struct xhci_ctrl {
 	struct xhci_hccr *hccr;	/* R/O registers, not need for volatile */
 	struct xhci_hcor *hcor;
@@ -1218,10 +1222,12 @@ struct xhci_ctrl {
 	u16 hci_version;
 	int page_size;
 	u32 quirks;
+	struct xhci_dma_bounce *dma_bounce_list;
 
-	APTR memoryPool; //TODO initialize somewhere, then clean up
-	struct pci_device *pci_dev; //TODO: set somewhere
-	APTR privptr; /* private pointer for higher layers (xhci.device) */
+	APTR memoryPool;
+	struct pci_device *pci_dev;
+	struct usb_device devices[128];
+	struct MinList pending_commands; /* list of pending commands */
 #define XHCI_MTK_HOST		BIT(0)
 };
 
@@ -1244,20 +1250,17 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl,
 		    struct xhci_container_ctx *out_ctx);
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 				     struct usb_device *udev, int hop_portnr);
-void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr,
-			u32 slot_id, u32 ep_index, trb_type cmd);
-void xhci_acknowledge_event(struct xhci_ctrl *ctrl);
-union xhci_trb *xhci_wait_for_event(struct xhci_ctrl *ctrl, trb_type expected, unsigned int timeout_ms);
-int xhci_bulk_tx(struct usb_device *udev, unsigned long pipe,
-	 int length, void *buffer, unsigned int maxpacket,
-	 unsigned int timeout_ms);
-int xhci_ctrl_tx(struct usb_device *udev, unsigned long pipe,
-	 struct devrequest *req, int length, void *buffer,
-	 unsigned int maxpacket, unsigned int timeout_ms);
+void xhci_update_hub_tt(struct usb_device *udev);
+int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
+int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_check_maxpacket(struct usb_device *udev, unsigned int maxpacket);
 void xhci_flush_cache(uintptr_t addr, u32 type_len);
 void xhci_inval_cache(uintptr_t addr, u32 type_len);
 void xhci_cleanup(struct xhci_ctrl *ctrl);
+dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr,
+			  size_t size);
+void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr,
+		     size_t size);
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 				  BOOL link_trbs);
 int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);
@@ -1285,25 +1288,11 @@ int xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 
 extern struct dm_usb_ops xhci_usb_ops;
 
-struct xhci_ctrl *xhci_get_ctrl(struct usb_device *udev);
-
-static inline dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr,
-				      size_t size)
-{
-	(void)size;
-	(void)ctrl;
-	/*return dev_phys_to_bus(xhci_to_dev(ctrl), virt_to_phys(addr));*/
-	// i think we have identity mapping <4GB
-	return (dma_addr_t)addr;
-}
-
-static inline void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr,
-				  size_t size)
-{
-	(void)size;
-	(void)ctrl;
-	(void)addr;
-	/* do nothing */
-}
-
+void inc_deq(struct xhci_ctrl *ctrl, struct xhci_ring *ring);
+int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
+							u32 ep_state);
+dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
+			    BOOL more_trbs_coming, unsigned int *trb_fields);
+void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io);
+int xhci_set_configuration(struct usb_device *udev, int config_value);
 #endif /* HOST_XHCI_H_ */

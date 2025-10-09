@@ -10,19 +10,47 @@
 #include <dos/dos.h>
 
 #include <devices/usbhardware.h>
+#include <xhci/xhci-events.h>
 
 #include <compat.h>
 #include <device.h>
 #include <minlist.h>
 #include <debug.h>
+#include <config.h>
 
 struct Device *TimerBase = NULL;
 
-static inline BOOL ProcessReceive(struct XHCIUnit *unit)
+void ScheduleWork(struct XHCIUnit *unit)
 {
-    // TODO implement
     (void)unit;
-    return FALSE;
+    // TODO temporary
+    //  go through all devices and all endpoints
+    //  if there is one that is idle, has pending requests, and is not halted,
+    //  kick it to action
+    // TODO xhci_ep_get_next_request
+    // for (int i = 1; i <= unit->xhci_ctrl->max_slots; i++)
+    // {
+    //     struct usb_device *udev = unit->xhci_ctrl->devs[i] ? unit->xhci_ctrl->devs[i]->udev : NULL;
+    //     if (!udev)
+    //         continue;
+
+    //     for (int ep_index = 0; ep_index < USB_MAXENDPOINTS; ep_index++)
+    //     {
+    //         struct ep_context *ep_ctx = &udev->ep_context[ep_index];
+    //         if ((ep_ctx->state == USB_DEV_EP_STATE_IDLE || ep_ctx->state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT) &&
+    //             ep_ctx->current_req == NULL && !IsListEmpty(&ep_ctx->request_list) &&
+    //             !ep_ctx->halted)
+    //         {
+    //             struct IOUsbHWReq *next_req = xhci_ep_get_next_request(udev, ep_index);
+    //             if (next_req)
+    //             {
+    //                 Kprintf("[xhci] %s: Kicking EP %ld on dev %ld\n", __func__, (LONG)ep_index, (LONG)udev->devnum);
+    //                 ProcessCommand(next_req);
+    //                 activity = TRUE;
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
@@ -34,31 +62,24 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     unit->unit.unit_MsgPort.mp_Flags = PA_SIGNAL;
     unit->unit.unit_MsgPort.mp_Node.ln_Type = NT_MSGPORT;
 
-    // Create a timer, we'll use it to poll the PHY
+    // Create a timer, we'll use it to poll
     struct MsgPort *microHZTimerPort = CreateMsgPort();
-    struct MsgPort *vblankTimerPort = CreateMsgPort();
     struct timerequest *packetTimerReq = CreateIORequest(microHZTimerPort, sizeof(struct timerequest));
-    struct timerequest *statsTimerReq = CreateIORequest(vblankTimerPort, sizeof(struct timerequest));
-    if (microHZTimerPort == NULL || vblankTimerPort == NULL || packetTimerReq == NULL || statsTimerReq == NULL)
+    if (microHZTimerPort == NULL || packetTimerReq == NULL)
     {
         Kprintf("[xhci] %s: Failed to create timer msg port or request\n", __func__);
         DeleteMsgPort(microHZTimerPort);
-        DeleteMsgPort(vblankTimerPort);
         DeleteIORequest((struct IORequest *)packetTimerReq);
-        DeleteIORequest((struct IORequest *)statsTimerReq);
         Signal(parent, SIGBREAKF_CTRL_C);
         return;
     }
 
     UBYTE ret = OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, (struct IORequest *)packetTimerReq, LIB_MIN_VERSION);
-    UBYTE ret2 = OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_VBLANK, (struct IORequest *)statsTimerReq, LIB_MIN_VERSION);
-    if (ret || ret2)
+    if (ret)
     {
-        Kprintf("[xhci] %s: Failed to open timer device ret=%ld, %ld\n", __func__, ret, ret2);
+        Kprintf("[xhci] %s: Failed to open timer device ret=%ld\n", __func__, ret);
         DeleteMsgPort(microHZTimerPort);
-        DeleteMsgPort(vblankTimerPort);
         DeleteIORequest((struct IORequest *)packetTimerReq);
-        DeleteIORequest((struct IORequest *)statsTimerReq);
         Signal(parent, SIGBREAKF_CTRL_C);
         return;
     }
@@ -66,21 +87,13 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     /* used to reset stats on S2_ONLINE */
     TimerBase = packetTimerReq->tr_node.io_Device;
 
-    // ULONG backoff_idx = xhciConfig.poll_delay_len - 1; /* Start conservative until first activity */
-    // ULONG delay = xhciConfig.poll_delay_us[backoff_idx];
-    //TODO make configurable
-    ULONG delay = 500;
+    ULONG delay = UNIT_TASK_POLL_DELAY_MS * 1000;
 
     // Set a timer... we need to pull on RX
     packetTimerReq->tr_node.io_Command = TR_ADDREQUEST;
     packetTimerReq->tr_time.tv_secs = 0;
     packetTimerReq->tr_time.tv_micro = delay;
     SendIO(&packetTimerReq->tr_node);
-
-    statsTimerReq->tr_node.io_Command = TR_ADDREQUEST;
-    statsTimerReq->tr_time.tv_secs = 15;
-    statsTimerReq->tr_time.tv_micro = 0;
-    SendIO(&statsTimerReq->tr_node);
 
     unit->task = FindTask(NULL);
     /* Signal parent that Unit task is up and running now */
@@ -90,7 +103,6 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     BOOL activity = FALSE;
     ULONG waitMask = (1UL << unit->unit.unit_MsgPort.mp_SigBit) |
                      (1UL << microHZTimerPort->mp_SigBit) |
-                     (1UL << vblankTimerPort->mp_SigBit) |
                      SIGBREAKF_CTRL_C;
 
     do
@@ -109,7 +121,9 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
             }
         }
 
-        activity |= ProcessReceive(unit);
+        activity |= xhci_process_event_trb(unit->xhci_ctrl);
+
+        ScheduleWork(unit);
 
         // Timer expired, query PHY for link state
         if (sigset & (1UL << microHZTimerPort->mp_SigBit))
@@ -119,30 +133,10 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
                 WaitIO(&packetTimerReq->tr_node);
             }
 
-            /* TODO Periodic TX reclaim */
-            // if (unit->state == STATE_ONLINE)
-            //     bcmxhci_tx_reclaim(unit);
+            xhci_process_event_timeouts(unit->xhci_ctrl);
 
-            // TODO pool PHY for state
-
-            // if (activity /*|| unit->tx_watchdog_fast_ticks*/)
-            // {
-            //     backoff_idx = 0;
-            //     // if (unit->tx_watchdog_fast_ticks)
-            //     //     --unit->tx_watchdog_fast_ticks;
-            // }
-            // else
-            // {
-            //     if (backoff_idx + 1 < xhciConfig.poll_delay_len)
-            //         backoff_idx++;
-            // }
             activity = FALSE; /* reset activity */
-            // delay = xhciConfig.poll_delay_us[backoff_idx];
-            delay = 500; //TODO make configurable
-
-            /* TX watchdog soft cap: ensure we never sleep beyond this while descriptors outstanding */
-            // if (unit->tx_ring.free_bds < TX_DESCS && delay > xhciConfig.tx_reclaim_soft_us)
-            //     delay = xhciConfig.tx_reclaim_soft_us;
+            delay = UNIT_TASK_POLL_DELAY_MS * 1000;
 
             /* Re-arm timer */
             packetTimerReq->tr_node.io_Command = TR_ADDREQUEST;
@@ -151,35 +145,18 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
             SendIO(&packetTimerReq->tr_node);
         }
 
-        if (sigset & (1UL << vblankTimerPort->mp_SigBit))
-        {
-            if(CheckIO(&statsTimerReq->tr_node))
-            {
-                WaitIO(&statsTimerReq->tr_node);
-            }
-            //TODO is this needed
-
-            statsTimerReq->tr_node.io_Command = TR_ADDREQUEST;
-            statsTimerReq->tr_time.tv_secs = 15;
-            statsTimerReq->tr_time.tv_micro = 0;
-            SendIO(&statsTimerReq->tr_node);
-        }
         if (sigset & SIGBREAKF_CTRL_C)
         {
             Kprintf("[xhci] %s: Received SIGBREAKF_CTRL_C, stopping xhci task\n", __func__);
             AbortIO(&packetTimerReq->tr_node);
             WaitIO(&packetTimerReq->tr_node);
-            AbortIO(&statsTimerReq->tr_node);
-            WaitIO(&statsTimerReq->tr_node);
         }
     } while ((sigset & SIGBREAKF_CTRL_C) == 0);
 
     FreeSignal(unit->unit.unit_MsgPort.mp_SigBit);
     CloseDevice(&packetTimerReq->tr_node);
     DeleteIORequest(&packetTimerReq->tr_node);
-    DeleteIORequest(&statsTimerReq->tr_node);
     DeleteMsgPort(microHZTimerPort);
-    DeleteMsgPort(vblankTimerPort);
     unit->task = NULL;
 }
 
@@ -190,7 +167,7 @@ int UnitTaskStart(struct XHCIUnit *unit)
     // Get all memory we need for the receiver task
     struct MemList *ml = AllocMem(sizeof(struct MemList) + sizeof(struct MemEntry), MEMF_PUBLIC | MEMF_CLEAR);
     struct Task *task = AllocMem(sizeof(struct Task), MEMF_PUBLIC | MEMF_CLEAR);
-    ULONG *stack = AllocMem(/* TODO xhciConfig.unit_stack_bytes*/65535, MEMF_PUBLIC | MEMF_CLEAR);
+    ULONG *stack = AllocMem(STACK_SIZE, MEMF_PUBLIC | MEMF_CLEAR);
     if (!ml || !task || !stack)
     {
         Kprintf("[xhci] %s: Failed to allocate memory for xhci task\n", __func__);
@@ -199,7 +176,7 @@ int UnitTaskStart(struct XHCIUnit *unit)
         if (task)
             FreeMem(task, sizeof(struct Task));
         if (stack)
-            FreeMem(stack, /* TODO xhciConfig.unit_stack_bytes*/65535);
+            FreeMem(stack, STACK_SIZE);
         return UHIOERR_HOSTERROR;
     }
 
@@ -209,11 +186,11 @@ int UnitTaskStart(struct XHCIUnit *unit)
     ml->ml_ME[0].me_Length = sizeof(struct Task);
 
     ml->ml_ME[1].me_Un.meu_Addr = &stack[0];
-    ml->ml_ME[1].me_Length = /* TODO xhciConfig.unit_stack_bytes*/65535;
+    ml->ml_ME[1].me_Length = STACK_SIZE;
 
     // Set up stack
     task->tc_SPLower = &stack[0];
-    task->tc_SPUpper = &stack[65535 /* TODO */ / sizeof(ULONG)];
+    task->tc_SPUpper = &stack[STACK_SIZE / sizeof(ULONG)];
 
     // Push ThisTask and Unit on the stack
     stack = (ULONG *)task->tc_SPUpper;
@@ -223,7 +200,7 @@ int UnitTaskStart(struct XHCIUnit *unit)
 
     task->tc_Node.ln_Name = "xhci rx/tx";
     task->tc_Node.ln_Type = NT_TASK;
-    task->tc_Node.ln_Pri = 0/*TODO xhciConfig.unit_task_priority*/;
+    task->tc_Node.ln_Pri = UNIT_TASK_PRIORITY;
 
     _NewMinList((struct MinList *)&task->tc_MemEntry);
     AddHead(&task->tc_MemEntry, &ml->ml_Node);
@@ -234,7 +211,7 @@ int UnitTaskStart(struct XHCIUnit *unit)
         Kprintf("[xhci] %s: Failed to add xhci task\n", __func__);
         FreeMem(ml, sizeof(struct MemList) + sizeof(struct MemEntry));
         FreeMem(task, sizeof(struct Task));
-        FreeMem(&stack[0], /* TODO xhciConfig.unit_stack_bytes*/65535);
+        FreeMem(&stack[0], STACK_SIZE);
         return UHIOERR_HOSTERROR;
     }
 
