@@ -24,6 +24,8 @@
 
 #include <xhci/usb.h>
 #include <xhci/xhci.h>
+#include <xhci/xhci-commands.h>
+#include <xhci/xhci-debug.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -887,10 +889,15 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 
 	u32 tt_info = 0;
 	if (have_tt_info)
-		tt_info = TT_SLOT(udev->tt_slot) | TT_PORT(udev->tt_port);
+	{
+		tt_info = TT_SLOT(udev->tt_slot) |
+				  TT_PORT(udev->tt_port);
+	}
+
 	Kprintf("xhci_setup_addressable_virt_dev: needs_tt=%ld have_tt_info=%ld tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
 		(int)needs_tt, (int)have_tt_info,
-		(int)udev->tt_slot, (int)udev->tt_port, (ULONG)tt_info);
+		(int)udev->tt_slot, (int)udev->tt_port,
+		(ULONG)tt_info);
 	slot_ctx->tt_info = LE32(tt_info);
 
 	/* Step 4 - ring already allocated */
@@ -937,4 +944,53 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	KprintfH("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
 		(ULONG)LE64(ep0_ctx->deq), (ULONG)LE32(ep0_ctx->tx_info),
 		(ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2));
+}
+
+void xhci_update_hub_tt(struct usb_device *udev)
+{
+	if (!udev || !udev->controller)
+		return;
+
+	if (udev->slot_id == 0)
+		return;
+
+	struct xhci_ctrl *ctrl = udev->controller;
+	struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
+	if (!virt_dev || !virt_dev->in_ctx || !virt_dev->out_ctx)
+		return;
+
+	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+
+	/* Start from the controller's current view of the slot context */
+	xhci_slot_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx);
+
+	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
+	struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
+	if (!slot_ctx || !ctrl_ctx)
+		return;
+
+	u32 dev_info = LE32(slot_ctx->dev_info);
+	u32 tt_info = LE32(slot_ctx->tt_info);
+
+	dev_info |= DEV_HUB;
+
+	tt_info &= ~(TT_SLOT(0xff) | TT_PORT(0xff) | TT_THINK_TIME(0x3));
+	tt_info = TT_SLOT(udev->tt_slot) |
+			  TT_PORT(udev->tt_port) |
+			  TT_THINK_TIME(udev->tt_think_time & 0x3);
+
+	slot_ctx->dev_info = LE32(dev_info);
+	slot_ctx->tt_info = LE32(tt_info);
+
+	ctrl_ctx->add_flags = LE32(SLOT_FLAG);
+	ctrl_ctx->drop_flags = 0;
+
+	xhci_flush_cache((uintptr_t)slot_ctx, sizeof(*slot_ctx));
+	xhci_flush_cache((uintptr_t)ctrl_ctx, sizeof(*ctrl_ctx));
+	/* xhci_configure_endpoints will flush the full input context */
+
+	Kprintf("xhci_update_hub_tt: slot=%ld tt_code=%ld\n",
+		(ULONG)udev->slot_id, (LONG)udev->tt_think_time);
+
+	xhci_configure_endpoints(udev, TRUE, NULL);
 }

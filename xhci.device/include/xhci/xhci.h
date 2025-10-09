@@ -818,6 +818,8 @@ struct xhci_event_cmd {
 
 /* Stop Endpoint TRB - ep_index to endpoint ID for this TRB */
 #define TRB_TO_EP_INDEX(p)		((((p) & (0x1f << 16)) >> 16) - 1)
+#define TRB_TO_ENDPOINT(p)		((((p) & (0x1f << 16)) >> 17))
+#define EP_INDEX_TO_ENDPOINT(p) (((p) + 1) >> 1)
 #define	EP_ID_FOR_TRB(p)		((((p) + 1) & 0x1f) << 16)
 
 #define SUSPEND_PORT_FOR_TRB(p)		(((p) & 1) << 23)
@@ -1248,6 +1250,7 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl,
 		    struct xhci_container_ctx *out_ctx);
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 				     struct usb_device *udev, int hop_portnr);
+void xhci_update_hub_tt(struct usb_device *udev);
 int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_check_maxpacket(struct usb_device *udev, unsigned int maxpacket);

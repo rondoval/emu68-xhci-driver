@@ -58,10 +58,10 @@ static struct descriptor
 	{
 		0x12,				 /* bLength */
 		1,					 /* bDescriptorType: UDESC_DEVICE */
-		cpu_to_le16(0x0200), /* bcdUSB: v2.0 */
+		cpu_to_le16(0x0300), /* bcdUSB: v3.0 */
 		9,					 /* bDeviceClass: UDCLASS_HUB */
 		0,					 /* bDeviceSubClass: UDSUBCLASS_HUB */
-		0,					 /* bDeviceProtocol: 2.0 hub */
+		3,					 /* bDeviceProtocol: UDPROTO_SSHUBSTT */
 		64,					 /* bMaxPacketSize0: 64 bytes */
 		0x0000,				 /* idVendor */
 		0x0000,				 /* idProduct */
@@ -74,7 +74,7 @@ static struct descriptor
 	{
 		0x9,
 		2,				   /* bDescriptorType: UDESC_CONFIG */
-		cpu_to_le16(0x19), /* config + interface + endpoint */
+		cpu_to_le16(0x1f), /* include SS endpoint descriptor */
 		1,				   /* bNumInterface */
 		1,				   /* bConfigurationValue */
 		0,				   /* iConfiguration */
@@ -571,7 +571,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 
 		ep_ctx[ep_index]->ep_info2 = LE32(EP_TYPE(ep_type));
 		ep_ctx[ep_index]->ep_info2 |=
-			LE32(MAX_PACKET(get_unaligned(&endpt_desc->wMaxPacketSize)));
+			LE32(MAX_PACKET(LE16(get_unaligned(&endpt_desc->wMaxPacketSize))));
 
 		/* Allow 3 retries for everything but isoc, set CErr = 3 */
 		if (!usb_endpoint_xfer_isoc(endpt_desc))
@@ -595,16 +595,6 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 			LE32(EP_MAX_ESIT_PAYLOAD_LO(max_esit_payload) |
 				 EP_AVG_TRB_LENGTH(avg_trb_len));
 
-		/*
-		 * The MediaTek xHCI defines some extra SW parameters which
-		 * are put into reserved DWs in Slot and Endpoint Contexts
-		 * for synchronous endpoints.
-		 */
-		if (ctrl->quirks & XHCI_MTK_HOST)
-		{
-			ep_ctx[ep_index]->reserved[0] =
-				LE32(EP_BPKTS(1) | EP_BBM(1));
-		}
 		Kprintf("EP%ld %s: type=%ld maxp=%ld maxesit=%ld "
 				"interval=%ld mult=%ld maxburst=%ld\n",
 				(ULONG)usb_endpoint_num(endpt_desc),

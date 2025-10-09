@@ -1,0 +1,13 @@
+#ifndef XHCI_DEBUG_H
+#define XHCI_DEBUG_H
+
+struct xhci_ep_ctx;
+struct xhci_slot_ctx;
+
+void xhci_dump_ep_ctx(const char *tag,
+			unsigned int ep_index,
+			const struct xhci_ep_ctx *ep_ctx);
+void xhci_dump_slot_ctx(const char *tag,
+			  const struct xhci_slot_ctx *slot_ctx);
+
+#endif /* XHCI_DEBUG_H */

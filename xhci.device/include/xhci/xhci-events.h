@@ -34,11 +34,11 @@ struct ep_context
 
 struct usb_device; /* forward declaration */
 struct xhci_ctrl;  /* forward declaration */
-void xhci_ep_set_failed(struct usb_device *udev, int ep_index);
-void xhci_ep_set_idle(struct usb_device *udev, int ep_index);
+void xhci_ep_set_failed(struct usb_device *udev, int endpoint);
+void xhci_ep_set_idle(struct usb_device *udev, int endpoint);
 void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t trb_addr, ULONG timeout_ms);
-void xhci_ep_set_resetting(struct usb_device *udev, int ep_index);
-void xhci_ep_set_aborting(struct usb_device *udev, int ep_index);
+void xhci_ep_set_resetting(struct usb_device *udev, int endpoint);
+void xhci_ep_set_aborting(struct usb_device *udev, int endpoint);
 
 BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl);
 void xhci_process_event_timeouts(struct xhci_ctrl *ctrl);

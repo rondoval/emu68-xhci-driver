@@ -3,6 +3,7 @@
 #include <xhci/usb.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
+#include <xhci/xhci-debug.h>
 #include <xhci/xhci-events.h>
 #include <devices/usbhardware.h>
 #include <usb_glue.h>
@@ -13,6 +14,33 @@
 #endif
 
 static const command_handler command_handlers[];
+
+static const char *xhci_command_type_name(trb_type type)
+{
+    switch (type)
+    {
+    case TRB_ENABLE_SLOT:
+        return "ENABLE_SLOT";
+    case TRB_DISABLE_SLOT:
+        return "DISABLE_SLOT";
+    case TRB_ADDR_DEV:
+        return "ADDRESS_DEVICE";
+    case TRB_CONFIG_EP:
+        return "CONFIGURE_ENDPOINT";
+    case TRB_EVAL_CONTEXT:
+        return "EVALUATE_CONTEXT";
+    case TRB_RESET_EP:
+        return "RESET_ENDPOINT";
+    case TRB_STOP_RING:
+        return "STOP_RING";
+    case TRB_SET_DEQ:
+        return "SET_DEQ";
+    case TRB_RESET_DEV:
+        return "RESET_DEVICE";
+    default:
+        return "UNKNOWN";
+    }
+}
 
 /**
  * Generic function for queueing a command TRB on the command ring.
@@ -64,6 +92,9 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     pending_cmd->cmd_trb_dma = trb_dma;
     pending_cmd->udev = udev;
     pending_cmd->req = req;
+#ifdef DEBUG
+    pending_cmd->type = cmd;
+#endif
 
     pending_cmd->complete = command_handlers[cmd];
     AddTailMinList(&ctrl->pending_commands, (struct MinNode *)pending_cmd);
@@ -85,7 +116,7 @@ static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd,
     if (TRB_TO_SLOT_ID(flags) != slot_id)
     {
         Kprintf("Expected a TRB for slot %ld, got %ld\n", slot_id, TRB_TO_SLOT_ID(flags));
-        xhci_ep_set_failed(cmd->udev, ep_index);
+        xhci_ep_set_failed(cmd->udev, EP_INDEX_TO_ENDPOINT(ep_index));
 
         goto error;
     }
@@ -103,7 +134,7 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
 {
     u32 flags = LE32(event->event_cmd.flags);
     ULONG slot_id = cmd->udev->slot_id;
-    ULONG ep_index = TRB_TO_EP_INDEX(flags);
+    ULONG endpoint = TRB_TO_ENDPOINT(flags);
 
     if (TRB_TO_SLOT_ID(flags) != slot_id || GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
     {
@@ -111,10 +142,10 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
                 slot_id,
                 TRB_TO_SLOT_ID(flags),
                 GET_COMP_CODE(LE32(event->event_cmd.status)));
-        xhci_ep_set_failed(cmd->udev, ep_index);
+        xhci_ep_set_failed(cmd->udev, endpoint);
         goto error;
     }
-    xhci_ep_set_idle(cmd->udev, ep_index);
+    xhci_ep_set_idle(cmd->udev, endpoint);
 
 error:
     xhci_acknowledge_event(ctrl);
@@ -147,13 +178,51 @@ static void handle_abort_stop_ring(struct xhci_ctrl *ctrl, struct pending_comman
  */
 static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
+    ULONG slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
+#ifdef DEBUG
+    trb_type type = cmd->type;
+    const char *type_name = xhci_command_type_name(type);
+#endif
+    xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
+
     xhci_acknowledge_event(ctrl);
 
-    if (GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
+    if (comp != COMP_SUCCESS)
     {
-        Kprintf("ERROR: %s command returned completion code %ld.\n", GET_COMP_CODE(LE32(event->event_cmd.status)));
+#ifdef DEBUG
+        Kprintf("ERROR: %s command for slot %ld returned completion code 0x%lx.\n",
+                type_name, slot_id, (ULONG)comp);
+
+        if (cmd->udev)
+        {
+            struct xhci_virt_device *virt_dev = ctrl->devs[cmd->udev->slot_id];
+            if (virt_dev)
+            {
+                xhci_inval_cache((uintptr_t)virt_dev->in_ctx->bytes, virt_dev->in_ctx->size);
+                xhci_dump_slot_ctx("input slot ctx (failure)", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
+                xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+                xhci_dump_slot_ctx("output slot ctx (failure)", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
+            }
+        }
+#endif
         return;
     }
+
+#ifdef DEBUG
+    KprintfH("%s command for slot %ld completed successfully\n", type_name, slot_id);
+
+    if (type == TRB_EVAL_CONTEXT && cmd->udev)
+    {
+        struct xhci_virt_device *virt_dev = ctrl->devs[cmd->udev->slot_id];
+        if (virt_dev)
+        {
+            xhci_inval_cache((uintptr_t)virt_dev->in_ctx->bytes, virt_dev->in_ctx->size);
+            xhci_dump_slot_ctx("input slot ctx (success)", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
+            xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+            xhci_dump_slot_ctx("output slot ctx (success)", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
+        }
+    }
+#endif
 
     if (cmd->req)
     {
@@ -229,6 +298,18 @@ void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
 
     if (err)
     {
+        if (cmd->udev)
+        {
+            struct xhci_virt_device *virt_dev = ctrl->devs[cmd->udev->slot_id];
+            if (virt_dev)
+            {
+                Kprintf("Address Device failure for slot %ld (code %ld)\n", (ULONG)cmd->udev->slot_id, (ULONG)err);
+                xhci_inval_cache((uintptr_t)virt_dev->in_ctx->bytes, virt_dev->in_ctx->size);
+                xhci_dump_slot_ctx("address input slot ctx", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
+                xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+                xhci_dump_slot_ctx("address output slot ctx", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
+            }
+        }
         /*
          * TODO: Unsuccessful Address Device command shall leave the
          * slot in default state. So, issue Disable Slot command now.
@@ -241,11 +322,14 @@ void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
 
     xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
                      virt_dev->out_ctx->size);
+
+#ifdef DEBUG_HIGH
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->out_ctx);
 
     KprintfH("xHC internal address is: %ld dev_info=%08lx dev_info2=%08lx dev_state=%08lx\n",
             (ULONG)(LE32(slot_ctx->dev_state) & DEV_ADDR_MASK),
             (ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2), (ULONG)LE32(slot_ctx->dev_state));
+#endif
 
     io_reply_data(cmd->udev, cmd->req, UHIOERR_NO_ERROR, 0);
 }
@@ -302,16 +386,23 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
  * Send reset endpoint command for given endpoint. This recovers from a
  * halted endpoint (e.g. due to a stall error).
  */
-void xhci_reset_ep(struct usb_device *udev, int ep_index)
+void xhci_reset_ep(struct usb_device *udev, int endpoint)
 {
     //TODO seems to fail... test and debug
     struct xhci_ctrl *ctrl = udev->controller;
 
-    Kprintf("Resetting EP %ld...\n", ep_index);
-    io_reply_failed(udev->ep_context[ep_index].current_req, UHIOERR_STALL);
-    udev->ep_context[ep_index].current_req = NULL;
-    xhci_ep_set_resetting(udev, ep_index);
-    xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_RESET_EP, NULL, udev); // handle_reset_ep
+    Kprintf("Resetting EP %ld...\n", endpoint);
+    io_reply_failed(udev->ep_context[endpoint].current_req, UHIOERR_STALL);
+    udev->ep_context[endpoint].current_req = NULL;
+    xhci_ep_set_resetting(udev, endpoint);
+
+    //TODO due to the unwise decision to use endpoint numbers to track state, now we may need to send two resets...
+    xhci_queue_command(ctrl, 0, udev->slot_id, endpoint*2, TRB_RESET_EP, NULL, udev); // handle_reset_ep
+    if(endpoint > 0)
+    {
+        //TODO also this is wrong for control endpoints > 0
+        xhci_queue_command(ctrl, 0, udev->slot_id, endpoint*2-1, TRB_RESET_EP, NULL, udev); // handle_reset_ep
+    }
 }
 
 /*
@@ -322,14 +413,21 @@ void xhci_reset_ep(struct usb_device *udev, int ep_index)
  * (Careful: This will BUG() when there was no transfer in progress. Shouldn't
  * happen in practice for current uses and is too complicated to fix right now.)
  */
-void xhci_abort_td(struct usb_device *udev, unsigned int ep_index)
+void xhci_abort_td(struct usb_device *udev, unsigned int endpoint)
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
-    io_reply_failed(udev->ep_context[ep_index].current_req, UHIOERR_TIMEOUT);
-    udev->ep_context[ep_index].current_req = NULL;
-    xhci_ep_set_aborting(udev, ep_index);
-    xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL, udev); // handle_abort_stop_ring
+    io_reply_failed(udev->ep_context[endpoint].current_req, UHIOERR_TIMEOUT);
+    udev->ep_context[endpoint].current_req = NULL;
+    xhci_ep_set_aborting(udev, endpoint);
+    //TODO due to the unwise decision to use endpoint numbers to track state, now we may need to send two stops...
+    // because we don't know which exactly to abort
+    xhci_queue_command(ctrl, 0, udev->slot_id, endpoint*2, TRB_STOP_RING, NULL, udev); // handle_abort_stop_ring
+    if(endpoint > 0)
+    {
+        //TODO also this is wrong for control endpoints > 0
+        xhci_queue_command(ctrl, 0, udev->slot_id, endpoint*2-1, TRB_STOP_RING, NULL, udev); // handle_abort_stop_ring
+    }
 }
 
 /**
@@ -384,7 +482,6 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     /* Determine root port if not provided */
     // if (root_portnr == 0)
     // {
-    //TODO doesn't work
     int max_ports = HCS_MAX_PORTS(xhci_readl(&hccr->cr_hcsparams1));
     for (int p = 1; p <= max_ports; ++p)
     {
@@ -439,6 +536,8 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
              (ULONG)ctrl_ctx, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx);
     ctrl_ctx->add_flags = LE32(SLOT_FLAG | EP0_FLAG);
     ctrl_ctx->drop_flags = 0;
+
+    xhci_flush_cache((uintptr_t)ctrl_ctx, sizeof(struct xhci_input_control_ctx));
 
     KprintfH("queue ADDR_DEV cmd, in_ctx->dma=%lx\n", (ULONG)virt_dev->in_ctx->dma);
     xhci_queue_command(ctrl, virt_dev->in_ctx->dma, slot_id, 0, TRB_ADDR_DEV, req, udev);

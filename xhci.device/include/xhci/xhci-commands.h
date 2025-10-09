@@ -15,12 +15,15 @@ struct pending_command
     struct usb_device *udev; /* for slot/endpoint checks */
     command_handler complete;
     struct IOUsbHWReq *req; /* to continue control transfers */
+#ifdef DEBUG
+    trb_type type;          /* command type for diagnostics */
+#endif
 };
 
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event);
 
-void xhci_reset_ep(struct usb_device *udev, int ep_index);
-void xhci_abort_td(struct usb_device *udev, unsigned int ep_index);
+void xhci_reset_ep(struct usb_device *udev, int endpoint);
+void xhci_abort_td(struct usb_device *udev, unsigned int endpoint);
 void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct IOUsbHWReq *req);
 void xhci_address_device(struct usb_device *udev, struct IOUsbHWReq *req);
 

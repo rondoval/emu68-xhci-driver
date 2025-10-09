@@ -22,6 +22,7 @@
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-events.h>
+#include <xhci/xhci-debug.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -48,15 +49,29 @@ static const ep_state_handler ep_state_dispatch[] = {
     [USB_DEV_EP_STATE_FAILED] = NULL,    // TODO ep_handle_failed,
 };
 
-void xhci_ep_set_failed(struct usb_device *udev, int ep_index)
+/*
+ * So generally, XHCI has got separate endpoint context per direction
+ * except for control endpoints.
+ * But Poseidon assumes there is only one transfer ongoing per endpoint number,
+ * regardless of direction (I think).
+ * So we sort of treat both contexts as one.. at least for now.
+ * Perhaps they should be separate and just treated as one for scheduling new TDs.
+ * endpoint - endpoint number (0-15)
+ * ep_index - endpoint context index (0-30)
+ * DCI - context index (1-31)
+ * endpoint = DCI >> 1
+ * DCI = ep_index + 1
+ */
+
+void xhci_ep_set_failed(struct usb_device *udev, int endpoint)
 {
-    if (ep_index < 0 || ep_index >= USB_MAXENDPOINTS)
+    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
     {
-        Kprintf("xhci_ep_set_failed: Invalid endpoint %ld\n", (LONG)ep_index);
+        Kprintf("xhci_ep_set_failed: Invalid endpoint %ld\n", (LONG)endpoint);
         return;
     }
-    struct ep_context *ep_ctx = &udev->ep_context[ep_index];
-    Kprintf("xhci_ep_set_failed: EP %ld state %ld -> FAILED\n", (LONG)ep_index, (LONG)ep_ctx->state);
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    Kprintf("xhci_ep_set_failed: EP %ld state %ld -> FAILED\n", (LONG)endpoint, (LONG)ep_ctx->state);
     ep_ctx->state = USB_DEV_EP_STATE_FAILED;
 
     if (ep_ctx->current_req)
@@ -70,15 +85,15 @@ void xhci_ep_set_failed(struct usb_device *udev, int ep_index)
     ep_ctx->current_req = NULL;
 }
 
-void xhci_ep_set_idle(struct usb_device *udev, int ep_index)
+void xhci_ep_set_idle(struct usb_device *udev, int endpoint)
 {
-    if (ep_index < 0 || ep_index >= USB_MAXENDPOINTS)
+    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
     {
-        Kprintf("xhci_ep_set_idle: Invalid endpoint %ld\n", (LONG)ep_index);
+        Kprintf("xhci_ep_set_idle: Invalid endpoint %ld\n", (LONG)endpoint);
         return;
     }
-    struct ep_context *ep_ctx = &udev->ep_context[ep_index];
-    Kprintf("xhci_ep_set_idle: EP %ld state %ld -> IDLE\n", (LONG)ep_index, (LONG)ep_ctx->state);
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    Kprintf("xhci_ep_set_idle: EP %ld state %ld -> IDLE\n", (LONG)endpoint, (LONG)ep_ctx->state);
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
     ep_ctx->trb_addr = 0;
     ep_ctx->trb_length = 0;
@@ -88,24 +103,24 @@ void xhci_ep_set_idle(struct usb_device *udev, int ep_index)
     if (ep_ctx->current_req)
         Kprintf("xhci_ep_set_idle: WARNING: current_req not NULL (%lx)\n", (LONG)ep_ctx->current_req);
     ep_ctx->current_req = NULL;
-    xhci_ep_schedule_next(udev, ep_index);
+    xhci_ep_schedule_next(udev, endpoint);
 }
 
 void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t trb_addr, ULONG timeout_ms)
 {
-    int ep_index = req->iouh_Endpoint & 0xf;
-    if (ep_index < 0 || ep_index >= USB_MAXENDPOINTS)
+    int endpoint = req->iouh_Endpoint & 0xf;
+    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
     {
-        Kprintf("xhci_ep_set_receiving: Invalid endpoint %ld\n", (LONG)ep_index);
+        Kprintf("xhci_ep_set_receiving: Invalid endpoint %ld\n", (LONG)endpoint);
         return;
     }
 
-    struct ep_context *ep_ctx = &udev->ep_context[ep_index];
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
     if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
     {
-        Kprintf("xhci_ep_set_receiving: EP %ld not IDLE (state %ld)\n", (LONG)ep_index, (LONG)ep_ctx->state);
-        xhci_ep_set_failed(udev, ep_index);
+        Kprintf("xhci_ep_set_receiving: EP %ld not IDLE (state %ld)\n", (LONG)endpoint, (LONG)ep_ctx->state);
+        xhci_ep_set_failed(udev, endpoint);
         return;
     }
 
@@ -126,30 +141,30 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
     }
 }
 
-void xhci_ep_set_resetting(struct usb_device *udev, int ep_index)
+void xhci_ep_set_resetting(struct usb_device *udev, int endpoint)
 {
-    if (ep_index < 0 || ep_index >= USB_MAXENDPOINTS)
+    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
     {
-        Kprintf("xhci_ep_set_resetting: Invalid endpoint %ld\n", (LONG)ep_index);
+        Kprintf("xhci_ep_set_resetting: Invalid endpoint %ld\n", (LONG)endpoint);
         return;
     }
 
-    struct ep_context *ep_ctx = &udev->ep_context[ep_index];
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
     ep_ctx->state = USB_DEV_EP_STATE_RESETTING;
     ep_ctx->timeout_stamp = get_time() + XHCI_TIMEOUT * 1000;
     ep_ctx->timeout_active = TRUE;
 }
 
-void xhci_ep_set_aborting(struct usb_device *udev, int ep_index)
+void xhci_ep_set_aborting(struct usb_device *udev, int endpoint)
 {
-    if (ep_index < 0 || ep_index >= USB_MAXENDPOINTS)
+    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
     {
-        Kprintf("xhci_ep_set_aborting: Invalid endpoint %ld\n", (LONG)ep_index);
+        Kprintf("xhci_ep_set_aborting: Invalid endpoint %ld\n", (LONG)endpoint);
         return;
     }
 
-    struct ep_context *ep_ctx = &udev->ep_context[ep_index];
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
     if (ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_CONTROL &&
         ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT &&
@@ -157,15 +172,15 @@ void xhci_ep_set_aborting(struct usb_device *udev, int ep_index)
         ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_INT &&
         ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_ISOC)
     {
-        Kprintf("xhci_ep_set_aborting: EP %ld not RECEIVING (state %ld)\n", (LONG)ep_index, (LONG)ep_ctx->state);
-        xhci_ep_set_failed(udev, ep_index);
+        Kprintf("xhci_ep_set_aborting: EP %ld not RECEIVING (state %ld)\n", (LONG)endpoint, (LONG)ep_ctx->state);
+        xhci_ep_set_failed(udev, endpoint);
         return;
     }
 
     if (ep_ctx->current_req == NULL)
     {
-        Kprintf("xhci_ep_set_aborting: EP %ld current_req is NULL\n", (LONG)ep_index);
-        xhci_ep_set_failed(udev, ep_index);
+        Kprintf("xhci_ep_set_aborting: EP %ld current_req is NULL\n", (LONG)endpoint);
+        xhci_ep_set_failed(udev, endpoint);
         return;
     }
 
@@ -199,17 +214,18 @@ void xhci_acknowledge_event(struct xhci_ctrl *ctrl)
  */
 static void dispatch_ep_event(struct usb_device *udev, union xhci_trb *event)
 {
-    UWORD ep = TRB_TO_EP_INDEX(LE32(event->trans_event.flags));
-    if (ep >= USB_MAXENDPOINTS)
+    UWORD endpoint = TRB_TO_ENDPOINT(LE32(event->trans_event.flags));
+    if (endpoint >= USB_MAXENDPOINTS)
     {
-        Kprintf("Invalid endpoint %ld\n", ep);
+        Kprintf("Invalid endpoint %ld\n", endpoint);
         return;
     }
 
-    struct ep_context *ep_ctx = &udev->ep_context[ep];
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
     if (ep_state_dispatch[ep_ctx->state])
     {
+        Kprintf("addr %ld EP %ld state %ld -> handling event\n", udev->devnum, (LONG)endpoint, (LONG)ep_ctx->state);
         ep_state_handler handler = ep_state_dispatch[ep_ctx->state];
         handler(udev, ep_ctx, event);
     }
@@ -261,6 +277,13 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
         case TRB_TRANSFER:
         {
             int slot = TRB_TO_SLOT_ID(LE32(event->trans_event.flags));
+            Kprintf("Transfer Event TRB detected: slot %ld ep %ld (%08lx %08lx %08lx %08lx)\n",
+                     (LONG)slot,
+                     (LONG)TRB_TO_ENDPOINT(LE32(event->trans_event.flags)),
+                     (LONG)LE32(event->generic.field[0]),
+                     (LONG)LE32(event->generic.field[1]),
+                     (LONG)LE32(event->generic.field[2]),
+                     (LONG)LE32(event->generic.field[3]));
 
             struct usb_device *udev = ctrl->devs[slot]->udev;
             if (!udev)
@@ -268,6 +291,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
                 Kprintf("No usb_device for slot %ld\n", slot);
                 break;
             }
+            Kprintf("USB device addr %ld on slot %ld\n", (LONG)udev->devnum, (LONG)slot);
 
             dispatch_ep_event(udev, event);
         }
@@ -303,6 +327,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
 
 void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
 {
+    //TODO this is wrong, we need to track per ep_index, not per endpoint number
     ULONG now = get_time();
     for (int i = 0; i < MAX_HC_SLOTS; i++)
     {
@@ -320,7 +345,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
                 continue;
             if (ep_ctx->state == USB_DEV_EP_STATE_FAILED)
             {
-                xhci_reset_ep(udev, ep);
+                // xhci_reset_ep(udev, ep);
                 continue;
             }
             if (!ep_ctx->timeout_active)
@@ -330,7 +355,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
 
             Kprintf("XHCI event timeout on slot %ld ep %ld state %ld\n", (LONG)udev->slot_id, (LONG)ep, (LONG)ep_ctx->state);
             Kprintf("XHCI bulk transfer timed out, aborting...\n");
-            xhci_abort_td(udev, ep);
+            xhci_abort_td(udev, ep); 
         }
     }
 }
@@ -391,7 +416,7 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
             (ULONG)LE32(event->generic.field[3]));
 
     xhci_acknowledge_event(udev->controller);
-    xhci_ep_set_failed(udev, TRB_TO_EP_INDEX(LE32(event->trans_event.flags)));
+    xhci_ep_set_failed(udev, TRB_TO_ENDPOINT(LE32(event->trans_event.flags)));
 }
 
 static void ep_handle_receiving_control(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
@@ -399,15 +424,15 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
     struct xhci_ctrl *ctrl = udev->controller;
 
     u32 flags = LE32(event->trans_event.flags);
-    int ep_index = TRB_TO_EP_INDEX(flags);
-    u64 buf_64 = LE64(event->trans_event.buffer);
+    int endpoint = TRB_TO_ENDPOINT(flags);
+    u64 trb_addr = LE64(event->trans_event.buffer);
     int length = ep_ctx->trb_length;
 
-    KprintfH("xhci_ctrl_tx: event flags=%08lx status=%08lx buf=%08lx%08lx\n",
-             (ULONG)LE32(event->generic.field[3]),
-             (ULONG)LE32(event->generic.field[2]),
-             (ULONG)upper_32_bits(buf_64),
-             (ULONG)lower_32_bits(buf_64));
+    KprintfH("xhci_ctrl_tx: event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
+             (ULONG)flags,
+             (ULONG)LE32(event->trans_event.transfer_len),
+             (ULONG)upper_32_bits(trb_addr),
+             (ULONG)lower_32_bits(trb_addr));
 
     ULONG status;
     int act_len;
@@ -421,13 +446,15 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
     /* Invalidate buffer to make it available to usb-core */
     if (length > 0)
     {
-        xhci_inval_cache((uintptr_t)buf_64, length); // TODO dma_map should not realocate buffer... then revert to buffer
+        //TODO is this required
+        xhci_inval_cache((uintptr_t)trb_addr, length); // TODO dma_map should not realocate buffer... then revert to buffer
         xhci_dma_unmap(ctrl, (dma_addr_t)ep_ctx->current_req->iouh_Data, length);
     }
 
     if (status == UHIOERR_STALL)
     {
-        xhci_reset_ep(udev, ep_index);
+        // xhci_reset_ep(udev, endpoint);
+        io_reply_failed(ep_ctx->current_req, UHIOERR_STALL);
         return;
     }
 
@@ -439,7 +466,7 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
     }
     else
     {
-        xhci_ep_set_idle(udev, ep_index);
+        xhci_ep_set_idle(udev, endpoint);
     }
 }
 
@@ -454,46 +481,66 @@ void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_contex
 
     // no need to confirm slot and ep as this is done by event handler
     xhci_acknowledge_event(udev->controller);
-    xhci_ep_set_idle(udev, TRB_TO_EP_INDEX(LE32(event->generic.field[3])));
+    xhci_ep_set_idle(udev, TRB_TO_ENDPOINT(LE32(event->generic.field[3])));
 }
 
 void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
+    //TODO make it common with ep_handle_receiving_control
     struct xhci_ctrl *ctrl = udev->controller;
 
-    if (LE64(event->trans_event.buffer) != ep_ctx->trb_addr)
-    {
-        ep_ctx->trb_available_length -= (int)EVENT_TRB_LEN(LE32(event->trans_event.transfer_len));
-        Kprintf("xhci_bulk_tx: skipping intermediate event buf=%08lx%08lx new_avail=%ld\n",
-                (ULONG)upper_32_bits(LE64(event->trans_event.buffer)),
-                (ULONG)lower_32_bits(LE64(event->trans_event.buffer)),
-                (LONG)ep_ctx->trb_available_length);
-        xhci_acknowledge_event(ctrl);
-        /* No state change, more events to come */
-        return;
-    }
-
     u32 flags = LE32(event->trans_event.flags);
-    u64 buf_64 = LE64(event->trans_event.buffer);
+    int endpoint = TRB_TO_ENDPOINT(flags);
+    u64 trb_addr = LE64(event->trans_event.buffer);
     int length = ep_ctx->trb_length;
 
+#ifdef DEBUG
+    struct xhci_container_ctx *out_ctx =  ctrl->devs[udev->slot_id]->out_ctx;
+    xhci_dump_slot_ctx("xhci_bulk_tx: ", xhci_get_slot_ctx(ctrl, out_ctx));
+    xhci_dump_ep_ctx("xhci_bulk_tx: ", endpoint, xhci_get_ep_ctx(ctrl, out_ctx, TRB_TO_EP_INDEX(flags)));
+#endif
+
+    if (trb_addr != ep_ctx->trb_addr)
+    {
+    Kprintf("xhci_bulk_tx: addr %ld slot %ld EP %ld\n",
+        (LONG)udev->devnum, (LONG)udev->slot_id, (LONG)endpoint);
+    Kprintf("xhci_bulk_tx: Unexpected buffer, expected %08lx%08lx got %08lx%08lx\n",
+        (ULONG)upper_32_bits(ep_ctx->trb_addr),
+        (ULONG)lower_32_bits(ep_ctx->trb_addr),
+        (ULONG)upper_32_bits(trb_addr),
+        (ULONG)lower_32_bits(trb_addr));
+    ep_ctx->trb_addr = trb_addr;
+    }
+
     Kprintf("xhci_bulk_tx: event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
-            (ULONG)LE32(flags),
-            (ULONG)LE32(event->trans_event.transfer_len),
-            (ULONG)upper_32_bits(buf_64),
-            (ULONG)lower_32_bits(buf_64));
+        (ULONG)flags,
+        (ULONG)LE32(event->trans_event.transfer_len),
+        (ULONG)upper_32_bits(trb_addr),
+        (ULONG)lower_32_bits(trb_addr));
 
     ULONG status;
     int act_len;
-    record_transfer_result(event, ep_ctx->trb_available_length, &status, &act_len);
-    xhci_acknowledge_event(ctrl);
-    xhci_inval_cache((uintptr_t)buf_64, length);
-    xhci_dma_unmap(ctrl, (dma_addr_t)ep_ctx->current_req->iouh_Data, length);
-    Kprintf("xhci_bulk_tx: done status=%ld act_len=%ld\n", (LONG)status, (LONG)act_len);
+    record_transfer_result(event, length, &status, &act_len);
+    Kprintf("xhci_bulk_tx: result status=%ld act_len=%ld comp=%ld\n",
+             (LONG)status, (LONG)act_len,
+             (LONG)GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
 
+    xhci_acknowledge_event(ctrl);
+
+    xhci_dma_unmap(ctrl, (dma_addr_t)ep_ctx->current_req->iouh_Data, length);
+    if (act_len > 0 && ep_ctx->current_req->iouh_Dir == UHDIR_IN)
+    xhci_inval_cache((uintptr_t)ep_ctx->current_req->iouh_Data, (ULONG)act_len);
+
+    if (status == UHIOERR_STALL)
+    {
+        //xhci_reset_ep(udev, endpoint);
+        io_reply_failed(ep_ctx->current_req, UHIOERR_STALL);
+        return;
+    }
+    
     io_reply_data(udev, ep_ctx->current_req, status, act_len);
     ep_ctx->current_req = NULL;
-    xhci_ep_set_idle(udev, TRB_TO_EP_INDEX(flags));
+    xhci_ep_set_idle(udev, endpoint);
 }
 
 void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)

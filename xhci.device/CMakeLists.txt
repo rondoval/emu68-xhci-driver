@@ -15,6 +15,7 @@ add_executable(xhci.device
     src/usb_glue.c
     src/xhci/xhci.c
     src/xhci/xhci-ring.c
+    src/xhci/xhci-debug.c
     src/xhci/xhci-mem.c
     src/xhci/xhci-events.c
     src/xhci/xhci-commands.c

@@ -20,6 +20,7 @@
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
+#include <xhci/xhci-debug.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -424,7 +425,10 @@ int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 					 virt_dev->out_ctx->size);
 
 	ep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
-	Kprintf("xhci_bulk_tx: ep_state=%lx\n", (ULONG)(LE32(ep_ctx->ep_info) & EP_STATE_MASK));
+#ifdef DEBUG
+	xhci_dump_slot_ctx("xhci_bulk_tx: ", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
+	xhci_dump_ep_ctx("xhci_bulk_tx: ", io->iouh_Endpoint, ep_ctx);
+#endif
 
 	/*
 	 * If the endpoint was halted due to a prior error, resume it before
@@ -576,6 +580,9 @@ int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	Kprintf("xhci_bulk_tx: waiting, last_trb_addr=%08lx%08lx start_cycle=%ld\n",
 			(ULONG)upper_32_bits((u64)last_transfer_trb_addr),
 			(ULONG)lower_32_bits((u64)last_transfer_trb_addr), (LONG)start_cycle);
+#ifdef DEBUG
+	xhci_dump_ep_ctx("xhci_bulk_tx: after ring doorbell", io->iouh_Endpoint, ep_ctx);
+#endif
 
 	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING_BULK, last_transfer_trb_addr, timeout_ms);
 	return UHIOERR_NO_ERROR;
@@ -591,7 +598,7 @@ int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
  */
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms)
 {
-	Kprintf("xhci_ctrl_tx: slot=%ld ep_index=%ld length=%ld dir=%s\n",
+	Kprintf("xhci_ctrl_tx: slot=%ld ep=%ld length=%ld dir=%s\n",
 			(LONG)udev->slot_id, io->iouh_Endpoint, io->iouh_Length,
 			(io->iouh_SetupData.bmRequestType & URTF_IN) ? "IN" : "OUT");
 	int ret;
@@ -616,7 +623,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 			 LE16(req->value), LE16(req->value),
 			 LE16(req->index));
 
-	ep_index = io->iouh_Endpoint & 0xf;
+	ep_index = (io->iouh_Endpoint & 0xf) * 2; // ep_index is DCI-1 for control endpoints
 
 	ep_ring = virt_dev->eps[ep_index].ring;
 	if (!ep_ring)

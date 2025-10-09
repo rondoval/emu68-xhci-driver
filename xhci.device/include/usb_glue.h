@@ -21,4 +21,4 @@ int usb_glue_bus_oper(struct XHCIUnit *unit);
 void io_reply_failed(struct IOUsbHWReq *io, int err);
 void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual);
 
-void xhci_ep_schedule_next(struct usb_device *udev, int ep_index);
+void xhci_ep_schedule_next(struct usb_device *udev, int endpoint);

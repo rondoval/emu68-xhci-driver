@@ -88,17 +88,6 @@ enum {
 	PACKET_SIZE_64  = 3,
 };
 
-
-enum usb_device_state {
-	USB_DEV_STATE_DETACHED = 0,
-	USB_DEV_STATE_SLOT_ENABLED,
-	USB_DEV_STATE_ADDRESSED,
-	USB_DEV_STATE_CONFIGURING,
-	USB_DEV_STATE_OPERATIONAL,
-	USB_DEV_STATE_FAILED,
-	USB_DEV_STATE_RECOVERING
-};
-
 /**
  * struct usb_device - information about a USB device
  *
@@ -129,10 +118,10 @@ struct usb_device {
 	unsigned int route;           /* xHCI route string nibble-packed */
 	unsigned int tt_slot;         /* Parent hub slot ID for TT scheduling */
 	unsigned int tt_port;         /* Parent hub downstream port for TT scheduling */
+	unsigned int tt_think_time;   /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
 
 	/* Requests state data */
 	struct ep_context ep_context[USB_MAXENDPOINTS];
-	enum usb_device_state state;
 	
 	struct xhci_ctrl *controller; /* xHCI controller */
 };
@@ -143,107 +132,6 @@ struct usb_device {
  */
 
 #define usb_reset_root_port(dev)
-
-/* Defines */
-
-/*
- * Calling this entity a "pipe" is glorifying it. A USB pipe
- * is something embarrassingly simple: it basically consists
- * of the following information:
- *  - device number (7 bits)
- *  - endpoint number (4 bits)
- *  - current Data0/1 state (1 bit)
- *  - direction (1 bit)
- *  - speed (2 bits)
- *  - max packet size (2 bits: 8, 16, 32 or 64)
- *  - pipe type (2 bits: control, interrupt, bulk, isochronous)
- *
- * That's 18 bits. Really. Nothing more. And the USB people have
- * documented these eighteen bits as some kind of glorious
- * virtual data structure.
- *
- * Let's not fall in that trap. We'll just encode it as a simple
- * unsigned int. The encoding is:
- *
- *  - max size:		bits 0-1	(00 = 8, 01 = 16, 10 = 32, 11 = 64)
- *  - direction:	bit 7		(0 = Host-to-Device [Out],
- *					(1 = Device-to-Host [In])
- *  - device:		bits 8-14
- *  - endpoint:		bits 15-18
- *  - Data0/1:		bit 19
- *  - pipe type:	bits 30-31	(00 = isochronous, 01 = interrupt,
- *					 10 = control, 11 = bulk)
- *
- * Why? Because it's arbitrary, and whatever encoding we select is really
- * up to us. This one happens to share a lot of bit positions with the UHCI
- * specification, so that much of the uhci driver can just mask the bits
- * appropriately.
- */
-/* Create various pipes... */
-#define create_pipe(dev,endpoint) \
-		(((dev)->devnum << 8) | ((endpoint) << 15) | \
-		(dev)->maxpacketsize0)
-#define default_pipe(dev) ((dev)->speed << 26)
-
-#define usb_sndctrlpipe(dev, endpoint)	((PIPE_CONTROL << 30) | \
-					 create_pipe(dev, endpoint))
-#define usb_rcvctrlpipe(dev, endpoint)	((PIPE_CONTROL << 30) | \
-					 create_pipe(dev, endpoint) | \
-					 USB_DIR_IN)
-#define usb_sndisocpipe(dev, endpoint)	((PIPE_ISOCHRONOUS << 30) | \
-					 create_pipe(dev, endpoint))
-#define usb_rcvisocpipe(dev, endpoint)	((PIPE_ISOCHRONOUS << 30) | \
-					 create_pipe(dev, endpoint) | \
-					 USB_DIR_IN)
-#define usb_sndbulkpipe(dev, endpoint)	((PIPE_BULK << 30) | \
-					 create_pipe(dev, endpoint))
-#define usb_rcvbulkpipe(dev, endpoint)	((PIPE_BULK << 30) | \
-					 create_pipe(dev, endpoint) | \
-					 USB_DIR_IN)
-#define usb_sndintpipe(dev, endpoint)	((PIPE_INTERRUPT << 30) | \
-					 create_pipe(dev, endpoint))
-#define usb_rcvintpipe(dev, endpoint)	((PIPE_INTERRUPT << 30) | \
-					 create_pipe(dev, endpoint) | \
-					 USB_DIR_IN)
-#define usb_snddefctrl(dev)		((PIPE_CONTROL << 30) | \
-					 default_pipe(dev))
-#define usb_rcvdefctrl(dev)		((PIPE_CONTROL << 30) | \
-					 default_pipe(dev) | \
-					 USB_DIR_IN)
-
-/* The D0/D1 toggle bits */
-#define usb_gettoggle(dev, ep, out) (((dev)->toggle[out] >> ep) & 1)
-#define usb_dotoggle(dev, ep, out)  ((dev)->toggle[out] ^= (1 << ep))
-#define usb_settoggle(dev, ep, out, bit) ((dev)->toggle[out] = \
-						((dev)->toggle[out] & \
-						 ~(1 << ep)) | ((bit) << ep))
-
-/* Endpoint halt control/status */
-#define usb_endpoint_out(ep_dir)	(((ep_dir >> 7) & 1) ^ 1)
-#define usb_endpoint_halt(dev, ep, out) ((dev)->halted[out] |= (1 << (ep)))
-#define usb_endpoint_running(dev, ep, out) ((dev)->halted[out] &= ~(1 << (ep)))
-#define usb_endpoint_halted(dev, ep, out) ((dev)->halted[out] & (1 << (ep)))
-
-#define usb_packetid(pipe)	(((pipe) & USB_DIR_IN) ? USB_PID_IN : \
-				 USB_PID_OUT)
-
-#define usb_pipeout(pipe)	((((pipe) >> 7) & 1) ^ 1)
-#define usb_pipein(pipe)	(((pipe) >> 7) & 1)
-#define usb_pipedevice(pipe)	(((pipe) >> 8) & 0x7f)
-#define usb_pipe_endpdev(pipe)	(((pipe) >> 8) & 0x7ff)
-#define usb_pipeendpoint(pipe)	(((pipe) >> 15) & 0xf)
-#define usb_pipedata(pipe)	(((pipe) >> 19) & 1)
-#define usb_pipetype(pipe)	(((pipe) >> 30) & 3)
-#define usb_pipeisoc(pipe)	(usb_pipetype((pipe)) == PIPE_ISOCHRONOUS)
-#define usb_pipeint(pipe)	(usb_pipetype((pipe)) == PIPE_INTERRUPT)
-#define usb_pipecontrol(pipe)	(usb_pipetype((pipe)) == PIPE_CONTROL)
-#define usb_pipebulk(pipe)	(usb_pipetype((pipe)) == PIPE_BULK)
-
-#define usb_pipe_ep_index(pipe)	\
-		usb_pipecontrol(pipe) ? (usb_pipeendpoint(pipe) * 2) : \
-				((usb_pipeendpoint(pipe) * 2) - \
-				 (usb_pipein(pipe) ? 0 : 1))
-
 
 /*************************************************************************
  * Hub Stuff
