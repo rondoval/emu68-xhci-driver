@@ -18,6 +18,8 @@ int usb_glue_bus_suspend(struct XHCIUnit *unit);
 int usb_glue_bus_resume(struct XHCIUnit *unit);
 int usb_glue_bus_oper(struct XHCIUnit *unit);
 
+void usb_glue_flush_queues(struct XHCIUnit *unit);
+
 void io_reply_failed(struct IOUsbHWReq *io, int err);
 void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual);
 

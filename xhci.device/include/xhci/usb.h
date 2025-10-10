@@ -43,12 +43,6 @@
 #define USB_CNTL_TIMEOUT 100 /* 100ms timeout */
 
 /*
- * This is the timeout to allow for submitting an urb in ms. We allow more
- * time for a BULK device to react - some are slow.
- */
-#define USB_TIMEOUT_MS(pipe) (usb_pipebulk(pipe) ? 5000 : 1000)
-
-/*
  * The xhcd hcd driver prepares only a limited number interfaces / endpoints.
  * Define this limit so that drivers do not exceed it.
  */
@@ -114,7 +108,6 @@ struct usb_device {
 
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
-	unsigned int portnr;          /* Downstream port number on parent hub (1-based) */
 	unsigned int route;           /* xHCI route string nibble-packed */
 	unsigned int tt_slot;         /* Parent hub slot ID for TT scheduling */
 	unsigned int tt_port;         /* Parent hub downstream port for TT scheduling */
@@ -125,13 +118,6 @@ struct usb_device {
 	
 	struct xhci_ctrl *controller; /* xHCI controller */
 };
-
-
-/**********************************************************************
- * this is how the lowlevel part communicate with the outer world
- */
-
-#define usb_reset_root_port(dev)
 
 /*************************************************************************
  * Hub Stuff

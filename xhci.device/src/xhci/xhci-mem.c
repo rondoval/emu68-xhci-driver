@@ -13,7 +13,7 @@
  *	    Vikas Sajjan <vikas.sajjan@samsung.com>
  */
 
- #ifdef __INTELLISENSE__
+#ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #else
 #include <proto/exec.h>
@@ -32,7 +32,12 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-mem] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#define CACHELINE_SIZE		64
+#ifdef DEBUG_HIGH
+#undef KprintfH
+#define KprintfH(fmt, ...) PrintPistorm("[xhci-mem] %s: " fmt, __func__, ##__VA_ARGS__)
+#endif
+
+#define CACHELINE_SIZE 64
 
 /**
  * flushes the address passed till the length
@@ -94,14 +99,16 @@ static void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
 	struct xhci_segment *seg;
 	struct xhci_segment *first_seg;
 
-	if (!ring) {
+	if (!ring)
+	{
 		Kprintf("Ring is NULL, nothing to free\n");
 		return;
 	}
 
 	first_seg = ring->first_seg;
 	seg = first_seg->next;
-	while (seg != first_seg) {
+	while (seg != first_seg)
+	{
 		struct xhci_segment *next = seg->next;
 		xhci_segment_free(ctrl, seg);
 		seg = next;
@@ -127,9 +134,9 @@ static void xhci_scratchpad_free(struct xhci_ctrl *ctrl)
 
 	num_sp = HCS_MAX_SCRATCHPAD(xhci_readl(&hccr->cr_hcsparams2));
 	xhci_dma_unmap(ctrl, ctrl->scratchpad->sp_array[0],
-		       num_sp * ctrl->page_size);
+				   num_sp * ctrl->page_size);
 	xhci_dma_unmap(ctrl, ctrl->dcbaa->dev_context_ptrs[0],
-		       num_sp * sizeof(u64));
+				   num_sp * sizeof(u64));
 	ctrl->dcbaa->dev_context_ptrs[0] = 0;
 
 	memalign_free(ctrl->memoryPool, ctrl->scratchpad->scratchpad);
@@ -145,7 +152,7 @@ static void xhci_scratchpad_free(struct xhci_ctrl *ctrl)
  * Return: none
  */
 static void xhci_free_container_ctx(struct xhci_ctrl *ctrl,
-				    struct xhci_container_ctx *ctx)
+									struct xhci_container_ctx *ctx)
 {
 	xhci_dma_unmap(ctrl, ctx->dma, ctx->size);
 	memalign_free(ctrl->memoryPool, ctx->bytes);
@@ -168,7 +175,8 @@ static void xhci_free_virt_devices(struct xhci_ctrl *ctrl)
 	 * refactored here to loop through all virt_dev
 	 * Slot ID 0 is reserved
 	 */
-	for (slot_id = 0; slot_id < MAX_HC_SLOTS; slot_id++) {
+	for (slot_id = 0; slot_id < MAX_HC_SLOTS; slot_id++)
+	{
 		virt_dev = ctrl->devs[slot_id];
 		if (!virt_dev)
 			continue;
@@ -199,7 +207,8 @@ static void xhci_free_virt_devices(struct xhci_ctrl *ctrl)
 void xhci_cleanup(struct xhci_ctrl *ctrl)
 {
 	struct xhci_dma_bounce *bounce = ctrl->dma_bounce_list;
-	while (bounce) {
+	while (bounce)
+	{
 		struct xhci_dma_bounce *next = bounce->next;
 		if (bounce->bounce)
 			memalign_free(ctrl->memoryPool, bounce->bounce);
@@ -213,10 +222,10 @@ void xhci_cleanup(struct xhci_ctrl *ctrl)
 	xhci_scratchpad_free(ctrl);
 	xhci_free_virt_devices(ctrl);
 	xhci_dma_unmap(ctrl, ctrl->erst.erst_dma_addr,
-		       sizeof(struct xhci_erst_entry) * ERST_NUM_SEGS);
+				   sizeof(struct xhci_erst_entry) * ERST_NUM_SEGS);
 	memalign_free(ctrl->memoryPool, ctrl->erst.entries);
 	xhci_dma_unmap(ctrl, ctrl->dcbaa->dma,
-		       sizeof(struct xhci_device_context_array));
+				   sizeof(struct xhci_device_context_array));
 	memalign_free(ctrl->memoryPool, ctrl->dcbaa);
 	_memset(ctrl, 0, sizeof(struct xhci_ctrl));
 }
@@ -233,7 +242,7 @@ static void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
 	size_t cacheline_size = max(XHCI_ALIGNMENT, CACHELINE_SIZE);
 
 	ptr = memalign(ctrl->memoryPool, cacheline_size, ALIGN(size, cacheline_size));
-	if( !ptr )
+	if (!ptr)
 	{
 		Kprintf("memalign failed for size %lu\n", (ULONG)size);
 		return NULL;
@@ -257,25 +266,26 @@ static void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
  * Return: none
  */
 static void xhci_link_segments(struct xhci_segment *prev,
-			       struct xhci_segment *next, BOOL link_trbs)
+							   struct xhci_segment *next, BOOL link_trbs)
 {
 	u32 val;
 
 	if (!prev || !next)
 		return;
 	prev->next = next;
-	if (link_trbs) {
-		prev->trbs[TRBS_PER_SEGMENT-1].link.segment_ptr =
+	if (link_trbs)
+	{
+		prev->trbs[TRBS_PER_SEGMENT - 1].link.segment_ptr =
 			LE64(next->dma);
 
 		/*
 		 * Set the last TRB in the segment to
 		 * have a TRB type ID of Link TRB
 		 */
-		val = LE32(prev->trbs[TRBS_PER_SEGMENT-1].link.control);
+		val = LE32(prev->trbs[TRBS_PER_SEGMENT - 1].link.control);
 		val &= ~TRB_TYPE_BITMASK;
 		val |= TRB_TYPE(TRB_LINK);
-		prev->trbs[TRBS_PER_SEGMENT-1].link.control = LE32(val);
+		prev->trbs[TRBS_PER_SEGMENT - 1].link.control = LE32(val);
 	}
 }
 
@@ -318,9 +328,10 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
 	struct xhci_segment *seg;
 
 	seg = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_segment));
-	if (!seg) {
+	if (!seg)
+	{
 		Kprintf("AllocVecPooled failed for size %lu\n",
-			(ULONG)sizeof(struct xhci_segment));
+				(ULONG)sizeof(struct xhci_segment));
 		return NULL;
 	}
 
@@ -348,15 +359,16 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
  * Return: pointer to the newly created RING
  */
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
-				  BOOL link_trbs)
+								  BOOL link_trbs)
 {
 	struct xhci_ring *ring;
 	struct xhci_segment *prev;
 
 	ring = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_ring));
-	if (!ring) {
+	if (!ring)
+	{
 		Kprintf("AllocVecPooled failed for size %lu\n",
-			(ULONG)sizeof(struct xhci_ring));
+				(ULONG)sizeof(struct xhci_ring));
 		return NULL;
 	}
 
@@ -364,7 +376,8 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 		return ring;
 
 	ring->first_seg = xhci_segment_alloc(ctrl);
-	if (!ring->first_seg) {
+	if (!ring->first_seg)
+	{
 		Kprintf("xhci_segment_alloc failed\n");
 		FreeVecPooled(ctrl->memoryPool, ring);
 		return NULL;
@@ -373,11 +386,13 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 	num_segs--;
 
 	prev = ring->first_seg;
-	while (num_segs > 0) {
+	while (num_segs > 0)
+	{
 		struct xhci_segment *next;
 
 		next = xhci_segment_alloc(ctrl);
-		if (!next) {
+		if (!next)
+		{
 			Kprintf("xhci_segment_alloc failed\n");
 			xhci_ring_free(ctrl, ring);
 			return NULL;
@@ -389,10 +404,11 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 		num_segs--;
 	}
 	xhci_link_segments(prev, ring->first_seg, link_trbs);
-	if (link_trbs) {
+	if (link_trbs)
+	{
 		/* See section 4.9.2.1 and 6.4.4.1 */
-		prev->trbs[TRBS_PER_SEGMENT-1].link.control |=
-					LE32(LINK_TOGGLE);
+		prev->trbs[TRBS_PER_SEGMENT - 1].link.control |=
+			LE32(LINK_TOGGLE);
 	}
 	xhci_initialize_ring_info(ring);
 
@@ -421,7 +437,7 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 		return 0;
 
 	scratchpad = AllocVecPooled(ctrl->memoryPool,
-					sizeof(struct xhci_scratchpad));
+								sizeof(struct xhci_scratchpad));
 	if (!scratchpad)
 		goto fail_sp;
 	ctrl->scratchpad = scratchpad;
@@ -431,19 +447,21 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 		goto fail_sp2;
 
 	val_64 = xhci_dma_map(ctrl, scratchpad->sp_array,
-			      num_sp * sizeof(u64));
+						  num_sp * sizeof(u64));
 	ctrl->dcbaa->dev_context_ptrs[0] = LE64(val_64);
 
 	xhci_flush_cache((uintptr_t)&ctrl->dcbaa->dev_context_ptrs[0],
-		sizeof(ctrl->dcbaa->dev_context_ptrs[0]));
+					 sizeof(ctrl->dcbaa->dev_context_ptrs[0]));
 
 	page_size = xhci_readl(&hcor->or_pagesize) & 0xffff;
-	for (i = 0; i < 16; i++) {
+	for (i = 0; i < 16; i++)
+	{
 		if ((0x1 & page_size) != 0)
 			break;
 		page_size = page_size >> 1;
 	}
-	if(i==16) {
+	if (i == 16)
+	{
 		Kprintf("Invalid page size\n");
 		goto fail_sp3;
 	}
@@ -457,13 +475,14 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 
 	scratchpad->scratchpad = buf;
 	val_64 = xhci_dma_map(ctrl, buf, num_sp * ctrl->page_size);
-	for (i = 0; i < num_sp; i++) {
+	for (i = 0; i < num_sp; i++)
+	{
 		scratchpad->sp_array[i] = LE64(val_64);
 		val_64 += ctrl->page_size;
 	}
 
 	xhci_flush_cache((uintptr_t)scratchpad->sp_array,
-			 sizeof(u64) * num_sp);
+					 sizeof(u64) * num_sp);
 
 	return 0;
 
@@ -485,18 +504,19 @@ fail_sp:
  * @param type type of XHCI Container Context
  * Return: NULL if failed else pointer to the context on success
  */
-static struct xhci_container_ctx
-		*xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int type)
+static struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int type)
 {
 	struct xhci_container_ctx *ctx;
 
 	ctx = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_container_ctx));
-	if (!ctx) {
+	if (!ctx)
+	{
 		Kprintf("Failed to allocate container context\n");
 		return NULL;
 	}
 
-	if ((type != XHCI_CTX_TYPE_DEVICE) && (type != XHCI_CTX_TYPE_INPUT)) {
+	if ((type != XHCI_CTX_TYPE_DEVICE) && (type != XHCI_CTX_TYPE_INPUT))
+	{
 		Kprintf("Invalid context type\n");
 		FreeVecPooled(ctrl->memoryPool, ctx);
 		return NULL;
@@ -504,7 +524,7 @@ static struct xhci_container_ctx
 
 	ctx->type = type;
 	ctx->size = (MAX_EP_CTX_NUM + 1) *
-			CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams));
+				CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams));
 	if (type == XHCI_CTX_TYPE_INPUT)
 		ctx->size += CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams));
 
@@ -526,16 +546,18 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 	struct xhci_virt_device *virt_dev;
 
 	/* Slot ID 0 is reserved */
-	if (ctrl->devs[slot_id]) {
+	if (ctrl->devs[slot_id])
+	{
 		Kprintf("Virt dev for slot[%ld] already allocated\n", slot_id);
 		return -EEXIST;
 	}
 
-	KprintfH("xhci_alloc_virt_device: slot_id=%ld\n", (ULONG)slot_id);
+	KprintfH("slot_id=%ld\n", (ULONG)slot_id);
 	ctrl->devs[slot_id] = AllocVecPooled(ctrl->memoryPool,
-					sizeof(struct xhci_virt_device));
+										 sizeof(struct xhci_virt_device));
 
-	if (!ctrl->devs[slot_id]) {
+	if (!ctrl->devs[slot_id])
+	{
 		Kprintf("Failed to allocate virtual device\n");
 		return -ENOMEM;
 	}
@@ -545,34 +567,37 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 
 	/* Allocate the (output) device context that will be used in the HC. */
 	virt_dev->out_ctx = xhci_alloc_container_ctx(ctrl,
-					XHCI_CTX_TYPE_DEVICE);
-	if (!virt_dev->out_ctx) {
+												 XHCI_CTX_TYPE_DEVICE);
+	if (!virt_dev->out_ctx)
+	{
 		Kprintf("Failed to allocate out context for virt dev\n");
 		return -ENOMEM;
 	}
-	KprintfH("xhci_alloc_virt_device: out_ctx bytes=%lx dma=%lx size=%ld\n",
-		(ULONG)virt_dev->out_ctx->bytes, (ULONG)virt_dev->out_ctx->dma, (ULONG)virt_dev->out_ctx->size);
+	KprintfH("out_ctx bytes=%lx dma=%lx size=%ld\n",
+			 (ULONG)virt_dev->out_ctx->bytes, (ULONG)virt_dev->out_ctx->dma, (ULONG)virt_dev->out_ctx->size);
 
 	/* Allocate the (input) device context for address device command */
 	virt_dev->in_ctx = xhci_alloc_container_ctx(ctrl,
-					XHCI_CTX_TYPE_INPUT);
-	if (!virt_dev->in_ctx) {
+												XHCI_CTX_TYPE_INPUT);
+	if (!virt_dev->in_ctx)
+	{
 		Kprintf("Failed to allocate in context for virt dev\n");
 		return -ENOMEM;
 	}
-	KprintfH("xhci_alloc_virt_device: in_ctx bytes=%lx dma=%lx size=%ld\n",
-		(ULONG)virt_dev->in_ctx->bytes, (ULONG)virt_dev->in_ctx->dma, (ULONG)virt_dev->in_ctx->size);
+	KprintfH("in_ctx bytes=%lx dma=%lx size=%ld\n",
+			 (ULONG)virt_dev->in_ctx->bytes, (ULONG)virt_dev->in_ctx->dma, (ULONG)virt_dev->in_ctx->size);
 
 	/* Allocate endpoint 0 ring */
 	virt_dev->eps[0].ring = xhci_ring_alloc(ctrl, 1, TRUE);
-	if (!virt_dev->eps[0].ring) {
-		Kprintf("xhci_alloc_virt_device: EP0 ring alloc failed\n");
+	if (!virt_dev->eps[0].ring)
+	{
+		Kprintf("EP0 ring alloc failed\n");
 		return -ENOMEM;
 	}
-	KprintfH("xhci_alloc_virt_device: ep0 ring first_seg=%lx dma=%lx cycle=%ld\n",
-		(ULONG)virt_dev->eps[0].ring->first_seg,
-		(ULONG)virt_dev->eps[0].ring->first_seg->dma,
-		(ULONG)virt_dev->eps[0].ring->cycle_state);
+	KprintfH("ep0 ring first_seg=%lx dma=%lx cycle=%ld\n",
+			 (ULONG)virt_dev->eps[0].ring->first_seg,
+			 (ULONG)virt_dev->eps[0].ring->first_seg->dma,
+			 (ULONG)virt_dev->eps[0].ring->cycle_state);
 
 	byte_64 = virt_dev->out_ctx->dma;
 
@@ -580,11 +605,11 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 	ctrl->dcbaa->dev_context_ptrs[slot_id] = LE64(byte_64);
 
 	xhci_flush_cache((uintptr_t)&ctrl->dcbaa->dev_context_ptrs[slot_id],
-			 sizeof(__le64));
-	KprintfH("xhci_alloc_virt_device: DCBAA[%ld]=%lx (dcbaap=%lx)\n",
-		(ULONG)slot_id,
-		(ULONG)LE64(ctrl->dcbaa->dev_context_ptrs[slot_id]),
-		(ULONG)ctrl->dcbaa->dma);
+					 sizeof(__le64));
+	KprintfH("DCBAA[%ld]=%lx (dcbaap=%lx)\n",
+			 (ULONG)slot_id,
+			 (ULONG)LE64(ctrl->dcbaa->dev_context_ptrs[slot_id]),
+			 (ULONG)ctrl->dcbaa->dma);
 	return 0;
 }
 
@@ -598,7 +623,7 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
  * Return: 0 if successful else -1 on failure
  */
 int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
-					struct xhci_hcor *hcor)
+				  struct xhci_hcor *hcor)
 {
 	uint64_t val_64;
 	uint64_t trb_64;
@@ -609,13 +634,14 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 
 	/* DCBAA initialization */
 	ctrl->dcbaa = xhci_malloc(ctrl, sizeof(struct xhci_device_context_array));
-	if (ctrl->dcbaa == NULL) {
+	if (ctrl->dcbaa == NULL)
+	{
 		Kprintf("unable to allocate DCBA\n");
 		return -ENOMEM;
 	}
 
 	ctrl->dcbaa->dma = xhci_dma_map(ctrl, ctrl->dcbaa,
-				sizeof(struct xhci_device_context_array));
+									sizeof(struct xhci_device_context_array));
 	/* Set the pointer in DCBAA register */
 	xhci_writeq(&hcor->or_dcbaap, ctrl->dcbaa->dma);
 
@@ -625,9 +651,9 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	/* Set the address in the Command Ring Control register */
 	trb_64 = ctrl->cmd_ring->first_seg->dma;
 	val_64 = xhci_readq(&hcor->or_crcr);
-	val_64 = (val_64 & (u64) CMD_RING_RSVD_BITS) |
-		(trb_64 & (u64) ~CMD_RING_RSVD_BITS) |
-		ctrl->cmd_ring->cycle_state;
+	val_64 = (val_64 & (u64)CMD_RING_RSVD_BITS) |
+			 (trb_64 & (u64)~CMD_RING_RSVD_BITS) |
+			 ctrl->cmd_ring->cycle_state;
 	xhci_writeq(&hcor->or_crcr, val_64);
 
 	/* write the address of db register */
@@ -646,15 +672,16 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	/* Event ring does not maintain link TRB */
 	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, FALSE);
 	ctrl->erst.entries = xhci_malloc(ctrl, sizeof(struct xhci_erst_entry) *
-					 ERST_NUM_SEGS);
+											   ERST_NUM_SEGS);
 	ctrl->erst.erst_dma_addr = xhci_dma_map(ctrl, ctrl->erst.entries,
-			sizeof(struct xhci_erst_entry) * ERST_NUM_SEGS);
+											sizeof(struct xhci_erst_entry) * ERST_NUM_SEGS);
 
 	ctrl->erst.num_entries = ERST_NUM_SEGS;
 
 	for (val = 0, seg = ctrl->event_ring->first_seg;
-			val < ERST_NUM_SEGS;
-			val++) {
+		 val < ERST_NUM_SEGS;
+		 val++)
+	{
 		struct xhci_erst_entry *entry = &ctrl->erst.entries[val];
 		trb_64 = seg->dma;
 		entry->seg_addr = LE64(trb_64);
@@ -663,10 +690,10 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 		seg = seg->next;
 	}
 	xhci_flush_cache((uintptr_t)ctrl->erst.entries,
-			 ERST_NUM_SEGS * sizeof(struct xhci_erst_entry));
+					 ERST_NUM_SEGS * sizeof(struct xhci_erst_entry));
 
 	deq = xhci_trb_virt_to_dma(ctrl->event_ring->deq_seg,
-				   ctrl->event_ring->dequeue);
+							   ctrl->event_ring->dequeue);
 
 	/* Update HC event ring dequeue pointer */
 	xhci_writeq(&ctrl->ir_set->erst_dequeue,
@@ -708,10 +735,10 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
  * @param ctx	pointer to the context
  * Return: pointer to the Input control context data
  */
-struct xhci_input_control_ctx
-		*xhci_get_input_control_ctx(struct xhci_container_ctx *ctx)
+struct xhci_input_control_ctx *xhci_get_input_control_ctx(struct xhci_container_ctx *ctx)
 {
-	if (ctx->type != XHCI_CTX_TYPE_INPUT) {
+	if (ctx->type != XHCI_CTX_TYPE_INPUT)
+	{
 		Kprintf("Invalid context type\n");
 		return NULL;
 	}
@@ -726,13 +753,12 @@ struct xhci_input_control_ctx
  * Return: pointer to the slot control context data
  */
 struct xhci_slot_ctx *xhci_get_slot_ctx(struct xhci_ctrl *ctrl,
-				struct xhci_container_ctx *ctx)
+										struct xhci_container_ctx *ctx)
 {
 	if (ctx->type == XHCI_CTX_TYPE_DEVICE)
 		return (struct xhci_slot_ctx *)ctx->bytes;
 
-	return (struct xhci_slot_ctx *)
-		(ctx->bytes + CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams)));
+	return (struct xhci_slot_ctx *)(ctx->bytes + CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams)));
 }
 
 /**
@@ -744,17 +770,16 @@ struct xhci_slot_ctx *xhci_get_slot_ctx(struct xhci_ctrl *ctrl,
  * Return: pointer to the End point context
  */
 struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_ctrl *ctrl,
-				    struct xhci_container_ctx *ctx,
-				    unsigned int ep_index)
+									struct xhci_container_ctx *ctx,
+									unsigned int ep_index)
 {
 	/* increment ep index by offset of start of ep ctx array */
 	ep_index++;
 	if (ctx->type == XHCI_CTX_TYPE_INPUT)
 		ep_index++;
 
-	return (struct xhci_ep_ctx *)
-		(ctx->bytes +
-		(ep_index * CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams))));
+	return (struct xhci_ep_ctx *)(ctx->bytes +
+								  (ep_index * CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams))));
 }
 
 /**
@@ -769,9 +794,9 @@ struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_ctrl *ctrl,
  * Return: none
  */
 void xhci_endpoint_copy(struct xhci_ctrl *ctrl,
-			struct xhci_container_ctx *in_ctx,
-			struct xhci_container_ctx *out_ctx,
-			unsigned int ep_index)
+						struct xhci_container_ctx *in_ctx,
+						struct xhci_container_ctx *out_ctx,
+						unsigned int ep_index)
 {
 	struct xhci_ep_ctx *out_ep_ctx;
 	struct xhci_ep_ctx *in_ep_ctx;
@@ -819,7 +844,7 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl, struct xhci_container_ctx *in_ctx,
  * Return: returns negative value on failure else 0 on success
  */
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
-				     struct usb_device *udev, int hop_portnr)
+									 struct usb_device *udev, int hop_portnr)
 {
 	struct xhci_virt_device *virt_dev;
 	struct xhci_ep_ctx *ep0_ctx;
@@ -831,7 +856,8 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 
 	virt_dev = ctrl->devs[slot_id];
 
-	if (!virt_dev) {
+	if (!virt_dev)
+	{
 		Kprintf("Invalid virtual device\n");
 		return;
 	}
@@ -840,8 +866,8 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	ep0_ctx = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, 0);
 	slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
 	KprintfH("xhci_setup_addressable_virt_dev: slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
-		(ULONG)slot_id, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx,
-		(ULONG)ep0_ctx, (ULONG)slot_ctx);
+			 (ULONG)slot_id, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx,
+			 (ULONG)ep0_ctx, (ULONG)slot_ctx);
 
 	/* Only the control endpoint is valid - one endpoint context */
 	u32 dev_info = LE32(slot_ctx->dev_info);
@@ -849,7 +875,8 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	dev_info |= LAST_CTX(1);
 	dev_info |= (udev->route & ROUTE_STRING_MASK);
 
-	switch (speed) {
+	switch (speed)
+	{
 	case USB_SPEED_SUPER:
 	case USB_SPEED_SUPER_PLUS:
 		dev_info |= SLOT_SPEED_SS;
@@ -870,17 +897,17 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 
 	/* Low/full-speed devices behind a high-speed hub need TT info */
 	BOOL needs_tt = (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) &&
-		udev->parent &&
-		(udev->parent->speed == USB_SPEED_HIGH ||
-		 udev->parent->speed == USB_SPEED_SUPER ||
-		 udev->parent->speed == USB_SPEED_SUPER_PLUS);
+					udev->parent &&
+					(udev->parent->speed == USB_SPEED_HIGH ||
+					 udev->parent->speed == USB_SPEED_SUPER ||
+					 udev->parent->speed == USB_SPEED_SUPER_PLUS);
 	BOOL have_tt_info = needs_tt && udev->tt_slot && udev->tt_port;
 
 	slot_ctx->dev_info = LE32(dev_info);
 
 	port_num = hop_portnr;
-	Kprintf("xhci_setup_addressable_virt_dev: port_num=%ld speed=%ld route=%ld\n",
-		port_num, (ULONG)speed, (ULONG)udev->route);
+	KprintfH("xhci_setup_addressable_virt_dev: port_num=%ld speed=%ld route=%ld\n",
+			 port_num, (ULONG)speed, (ULONG)udev->route);
 
 	u32 dev_info2 = LE32(slot_ctx->dev_info2);
 	dev_info2 &= ~((ROOT_HUB_PORT_MASK) << ROOT_HUB_PORT_SHIFT);
@@ -894,10 +921,10 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 				  TT_PORT(udev->tt_port);
 	}
 
-	Kprintf("xhci_setup_addressable_virt_dev: needs_tt=%ld have_tt_info=%ld tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
-		(int)needs_tt, (int)have_tt_info,
-		(int)udev->tt_slot, (int)udev->tt_port,
-		(ULONG)tt_info);
+	KprintfH("xhci_setup_addressable_virt_dev: needs_tt=%ld have_tt_info=%ld tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
+			 (int)needs_tt, (int)have_tt_info,
+			 (int)udev->tt_slot, (int)udev->tt_port,
+			 (ULONG)tt_info);
 	slot_ctx->tt_info = LE32(tt_info);
 
 	/* Step 4 - ring already allocated */
@@ -905,20 +932,21 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	ep0_ctx->ep_info2 = LE32(EP_TYPE(CTRL_EP));
 	KprintfH("xhci_setup_addressable_virt_dev: SPEED=%ld\n", (ULONG)speed);
 
-	switch (speed) {
+	switch (speed)
+	{
 	case USB_SPEED_SUPER:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(512));
-	KprintfH("xhci_setup_addressable_virt_dev: MPS=512\n");
+		KprintfH("xhci_setup_addressable_virt_dev: MPS=512\n");
 		break;
 	case USB_SPEED_HIGH:
 	/* USB core guesses at a 64-byte max packet first for FS devices */
 	case USB_SPEED_FULL:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(64));
-	KprintfH("xhci_setup_addressable_virt_dev: MPS=64\n");
+		KprintfH("xhci_setup_addressable_virt_dev: MPS=64\n");
 		break;
 	case USB_SPEED_LOW:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(8));
-	KprintfH("xhci_setup_addressable_virt_dev: MPS=8\n");
+		KprintfH("xhci_setup_addressable_virt_dev: MPS=8\n");
 		break;
 	default:
 		/* New speed? */
@@ -942,8 +970,8 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 	xhci_flush_cache((uintptr_t)ep0_ctx, sizeof(struct xhci_ep_ctx));
 	xhci_flush_cache((uintptr_t)slot_ctx, sizeof(struct xhci_slot_ctx));
 	KprintfH("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
-		(ULONG)LE64(ep0_ctx->deq), (ULONG)LE32(ep0_ctx->tx_info),
-		(ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2));
+			 (ULONG)LE64(ep0_ctx->deq), (ULONG)LE32(ep0_ctx->tx_info),
+			 (ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2));
 }
 
 void xhci_update_hub_tt(struct usb_device *udev)
@@ -989,8 +1017,8 @@ void xhci_update_hub_tt(struct usb_device *udev)
 	xhci_flush_cache((uintptr_t)ctrl_ctx, sizeof(*ctrl_ctx));
 	/* xhci_configure_endpoints will flush the full input context */
 
-	Kprintf("xhci_update_hub_tt: slot=%ld tt_code=%ld\n",
-		(ULONG)udev->slot_id, (LONG)udev->tt_think_time);
+	KprintfH("xhci_update_hub_tt: slot=%ld tt_code=%ld\n",
+			 (ULONG)udev->slot_id, (LONG)udev->tt_think_time);
 
 	xhci_configure_endpoints(udev, TRUE, NULL);
 }

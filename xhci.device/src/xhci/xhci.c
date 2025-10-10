@@ -35,6 +35,11 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
+#ifdef DEBUG_HIGH
+#undef KprintfH
+#define KprintfH(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
+#endif
+
 static struct descriptor
 {
 	struct usb_hub_descriptor hub;
@@ -126,20 +131,17 @@ dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, size_t size)
 		return (dma_addr_t)(uintptr_t)addr;
 
 	size_t alloc_len = ALIGN(size, ARCH_DMA_MINALIGN);
-	struct xhci_dma_bounce *bounce =
-		AllocVecPooled(ctrl->memoryPool, sizeof(*bounce));
+	struct xhci_dma_bounce *bounce = AllocVecPooled(ctrl->memoryPool, sizeof(*bounce));
 	if (!bounce)
 	{
-		Kprintf("xhci_dma_map: failed to allocate metadata for %lx len=%ld\n",
-				(ULONG)addr, (LONG)size);
+		Kprintf("failed to allocate metadata for %lx len=%ld\n", (ULONG)addr, (LONG)size);
 		return (dma_addr_t)(uintptr_t)addr;
 	}
 
 	void *aligned = memalign(ctrl->memoryPool, ARCH_DMA_MINALIGN, alloc_len);
 	if (!aligned)
 	{
-		Kprintf("xhci_dma_map: failed to allocate bounce buffer for %lx len=%ld\n",
-				(ULONG)addr, (LONG)size);
+		Kprintf("failed to allocate bounce buffer for %lx len=%ld\n", (ULONG)addr, (LONG)size);
 		FreeVecPooled(ctrl->memoryPool, bounce);
 		return (dma_addr_t)(uintptr_t)addr;
 	}
@@ -154,8 +156,7 @@ dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, size_t size)
 	bounce->next = ctrl->dma_bounce_list;
 	ctrl->dma_bounce_list = bounce;
 
-	KprintfH("xhci_dma_map: bounce %lx -> %lx len=%ld\n",
-			 (ULONG)addr, (ULONG)aligned, (LONG)size);
+	KprintfH("bounce %lx -> %lx len=%ld\n", (ULONG)addr, (ULONG)aligned, (LONG)size);
 
 	return (dma_addr_t)(uintptr_t)aligned;
 }
@@ -179,8 +180,7 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, size_t size)
 			memalign_free(ctrl->memoryPool, node->bounce);
 			*link = node->next;
 			FreeVecPooled(ctrl->memoryPool, node);
-			KprintfH("xhci_dma_unmap: restored %lx from %lx len=%ld\n",
-					 (ULONG)node->orig, (ULONG)node->bounce, (LONG)size);
+			KprintfH("restored %lx from %lx len=%ld\n", (ULONG)node->orig, (ULONG)node->bounce, (LONG)size);
 			return;
 		}
 		link = &(*link)->next;
@@ -203,9 +203,7 @@ static int handshake(uint32_t volatile *ptr, uint32_t mask, uint32_t done, int u
 	int ret;
 
 	// TODO fixed value ULONG_MAX
-	ret = readx_poll_timeout(xhci_readl, ptr, result,
-							 (result & mask) == done || result == 0xffffffff,
-							 usec);
+	ret = readx_poll_timeout(xhci_readl, ptr, result, (result & mask) == done || result == 0xffffffff, usec);
 	if (result == 0xffffffff) /* card removed */
 		return -ENODEV;
 
@@ -234,9 +232,7 @@ static int xhci_start(struct xhci_hcor *hcor)
 	 */
 	ret = handshake(&hcor->or_usbsts, STS_HALT, 0, XHCI_MAX_HALT_USEC);
 	if (ret)
-		Kprintf("Host took too long to start, "
-				"waited %lu microseconds.\n",
-				XHCI_MAX_HALT_USEC);
+		Kprintf("Host took too long to start, waited %lu microseconds.\n", XHCI_MAX_HALT_USEC);
 	return ret;
 }
 
@@ -266,8 +262,7 @@ static int xhci_reset(struct xhci_hcor *hcor)
 					STS_HALT, STS_HALT, XHCI_MAX_HALT_USEC);
 	if (ret)
 	{
-		Kprintf("Host not halted after %lu microseconds.\n",
-				XHCI_MAX_HALT_USEC);
+		Kprintf("Host not halted after %lu microseconds.\n", XHCI_MAX_HALT_USEC);
 		return -EBUSY;
 	}
 
@@ -326,8 +321,7 @@ static unsigned int xhci_microframes_to_exponent(unsigned int desc_interval,
 	interval = fls(desc_interval) - 1;
 	interval = clamp_val(interval, min_exponent, max_exponent);
 	if ((1U << interval) != desc_interval)
-		Kprintf("rounding interval to %ld microframes, "
-				"ep desc says %ld microframes\n",
+		Kprintf("rounding interval to %ld microframes, ep desc says %ld microframes\n",
 				1U << interval, desc_interval);
 
 	return interval;
@@ -447,8 +441,7 @@ static u32 xhci_get_endpoint_mult(struct usb_device *udev,
 								  struct usb_endpoint_descriptor *endpt_desc,
 								  struct usb_ss_ep_comp_descriptor *ss_ep_comp_desc)
 {
-	if (udev->speed < USB_SPEED_SUPER ||
-		!usb_endpoint_xfer_isoc(endpt_desc))
+	if (udev->speed < USB_SPEED_SUPER || !usb_endpoint_xfer_isoc(endpt_desc))
 		return 0;
 
 	return ss_ep_comp_desc->bmAttributes;
@@ -462,9 +455,7 @@ static u32 xhci_get_endpoint_max_burst(struct usb_device *udev,
 	if (udev->speed >= USB_SPEED_SUPER)
 		return ss_ep_comp_desc->bMaxBurst;
 
-	if (udev->speed == USB_SPEED_HIGH &&
-		(usb_endpoint_xfer_isoc(endpt_desc) ||
-		 usb_endpoint_xfer_int(endpt_desc)))
+	if (udev->speed == USB_SPEED_HIGH && (usb_endpoint_xfer_isoc(endpt_desc) || usb_endpoint_xfer_int(endpt_desc)))
 		return usb_endpoint_maxp_mult(endpt_desc) - 1;
 
 	return 0;
@@ -483,8 +474,7 @@ static u32 xhci_get_max_esit_payload(struct usb_device *udev,
 	int max_packet;
 
 	/* Only applies for interrupt or isochronous endpoints */
-	if (usb_endpoint_xfer_control(endpt_desc) ||
-		usb_endpoint_xfer_bulk(endpt_desc))
+	if (usb_endpoint_xfer_control(endpt_desc) || usb_endpoint_xfer_bulk(endpt_desc))
 		return 0;
 
 	/* SuperSpeed Isoc ep with less than 48k per esit */
@@ -543,18 +533,14 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 		 * size. For Isoc and Int, set it to max available.
 		 * See xHCI 1.1 spec 4.14.1.1 for details.
 		 */
-		max_esit_payload = xhci_get_max_esit_payload(udev, endpt_desc,
-													 ss_ep_comp_desc);
+		max_esit_payload = xhci_get_max_esit_payload(udev, endpt_desc, ss_ep_comp_desc);
 		interval = xhci_get_endpoint_interval(udev, endpt_desc);
-		mult = xhci_get_endpoint_mult(udev, endpt_desc,
-									  ss_ep_comp_desc);
-		max_burst = xhci_get_endpoint_max_burst(udev, endpt_desc,
-												ss_ep_comp_desc);
+		mult = xhci_get_endpoint_mult(udev, endpt_desc, ss_ep_comp_desc);
+		max_burst = xhci_get_endpoint_max_burst(udev, endpt_desc, ss_ep_comp_desc);
 		avg_trb_len = max_esit_payload;
 
 		ep_index = xhci_get_ep_index(endpt_desc);
-		ep_ctx[ep_index] = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx,
-										   ep_index);
+		ep_ctx[ep_index] = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, ep_index);
 
 		/* Allocate the ep rings */
 		virt_dev->eps[ep_index].ring = xhci_ring_alloc(ctrl, 1, TRUE);
@@ -565,25 +551,19 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 		dir = (((endpt_desc->bEndpointAddress) & (0x80)) >> 7);
 		ep_type = (((endpt_desc->bmAttributes) & (0x3)) | (dir << 2));
 
-		ep_ctx[ep_index]->ep_info =
-			LE32(EP_MAX_ESIT_PAYLOAD_HI(max_esit_payload) |
-				 EP_INTERVAL(interval) | EP_MULT(mult));
+		ep_ctx[ep_index]->ep_info = LE32(EP_MAX_ESIT_PAYLOAD_HI(max_esit_payload) | EP_INTERVAL(interval) | EP_MULT(mult));
 
 		ep_ctx[ep_index]->ep_info2 = LE32(EP_TYPE(ep_type));
-		ep_ctx[ep_index]->ep_info2 |=
-			LE32(MAX_PACKET(LE16(get_unaligned(&endpt_desc->wMaxPacketSize))));
+		ep_ctx[ep_index]->ep_info2 |= LE32(MAX_PACKET(LE16(get_unaligned(&endpt_desc->wMaxPacketSize))));
 
 		/* Allow 3 retries for everything but isoc, set CErr = 3 */
 		if (!usb_endpoint_xfer_isoc(endpt_desc))
 			err_count = 3;
-		ep_ctx[ep_index]->ep_info2 |=
-			LE32(MAX_BURST(max_burst) |
-				 ERROR_COUNT(err_count));
+		ep_ctx[ep_index]->ep_info2 |= LE32(MAX_BURST(max_burst) | ERROR_COUNT(err_count));
 
 		trb_64 = xhci_trb_virt_to_dma(virt_dev->eps[ep_index].ring->enq_seg,
 									  virt_dev->eps[ep_index].ring->enqueue);
-		ep_ctx[ep_index]->deq = LE64(trb_64 |
-									 virt_dev->eps[ep_index].ring->cycle_state);
+		ep_ctx[ep_index]->deq = LE64(trb_64 | virt_dev->eps[ep_index].ring->cycle_state);
 
 		/*
 		 * xHCI spec 6.2.3:
@@ -591,20 +571,18 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 		 */
 		if (usb_endpoint_xfer_control(endpt_desc))
 			avg_trb_len = 8;
-		ep_ctx[ep_index]->tx_info =
-			LE32(EP_MAX_ESIT_PAYLOAD_LO(max_esit_payload) |
-				 EP_AVG_TRB_LENGTH(avg_trb_len));
+		ep_ctx[ep_index]->tx_info = LE32(EP_MAX_ESIT_PAYLOAD_LO(max_esit_payload) | EP_AVG_TRB_LENGTH(avg_trb_len));
 
-		Kprintf("EP%ld %s: type=%ld maxp=%ld maxesit=%ld "
-				"interval=%ld mult=%ld maxburst=%ld\n",
-				(ULONG)usb_endpoint_num(endpt_desc),
-				dir ? "IN" : "OUT",
-				(ULONG)ep_type,
-				(ULONG)usb_endpoint_maxp(endpt_desc),
-				(ULONG)max_esit_payload,
-				(ULONG)interval,
-				(ULONG)(mult + 1),
-				(ULONG)(max_burst + 1));
+		KprintfH("EP%ld %s: type=%ld maxp=%ld maxesit=%ld "
+				 "interval=%ld mult=%ld maxburst=%ld\n",
+				 (ULONG)usb_endpoint_num(endpt_desc),
+				 dir ? "IN" : "OUT",
+				 (ULONG)ep_type,
+				 (ULONG)usb_endpoint_maxp(endpt_desc),
+				 (ULONG)max_esit_payload,
+				 (ULONG)interval,
+				 (ULONG)(mult + 1),
+				 (ULONG)(max_burst + 1));
 	}
 
 	return UHIOERR_NO_ERROR;
@@ -637,7 +615,7 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
 		return UHIOERR_BADPARAMS;
 	}
 	// Dump entire cfg using kprintf (all fields and all interfaces and endpoints)
-	Kprintf("Configuration dump:\n");
+	Kprintf("Addr %ld configuration dump:\n", udev->devnum);
 	Kprintf("  bLength=%ld bDescriptorType=%ld wTotalLength=%ld bNumInterfaces=%ld\n",
 			(ULONG)cfg->desc.bLength, (ULONG)cfg->desc.bDescriptorType,
 			(ULONG)LE16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
@@ -709,7 +687,7 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
 		/* EP_FLAG gives values 1 & 4 for EP1OUT and EP2IN */
 		for (cur_ep = 0; cur_ep < num_of_ep; cur_ep++)
 		{
-			Kprintf("Setting up EP ifnum=%ld ep=%ld\n", (ULONG)ifnum, (ULONG)cur_ep);
+			KprintfH("Setting up EP ifnum=%ld ep=%ld\n", (ULONG)ifnum, (ULONG)cur_ep);
 			ep_flag = xhci_get_ep_index(&ifdesc->ep_desc[cur_ep]);
 			ctrl_ctx->add_flags |= LE32(1 << (ep_flag + 1));
 			if (max_ep_flag < ep_flag)
@@ -758,20 +736,19 @@ int xhci_check_maxpacket(struct usb_device *udev, unsigned int max_packet_size)
 	struct xhci_container_ctx *out_ctx;
 	struct xhci_input_control_ctx *ctrl_ctx;
 	struct xhci_ep_ctx *ep_ctx;
-	int hw_max_packet_size;
+	unsigned int hw_max_packet_size;
 
 	out_ctx = ctrl->devs[slot_id]->out_ctx;
 	xhci_inval_cache((uintptr_t)out_ctx->bytes, out_ctx->size);
-	Kprintf("Checking max packet size for ep 0\n");
+	KprintfH("Checking max packet size for ep 0\n");
 
 	ep_ctx = xhci_get_ep_ctx(ctrl, out_ctx, ep_index);
 	hw_max_packet_size = MAX_PACKET_DECODED(LE32(ep_ctx->ep_info2));
-	if (hw_max_packet_size != (int)max_packet_size)
+	if (hw_max_packet_size != max_packet_size)
 	{
-		Kprintf("Max Packet Size for ep 0 changed to %ld.\n", max_packet_size);
-		Kprintf("Max packet size in usb_device = %ld\n", max_packet_size);
-		Kprintf("Max packet size in xHCI HW = %ld\n", hw_max_packet_size);
-		Kprintf("Issuing evaluate context command.\n");
+		KprintfH("Max Packet Size for ep 0 changed to %ld.\n", max_packet_size);
+		KprintfH("Max packet size in xHCI HW = %ld\n", hw_max_packet_size);
+		KprintfH("Issuing evaluate context command.\n");
 
 		/* Set up the modified control endpoint 0 */
 		xhci_endpoint_copy(ctrl, ctrl->devs[slot_id]->in_ctx,
@@ -804,8 +781,7 @@ int xhci_check_maxpacket(struct usb_device *udev, unsigned int max_packet_size)
  * @param port_status	state of port status register
  * Return: none
  */
-static void xhci_clear_port_change_bit(u16 wValue,
-									   u16 wIndex, volatile uint32_t *addr, u32 port_status)
+static void xhci_clear_port_change_bit(u16 wValue, u16 wIndex, volatile uint32_t *addr, u32 port_status)
 {
 	char *port_change_bit;
 	u32 status;
@@ -841,8 +817,9 @@ static void xhci_clear_port_change_bit(u16 wValue,
 	xhci_writel(addr, port_status | status);
 
 	port_status = xhci_readl(addr);
-	Kprintf("clear port %s change, actual port %ld status  = 0x%lx\n",
-			port_change_bit, wIndex, port_status);
+	(void)port_change_bit;
+	(void)wIndex;
+	KprintfH("clear port %s change, actual port %ld status  = 0x%lx\n", port_change_bit, wIndex, port_status);
 }
 
 /**
@@ -884,8 +861,7 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 
 	if ((req->bmRequestType & USB_RT_PORT) && LE16(req->wIndex) > max_ports)
 	{
-		Kprintf("The request port(%ld) exceeds maximum port number\n",
-				LE16(req->wIndex) - 1);
+		Kprintf("The request port(%ld) exceeds maximum port number\n", LE16(req->wIndex) - 1);
 		goto unknown;
 	}
 
@@ -988,18 +964,18 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 			switch (reg & DEV_SPEED_MASK)
 			{
 			case XDEV_FS:
-				Kprintf("SPEED = FULLSPEED\n");
+				KprintfH("SPEED = FULLSPEED\n");
 				break;
 			case XDEV_LS:
-				Kprintf("SPEED = LOWSPEED\n");
+				KprintfH("SPEED = LOWSPEED\n");
 				tmpbuf[1] |= USB_PORT_STAT_LOW_SPEED >> 8;
 				break;
 			case XDEV_HS:
-				Kprintf("SPEED = HIGHSPEED\n");
+				KprintfH("SPEED = HIGHSPEED\n");
 				tmpbuf[1] |= USB_PORT_STAT_HIGH_SPEED >> 8;
 				break;
 			case XDEV_SS:
-				Kprintf("SPEED = SUPERSPEED\n");
+				KprintfH("SPEED = SUPERSPEED\n");
 				tmpbuf[1] |= USB_PORT_STAT_SUPER_SPEED >> 8;
 				break;
 			}
@@ -1034,34 +1010,34 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 
 		srcptr = tmpbuf;
 		srclen = 4;
-		Kprintf("USB_REQ_GET_STATUS PORT%ld status = 0x%lx\n",
-				LE16(req->wIndex) - 1, reg);
+		KprintfH("USB_REQ_GET_STATUS PORT%ld status = 0x%lx\n",
+				 LE16(req->wIndex) - 1, reg);
 		break;
 	case USB_REQ_SET_FEATURE | ((USB_DIR_OUT | USB_RT_PORT) << 8):
 		reg = xhci_readl(status_reg);
 		reg = xhci_port_state_to_neutral(reg);
-		Kprintf("SET_FEATURE PORT%ld status = 0x%lx feature=%lx\n",
-				LE16(req->wIndex) - 1, reg, LE16(req->wValue));
+		KprintfH("SET_FEATURE PORT%ld status = 0x%lx feature=%lx\n",
+				 LE16(req->wIndex) - 1, reg, LE16(req->wValue));
 		switch (LE16(req->wValue))
 		{
 		case USB_PORT_FEAT_ENABLE:
-			Kprintf("Set PORT_PE\n");
+			KprintfH("Set PORT_PE\n");
 			reg |= PORT_PE;
 			xhci_writel(status_reg, reg);
 			break;
 		case USB_PORT_FEAT_POWER:
-			Kprintf("Set PORT_POWER\n");
+			KprintfH("Set PORT_POWER\n");
 			reg |= PORT_POWER;
 			xhci_writel(status_reg, reg);
 			break;
 		case USB_PORT_FEAT_RESET:
-			Kprintf("Set PORT_RESET\n");
+			KprintfH("Set PORT_RESET\n");
 			reg |= PORT_RESET;
 			xhci_writel(status_reg, reg);
 			break;
 		case USB_PORT_FEAT_SUSPEND:
 			/* Put link into U3 suspend */
-			Kprintf("Putting link to U3 standby\n");
+			KprintfH("Putting link to U3 standby\n");
 			reg &= ~PORT_PLS_MASK;
 			reg |= XDEV_U3;
 			xhci_writel(status_reg, reg);
@@ -1074,20 +1050,20 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 	case USB_REQ_CLEAR_FEATURE | ((USB_DIR_OUT | USB_RT_PORT) << 8):
 		reg = xhci_readl(status_reg);
 		reg = xhci_port_state_to_neutral(reg);
-		Kprintf("CLEAR_FEATURE PORT%ld status = 0x%lx feature=%lx\n",
-				LE16(req->wIndex) - 1, reg, LE16(req->wValue));
+		KprintfH("CLEAR_FEATURE PORT%ld status = 0x%lx feature=%lx\n",
+				 LE16(req->wIndex) - 1, reg, LE16(req->wValue));
 		switch (LE16(req->wValue))
 		{
 		case USB_PORT_FEAT_ENABLE:
-			Kprintf("Clear PORT_PE\n");
+			KprintfH("Clear PORT_PE\n");
 			reg &= ~PORT_PE;
 			break;
 		case USB_PORT_FEAT_POWER:
-			Kprintf("Clear PORT_POWER\n");
+			KprintfH("Clear PORT_POWER\n");
 			reg &= ~PORT_POWER;
 			break;
 		case USB_PORT_FEAT_SUSPEND:
-			Kprintf("Resume from suspend, put link to U0\n");
+			KprintfH("Resume from suspend, put link to U0\n");
 			/* Resume link to U0 */
 			reg &= ~PORT_PLS_MASK;
 			reg |= XDEV_U0;
@@ -1097,7 +1073,7 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		case USB_PORT_FEAT_C_OVER_CURRENT:
 		case USB_PORT_FEAT_C_ENABLE:
 		case USB_PORT_FEAT_C_SUSPEND:
-			Kprintf("Clear port %lx change\n", LE16(req->wValue));
+			KprintfH("Clear port %lx change\n", LE16(req->wValue));
 			xhci_clear_port_change_bit((LE16(req->wValue)),
 									   LE16(req->wIndex),
 									   status_reg, reg);

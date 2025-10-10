@@ -20,39 +20,6 @@
 
 struct Device *TimerBase = NULL;
 
-void ScheduleWork(struct XHCIUnit *unit)
-{
-    (void)unit;
-    // TODO temporary
-    //  go through all devices and all endpoints
-    //  if there is one that is idle, has pending requests, and is not halted,
-    //  kick it to action
-    // TODO xhci_ep_get_next_request
-    // for (int i = 1; i <= unit->xhci_ctrl->max_slots; i++)
-    // {
-    //     struct usb_device *udev = unit->xhci_ctrl->devs[i] ? unit->xhci_ctrl->devs[i]->udev : NULL;
-    //     if (!udev)
-    //         continue;
-
-    //     for (int ep_index = 0; ep_index < USB_MAXENDPOINTS; ep_index++)
-    //     {
-    //         struct ep_context *ep_ctx = &udev->ep_context[ep_index];
-    //         if ((ep_ctx->state == USB_DEV_EP_STATE_IDLE || ep_ctx->state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT) &&
-    //             ep_ctx->current_req == NULL && !IsListEmpty(&ep_ctx->request_list) &&
-    //             !ep_ctx->halted)
-    //         {
-    //             struct IOUsbHWReq *next_req = xhci_ep_get_next_request(udev, ep_index);
-    //             if (next_req)
-    //             {
-    //                 Kprintf("[xhci] %s: Kicking EP %ld on dev %ld\n", __func__, (LONG)ep_index, (LONG)udev->devnum);
-    //                 ProcessCommand(next_req);
-    //                 activity = TRUE;
-    //             }
-    //         }
-    //     }
-    // }
-}
-
 static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 {
     // Initialize the built in msg port, we'll receive commands here
@@ -123,9 +90,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 
         activity |= xhci_process_event_trb(unit->xhci_ctrl);
 
-        ScheduleWork(unit);
-
-        // Timer expired, query PHY for link state
+        // Timer expired, time to check timeouts
         if (sigset & (1UL << microHZTimerPort->mp_SigBit))
         {
             if (CheckIO(&packetTimerReq->tr_node))

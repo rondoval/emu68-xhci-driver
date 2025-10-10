@@ -13,8 +13,14 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-commands] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
+#ifdef DEBUG_HIGH
+#undef KprintfH
+#define KprintfH(fmt, ...) PrintPistorm("[xhci-commands] %s: " fmt, __func__, ##__VA_ARGS__)
+#endif
+
 static const command_handler command_handlers[];
 
+#ifdef DEBUG_HIGH
 static const char *xhci_command_type_name(trb_type type)
 {
     switch (type)
@@ -41,6 +47,7 @@ static const char *xhci_command_type_name(trb_type type)
         return "UNKNOWN";
     }
 }
+#endif
 
 /**
  * Generic function for queueing a command TRB on the command ring.
@@ -178,8 +185,7 @@ static void handle_abort_stop_ring(struct xhci_ctrl *ctrl, struct pending_comman
  */
 static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
-    ULONG slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
-#ifdef DEBUG
+#ifdef DEBUG_HIGH
     trb_type type = cmd->type;
     const char *type_name = xhci_command_type_name(type);
 #endif
@@ -189,7 +195,8 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     if (comp != COMP_SUCCESS)
     {
-#ifdef DEBUG
+#ifdef DEBUG_HIGH
+        ULONG slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
         Kprintf("ERROR: %s command for slot %ld returned completion code 0x%lx.\n",
                 type_name, slot_id, (ULONG)comp);
 
@@ -208,7 +215,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
         return;
     }
 
-#ifdef DEBUG
+#ifdef DEBUG_HIGH
     KprintfH("%s command for slot %ld completed successfully\n", type_name, slot_id);
 
     if (type == TRB_EVAL_CONTEXT && cmd->udev)
@@ -246,7 +253,7 @@ void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, uni
     }
 
     cmd->udev->slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
-    Kprintf("assigned slot_id=%ld\n", (ULONG)cmd->udev->slot_id);
+    KprintfH("assigned slot_id=%ld\n", (ULONG)cmd->udev->slot_id);
 
     int ret = xhci_alloc_virt_device(ctrl, cmd->udev->slot_id);
     if (ret < 0)
@@ -496,7 +503,7 @@ void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
             // case XDEV_HS: udev->speed = USB_SPEED_HIGH; break;
             // case XDEV_SS: udev->speed = USB_SPEED_SUPER; break;
             // }
-            Kprintf("autodetected root_portnr=%ld speed=%ld\n", (ULONG)root_portnr, (ULONG)udev->speed);
+            KprintfH("autodetected root_portnr=%ld speed=%ld\n", (ULONG)root_portnr, (ULONG)udev->speed);
             break;
         }
     }
@@ -548,7 +555,7 @@ void xhci_address_device(struct usb_device *udev, struct IOUsbHWReq *req)
     /* If we don't have a slot yet, enable one and allocate Virt Dev */
     if (udev->slot_id == 0)
     {
-        Kprintf("no slot_id yet; enabling slot...\n");
+        KprintfH("no slot_id yet; enabling slot...\n");
         xhci_enable_slot(udev, req);
         return;
     }
