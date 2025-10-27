@@ -18,8 +18,6 @@
 #include <debug.h>
 #include <config.h>
 
-struct Device *TimerBase = NULL;
-
 static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 {
     // Initialize the built in msg port, we'll receive commands here
@@ -50,9 +48,6 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
         Signal(parent, SIGBREAKF_CTRL_C);
         return;
     }
-
-    /* used to reset stats on S2_ONLINE */
-    TimerBase = packetTimerReq->tr_node.io_Device;
 
     ULONG delay = UNIT_TASK_POLL_DELAY_MS * 1000;
 
