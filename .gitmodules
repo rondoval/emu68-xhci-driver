@@ -1,6 +1,0 @@
-[submodule "common"]
-	path = common
-	url = https://github.com/rondoval/emu68-common.git
-[submodule "pcie-lib"]
-	path = pcie-lib
-	url = https://github.com/rondoval/emu68-pcie-library.git

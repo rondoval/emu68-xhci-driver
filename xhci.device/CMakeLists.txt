@@ -23,6 +23,10 @@ add_executable(xhci.device
 )
 
 target_include_directories(xhci.device PRIVATE include)
-target_link_libraries(xhci.device common pcie.library gcc)
+target_link_libraries(xhci.device
+    PRIVATE
+        Emu68Common::common
+        Emu68PCIe::pcie
+)
 
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device DESTINATION .)
