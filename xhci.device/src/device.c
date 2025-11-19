@@ -68,7 +68,7 @@ static struct Resident const xhciDeviceResident __attribute__((used)) = {
     can be sizeof(struct Library), sizeof(struct Device) or any size necessary to
     store user defined object extending the Device structure.
 */
-APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct XHCIDevice *dev_base asm("a6"));
+APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *_SysBase asm("a6"));
 
 static const APTR funcTable[];
 static const APTR initTable[4] = {
@@ -95,10 +95,11 @@ static const APTR funcTable[] = {
 
 struct ExecBase *SysBase;
 struct Library *UtilityBase = NULL;
+struct Library *GIC400_Base = NULL;
 
-APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct XHCIDevice *dev_base asm("a6") __attribute__((unused)))
+APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *_SysBase asm("a6"))
 {
-    SysBase = *((struct ExecBase **)4UL);
+    SysBase = _SysBase;
     Kprintf("[xhci] %s: Initializing device\n", __func__);
     base->segList = segList;
     base->device.dd_Library.lib_Revision = DEVICE_REVISION;
@@ -108,7 +109,13 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
     if (UtilityBase == NULL)
     {
         Kprintf("[xhci] %s: Failed to open utility.library\n", __func__);
-        expungeLib(base);
+        return NULL;
+    }
+
+    GIC400_Base = OpenLibrary((CONST_STRPTR) "gic400.library", 0);
+    if (GIC400_Base == NULL)
+    {
+        Kprintf("[genet] %s: Failed to open gic400.library\n", __func__);
         return NULL;
     }
 
@@ -230,6 +237,12 @@ ULONG expungeLib(struct XHCIDevice *base asm("a6"))
         {
             CloseLibrary(UtilityBase);
             UtilityBase = NULL;
+        }
+
+        if (GIC400_Base != NULL)
+        {
+            CloseLibrary(GIC400_Base);
+            GIC400_Base = NULL;
         }
 
         ULONG segList = base->segList;

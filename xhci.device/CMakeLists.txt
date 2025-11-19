@@ -11,6 +11,7 @@ add_executable(xhci.device
     src/device_abortio.c
     src/unit.c
     src/unit_task.c
+    src/irq.c
     src/unit_commands.c
     src/usb_glue.c
     src/xhci/xhci.c

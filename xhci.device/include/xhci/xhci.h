@@ -17,6 +17,7 @@
 #define HOST_XHCI_H_
 
 #include <compat.h>
+#include <pci_types.h>
 #include <devices/usbhardware.h>
 #include <xhci/usb.h>
 

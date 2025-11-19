@@ -10,6 +10,7 @@
 #include <exec/devices.h>
 #include <exec/types.h>
 #include <exec/semaphores.h>
+#include <exec/interrupts.h>
 
 #include <devices/usbhardware.h>
 
@@ -32,6 +33,10 @@ struct XHCIUnit
 
 	struct Task *task;
 	struct xhci_ctrl *xhci_ctrl;
+
+	struct Interrupt irq_isr;
+	LONG irq_line;
+	BYTE irq_signal;
 };
 
 struct XHCIDevice
@@ -50,5 +55,9 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
 int UnitClose(struct XHCIUnit *unit);
 
 void ProcessCommand(struct IOUsbHWReq *io);
+
+int xhci_intx_enable(struct XHCIUnit *unit);
+void xhci_intx_shutdown(struct XHCIUnit *unit);
+void xhci_intx_handle(struct XHCIUnit *unit);
 
 #endif

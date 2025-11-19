@@ -27,29 +27,31 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     unit->unit.unit_MsgPort.mp_Flags = PA_SIGNAL;
     unit->unit.unit_MsgPort.mp_Node.ln_Type = NT_MSGPORT;
 
-    // Create a timer, we'll use it to poll
+    // Allocate singal for interrupt handler
+    unit->irq_signal = AllocSignal(-1);
+    if(unit->irq_signal == -1)
+    {
+        Kprintf("[xhci] %s: Failed to allocate event signal\n", __func__);
+        goto free_signals;
+    }
+
+    // Create a watchdog timer
     struct MsgPort *microHZTimerPort = CreateMsgPort();
     struct timerequest *packetTimerReq = CreateIORequest(microHZTimerPort, sizeof(struct timerequest));
     if (microHZTimerPort == NULL || packetTimerReq == NULL)
     {
         Kprintf("[xhci] %s: Failed to create timer msg port or request\n", __func__);
-        DeleteMsgPort(microHZTimerPort);
-        DeleteIORequest((struct IORequest *)packetTimerReq);
-        Signal(parent, SIGBREAKF_CTRL_C);
-        return;
+        goto free_ports;
     }
 
     UBYTE ret = OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, (struct IORequest *)packetTimerReq, LIB_MIN_VERSION);
     if (ret)
     {
         Kprintf("[xhci] %s: Failed to open timer device ret=%ld\n", __func__, ret);
-        DeleteMsgPort(microHZTimerPort);
-        DeleteIORequest((struct IORequest *)packetTimerReq);
-        Signal(parent, SIGBREAKF_CTRL_C);
-        return;
+        goto free_ports;
     }
 
-    ULONG delay = UNIT_TASK_POLL_DELAY_MS * 1000;
+    const ULONG delay = UNIT_TASK_POLL_DELAY_MS * 1000;
 
     // Set a timer... we need to pull on RX
     packetTimerReq->tr_node.io_Command = TR_ADDREQUEST;
@@ -61,10 +63,12 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     /* Signal parent that Unit task is up and running now */
     Signal(parent, SIGBREAKF_CTRL_F);
 
+    Kprintf("[genet] %s: Entering main unit task loo\n", __func__);
+
     ULONG sigset;
-    BOOL activity = FALSE;
     ULONG waitMask = (1UL << unit->unit.unit_MsgPort.mp_SigBit) |
                      (1UL << microHZTimerPort->mp_SigBit) |
+                     (1UL << unit->irq_signal) |
                      SIGBREAKF_CTRL_C;
 
     do
@@ -74,7 +78,6 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
         // IO queue got a new message
         if (sigset & (1UL << unit->unit.unit_MsgPort.mp_SigBit))
         {
-            activity = TRUE;
             struct IOUsbHWReq *io;
             // Drain command queue and process it
             while ((io = (struct IOUsbHWReq *)GetMsg(&unit->unit.unit_MsgPort)))
@@ -83,7 +86,10 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
             }
         }
 
-        activity |= xhci_process_event_trb(unit->xhci_ctrl);
+        if(sigset & (1UL << unit->irq_signal))
+        {
+            xhci_intx_handle(unit);
+        }
 
         // Timer expired, time to check timeouts
         if (sigset & (1UL << microHZTimerPort->mp_SigBit))
@@ -95,8 +101,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 
             xhci_process_event_timeouts(unit->xhci_ctrl);
 
-            activity = FALSE; /* reset activity */
-            delay = UNIT_TASK_POLL_DELAY_MS * 1000;
+            //TODO enable irq, just in case
 
             /* Re-arm timer */
             packetTimerReq->tr_node.io_Command = TR_ADDREQUEST;
@@ -113,10 +118,16 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
         }
     } while ((sigset & SIGBREAKF_CTRL_C) == 0);
 
-    FreeSignal(unit->unit.unit_MsgPort.mp_SigBit);
     CloseDevice(&packetTimerReq->tr_node);
+free_ports:
+    DeleteIORequest((struct IORequest *)packetTimerReq);
     DeleteIORequest(&packetTimerReq->tr_node);
     DeleteMsgPort(microHZTimerPort);
+free_signals:
+    FreeSignal(unit->irq_signal);
+    FreeSignal(unit->unit.unit_MsgPort.mp_SigBit);
+
+    Signal(parent, SIGBREAKF_CTRL_C);
     unit->task = NULL;
 }
 
@@ -165,6 +176,8 @@ int UnitTaskStart(struct XHCIUnit *unit)
     _NewMinList((struct MinList *)&task->tc_MemEntry);
     AddHead(&task->tc_MemEntry, &ml->ml_Node);
 
+    SetSignal(0UL, SIGBREAKF_CTRL_F);
+
     APTR result = AddTask(task, UnitTask, NULL);
     if (result == NULL)
     {
@@ -205,6 +218,8 @@ void UnitTaskStop(struct XHCIUnit *unit)
         timerReq->tr_time.tv_micro = 250000;
         DoIO(&timerReq->tr_node);
     } while (unit->task != NULL);
+
+    SetSignal(0UL, SIGBREAKF_CTRL_F);
 
     CloseDevice(&timerReq->tr_node);
     DeleteIORequest(&timerReq->tr_node);
