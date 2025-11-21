@@ -216,7 +216,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
     }
 
 #ifdef DEBUG_HIGH
-    KprintfH("%s command for slot %ld completed successfully\n", type_name, slot_id);
+    KprintfH("%s command for slot %ld completed successfully\n", type_name, TRB_TO_SLOT_ID(LE32(event->event_cmd.flags)));
 
     if (type == TRB_EVAL_CONTEXT && cmd->udev)
     {

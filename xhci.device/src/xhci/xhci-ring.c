@@ -609,12 +609,6 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	u32 remainder;
 	const int length = io->iouh_Length;
 
-	KprintfH("req=%lu (%lx), type=%lu (%lx), value=%lu (%lx), index=%lu\n",
-			 req->request, req->request,
-			 req->requesttype, req->requesttype,
-			 LE16(req->value), LE16(req->value),
-			 LE16(req->index));
-
 	ep_index = (io->iouh_Endpoint & 0xf) * 2; // ep_index is DCI-1 for control endpoints
 
 	ep_ring = virt_dev->eps[ep_index].ring;
@@ -625,7 +619,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	 * Check to see if the max packet size for the default control
 	 * endpoint changed during FS device enumeration
 	 */
-	if (udev->speed == USB_SPEED_FULL)
+	if (udev->speed == USB_SPEED_FULL && slot_id != 0)
 	{
 		if (xhci_check_maxpacket(udev, io->iouh_MaxPktSize))
 		{
