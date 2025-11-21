@@ -60,4 +60,7 @@ int xhci_intx_enable(struct XHCIUnit *unit);
 void xhci_intx_shutdown(struct XHCIUnit *unit);
 void xhci_intx_handle(struct XHCIUnit *unit);
 
+int xhci_msi_enable(struct XHCIUnit *unit);
+void xhci_msi_shutdown(struct XHCIUnit *unit);
+
 #endif

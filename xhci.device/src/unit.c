@@ -261,7 +261,8 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 		goto err_dereg;
 	}
 
-	result = xhci_intx_enable(unit);
+	// result = xhci_intx_enable(unit);
+	result = xhci_msi_enable(unit);
 	if (result < 0)
 	{
 		Kprintf("[xhci] %s: Failed to enable INTx (%ld)\n", __func__, (LONG)result);
@@ -270,7 +271,8 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	return UHIOERR_NO_ERROR;
 
 err_int_shutdown:
-	xhci_intx_shutdown(unit);
+	// xhci_intx_shutdown(unit);
+	xhci_msi_shutdown(unit);
 err_dereg:	
 	xhci_deregister(xhci_ctrl);
 err_del_ctrl:
@@ -291,7 +293,8 @@ int UnitClose(struct XHCIUnit *unit)
 	{
 		Kprintf("[xhci] %s: Last opener closed, cleaning up unit\n", __func__);
 		UnitTaskStop(unit);
-		xhci_intx_shutdown(unit);
+		// xhci_intx_shutdown(unit);
+		xhci_msi_shutdown(unit);
 		xhci_deregister(unit->xhci_ctrl);
 		FreeMem(unit->xhci_ctrl, sizeof(*unit->xhci_ctrl));
 		DeletePool(unit->memoryPool);
