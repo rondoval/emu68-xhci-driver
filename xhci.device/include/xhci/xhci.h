@@ -1277,6 +1277,9 @@ void xhci_update_hub_tt(struct usb_device *udev);
 int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_check_maxpacket(struct usb_device *udev, unsigned int maxpacket);
+int xhci_set_interface(struct usb_device *udev, unsigned int interface_number, unsigned int alt_setting);
+
+
 void xhci_flush_cache(uintptr_t addr, u32 type_len);
 void xhci_inval_cache(uintptr_t addr, u32 type_len);
 void xhci_cleanup(struct xhci_ctrl *ctrl);

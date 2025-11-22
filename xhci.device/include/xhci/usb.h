@@ -30,40 +30,30 @@
 #endif
 
 /* Everything is aribtrary */
-#define USB_ALTSETTINGALLOC		4
-#define USB_MAXALTSETTING		128	/* Hard limit */
-
-#define USB_MAX_DEVICE			32
-#define USB_MAXCONFIG			8
+#define USB_ALTSETTINGALLOC		8
 #define USB_MAXINTERFACES		8
 #define USB_MAXENDPOINTS		16
 #define USB_MAXCHILDREN			8	/* This is arbitrary */
-#define USB_MAX_HUB			16
 
 #define USB_CNTL_TIMEOUT 100 /* 100ms timeout */
 
-/*
- * The xhcd hcd driver prepares only a limited number interfaces / endpoints.
- * Define this limit so that drivers do not exceed it.
- */
-#define USB_MAX_ACTIVE_INTERFACES	2
+struct usb_interface_altsetting {
+	struct usb_interface_descriptor desc;
+
+	__u8 no_of_ep;
+
+	struct usb_endpoint_descriptor ep_desc[USB_MAXENDPOINTS];
+	struct usb_ss_ep_comp_descriptor ss_ep_comp_desc[USB_MAXENDPOINTS];
+};
 
 /* Interface */
 struct usb_interface {
-	struct usb_interface_descriptor desc;
+	__u8 interface_number;
+	__u8 num_altsetting;
+	struct usb_interface_altsetting *active_altsetting;
 
-	__u8	no_of_ep;
-	__u8	num_altsetting;
-	__u8	act_altsetting;
-
-	struct usb_endpoint_descriptor ep_desc[USB_MAXENDPOINTS];
-	/*
-	 * Super Speed Device will have Super Speed Endpoint
-	 * Companion Descriptor  (section 9.6.7 of usb 3.0 spec)
-	 * Revision 1.0 June 6th 2011
-	 */
-	struct usb_ss_ep_comp_descriptor ss_ep_comp_desc[USB_MAXENDPOINTS];
-} __attribute__ ((packed));
+	struct usb_interface_altsetting altsetting[USB_ALTSETTINGALLOC];
+};
 
 /* Configuration information.. */
 struct usb_config {
@@ -72,7 +62,7 @@ struct usb_config {
 
 	__u8	no_of_if;	/* number of interfaces */
 	struct usb_interface if_desc[USB_MAXINTERFACES];
-} __attribute__ ((packed));
+};
 
 enum {
 	/* Maximum packet size; encoded as 0,1,2,3 = 8,16,32,64 */
@@ -105,6 +95,7 @@ struct usb_device {
 	int maxpacketsize0;
 
 	struct MinList configurations; /* configurations captured from GET_CONFIGURATION replies */
+	struct usb_config *active_config;
 
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */

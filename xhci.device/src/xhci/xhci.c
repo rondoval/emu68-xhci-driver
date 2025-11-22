@@ -308,6 +308,331 @@ static unsigned int xhci_get_ep_index(struct usb_endpoint_descriptor *desc)
 	return index;
 }
 
+static struct usb_interface *xhci_find_interface(struct usb_config *cfg, unsigned int iface_number)
+{
+	if (!cfg)
+		return NULL;
+
+	for (unsigned int i = 0; i < cfg->no_of_if; ++i)
+	{
+		if (cfg->if_desc[i].interface_number == iface_number)
+			return &cfg->if_desc[i];
+	}
+
+	return NULL;
+}
+
+static struct usb_interface_altsetting *xhci_find_altsetting(struct usb_interface *iface, unsigned int alt_setting)
+{
+	if (!iface)
+		return NULL;
+
+	for (unsigned int idx = 0; idx < iface->num_altsetting; ++idx)
+	{
+		struct usb_interface_altsetting *candidate = &iface->altsetting[idx];
+		if (candidate->desc.bAlternateSetting == alt_setting)
+			return candidate;
+	}
+
+	return NULL;
+}
+
+static u32 xhci_collect_ep_mask(struct xhci_virt_device *virt_dev,
+				     const struct usb_interface_altsetting *alt,
+				     int reset_state,
+				     unsigned int *max_flag)
+{
+	if (!alt)
+		return 0;
+
+	u32 mask = 0;
+
+	for (unsigned int i = 0; i < alt->no_of_ep; ++i)
+	{
+		const struct usb_endpoint_descriptor *epd = &alt->ep_desc[i];
+		unsigned int ep_index = xhci_get_ep_index((struct usb_endpoint_descriptor *)epd);
+		mask |= 1U << (ep_index + 1);
+		if (reset_state && virt_dev)
+			virt_dev->eps[ep_index].ep_state = 0;
+		if (max_flag && ep_index > *max_flag)
+			*max_flag = ep_index;
+	}
+
+	return mask;
+}
+
+static u32 xhci_collect_config_masks(const struct usb_config *cfg,
+				       unsigned int limit,
+				       unsigned int *max_flag,
+				       int log_prepare)
+{
+	if (!cfg)
+		return 0;
+
+	u32 mask = 0;
+	unsigned int max_if = min(limit, cfg->no_of_if);
+
+	for (unsigned int ifnum = 0; ifnum < max_if; ++ifnum)
+	{
+		const struct usb_interface *iface = &cfg->if_desc[ifnum];
+		const struct usb_interface_altsetting *active_alt = iface->active_altsetting;
+		if (!active_alt)
+			continue;
+
+		if (log_prepare)
+			KprintfH("Preparing iface=%ld alt=%ld\n",
+				 (ULONG)ifnum, (LONG)active_alt->desc.bAlternateSetting);
+
+		mask |= xhci_collect_ep_mask(NULL, active_alt, 0, max_flag);
+	}
+
+	return mask;
+}
+
+static struct usb_config *xhci_find_config(struct usb_device *udev, int config_value)
+{
+	if (!udev)
+		return NULL;
+
+	for (struct MinNode *node = udev->configurations.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
+	{
+		struct usb_config *cfg = (struct usb_config *)node;
+		KprintfH("  found config: bConfigurationValue=%ld\n", (LONG)cfg->desc.bConfigurationValue);
+		if (cfg->desc.bConfigurationValue == config_value)
+			return cfg;
+	}
+
+	return NULL;
+}
+
+static struct usb_interface_altsetting *xhci_select_active_alt(struct usb_interface *iface)
+{
+	if (!iface)
+		return NULL;
+
+	if (iface->active_altsetting)
+		return iface->active_altsetting;
+
+	if (iface->num_altsetting == 0)
+		return NULL;
+
+	struct usb_interface_altsetting *fallback = NULL;
+	for (unsigned int idx = 0; idx < iface->num_altsetting; ++idx)
+	{
+		struct usb_interface_altsetting *candidate = &iface->altsetting[idx];
+		if (candidate->desc.bAlternateSetting == 0)
+		{
+			fallback = candidate;
+			break;
+		}
+	}
+
+	if (!fallback)
+		fallback = &iface->altsetting[0];
+
+	iface->active_altsetting = fallback;
+	return fallback;
+}
+
+static void xhci_dump_interface(unsigned int index, const struct usb_interface *iface)
+{
+	if (!iface)
+		return;
+
+	const struct usb_interface_altsetting *active_alt = iface->active_altsetting;
+	const struct usb_interface_altsetting *desc_alt = active_alt;
+	if (!desc_alt && iface->num_altsetting > 0)
+		desc_alt = &iface->altsetting[0];
+
+	Kprintf("  Interface %ld:\n", (ULONG)index);
+	if (desc_alt)
+	{
+		Kprintf("    bLength=%ld bDescriptorType=%ld bInterfaceNumber=%ld bAlternateSetting=%ld\n",
+			(ULONG)desc_alt->desc.bLength, (ULONG)desc_alt->desc.bDescriptorType,
+			(ULONG)desc_alt->desc.bInterfaceNumber, (ULONG)desc_alt->desc.bAlternateSetting);
+		Kprintf("    bNumEndpoints=%ld bInterfaceClass=%ld bInterfaceSubClass=%ld bInterfaceProtocol=%ld\n",
+			(ULONG)desc_alt->desc.bNumEndpoints, (ULONG)desc_alt->desc.bInterfaceClass,
+			(ULONG)desc_alt->desc.bInterfaceSubClass, (ULONG)desc_alt->desc.bInterfaceProtocol);
+		Kprintf("    iInterface=%ld no_of_ep=%ld\n",
+			(ULONG)desc_alt->desc.iInterface,
+			(ULONG)(active_alt ? active_alt->no_of_ep : desc_alt->no_of_ep));
+	}
+	else
+	{
+		Kprintf("    (no descriptors captured for this interface)\n");
+	}
+
+	if (!active_alt)
+	{
+		Kprintf("    (no active alternate setting)\n");
+		return;
+	}
+
+	for (unsigned int j = 0; j < active_alt->no_of_ep; ++j)
+	{
+		const struct usb_endpoint_descriptor *ep = &active_alt->ep_desc[j];
+		const struct usb_ss_ep_comp_descriptor *ss_ep = &active_alt->ss_ep_comp_desc[j];
+		Kprintf("    Endpoint %ld:\n", (ULONG)j);
+		Kprintf("      bLength=%ld bDescriptorType=%ld bEndpointAddress=0x%02lx bmAttributes=0x%02lx\n",
+			(ULONG)ep->bLength, (ULONG)ep->bDescriptorType,
+			(ULONG)ep->bEndpointAddress, (ULONG)ep->bmAttributes);
+		Kprintf("      wMaxPacketSize=%ld bInterval=%ld\n",
+			(ULONG)LE16(ep->wMaxPacketSize), (ULONG)ep->bInterval);
+		Kprintf("      SS Companion: bLength=%ld bDescriptorType=%ld bMaxBurst=%ld bmAttributes=0x%02lx\n",
+			(ULONG)ss_ep->bLength, (ULONG)ss_ep->bDescriptorType,
+			(ULONG)ss_ep->bMaxBurst, (ULONG)ss_ep->bmAttributes);
+		Kprintf("      SS Companion: wBytesPerInterval=%ld\n",
+			(ULONG)LE16(ss_ep->wBytesPerInterval));
+	}
+}
+
+static void xhci_dump_config(const struct usb_config *cfg, LONG devnum)
+{
+	if (!cfg)
+		return;
+
+	Kprintf("Addr %ld configuration dump:\n", devnum);
+	Kprintf("  bLength=%ld bDescriptorType=%ld wTotalLength=%ld bNumInterfaces=%ld\n",
+		(ULONG)cfg->desc.bLength, (ULONG)cfg->desc.bDescriptorType,
+		(ULONG)LE16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
+	Kprintf("  bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
+		(ULONG)cfg->desc.bConfigurationValue, (ULONG)cfg->desc.iConfiguration,
+		(ULONG)cfg->desc.bmAttributes, (ULONG)cfg->desc.bMaxPower);
+	Kprintf("  no_of_if=%ld\n", (ULONG)cfg->no_of_if);
+
+	for (unsigned int i = 0; i < cfg->no_of_if; ++i)
+		xhci_dump_interface(i, &cfg->if_desc[i]);
+}
+
+static int xhci_init_ep_contexts_if(struct usb_device *udev,
+					struct xhci_ctrl *ctrl,
+					struct xhci_virt_device *virt_dev,
+					struct usb_interface *ifdesc);
+
+static void xhci_update_slot_last_ctx(struct xhci_ctrl *ctrl,
+					 struct xhci_virt_device *virt_dev,
+					 unsigned int max_ep_flag)
+{
+	if (!ctrl || !virt_dev)
+		return;
+
+	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
+	if (!slot_ctx)
+		return;
+
+	u32 dev_info = LE32(slot_ctx->dev_info);
+	dev_info &= ~LAST_CTX_MASK;
+	dev_info |= LAST_CTX(max_ep_flag + 1);
+	slot_ctx->dev_info = LE32(dev_info);
+}
+
+static unsigned int compute_max_ep_flag(const struct usb_config *cfg)
+{
+	if (!cfg)
+		return 0;
+
+	unsigned int max_flag = 0;
+	xhci_collect_config_masks(cfg, cfg->no_of_if, &max_flag, 0);
+
+	return max_flag;
+}
+
+int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsigned int alt_setting)
+{
+	if (!udev || !udev->controller)
+		return UHIOERR_BADPARAMS;
+
+	struct usb_config *cfg = udev->active_config;
+	if (!cfg)
+	{
+		Kprintf("xhci_set_interface: no active config for addr %ld\n", (LONG)udev->devnum);
+		return UHIOERR_BADPARAMS;
+	}
+
+	struct usb_interface *iface = xhci_find_interface(cfg, iface_number);
+	if (!iface)
+	{
+		Kprintf("xhci_set_interface: interface %ld not found in config %ld\n",
+			(LONG)iface_number, (LONG)cfg->desc.bConfigurationValue);
+		return UHIOERR_BADPARAMS;
+	}
+
+	struct usb_interface_altsetting *current_alt = iface->active_altsetting;
+
+	if (current_alt && current_alt->desc.bAlternateSetting == alt_setting)
+	{
+		KprintfH("xhci_set_interface: iface %ld already at alt %ld\n",
+			 (LONG)iface_number, (LONG)alt_setting);
+		return UHIOERR_NO_ERROR;
+	}
+
+	struct usb_interface_altsetting *new_alt = xhci_find_altsetting(iface, alt_setting);
+	if (!new_alt)
+	{
+		Kprintf("xhci_set_interface: alt %ld missing for iface %ld\n",
+			(LONG)alt_setting, (LONG)iface_number);
+		return UHIOERR_BADPARAMS;
+	}
+
+	struct xhci_ctrl *ctrl = udev->controller;
+	struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
+	if (!virt_dev || !virt_dev->in_ctx || !virt_dev->out_ctx)
+	{
+		Kprintf("xhci_set_interface: missing virtual device for slot %ld\n", (LONG)udev->slot_id);
+		return UHIOERR_HOSTERROR;
+	}
+
+	/* Poseidon stack guarantees endpoint queues are idle before switching. */
+	u32 drop_mask = xhci_collect_ep_mask(virt_dev, current_alt, 1, NULL);
+
+	iface->active_altsetting = new_alt;
+
+	u32 add_mask = xhci_collect_ep_mask(NULL, new_alt, 0, NULL);
+
+	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+	xhci_slot_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx);
+	xhci_endpoint_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx, 0);
+
+	struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
+	if (!ctrl_ctx)
+	{
+		Kprintf("xhci_set_interface: missing input control context\n");
+		iface->active_altsetting = current_alt;
+		return UHIOERR_HOSTERROR;
+	}
+
+	int err = UHIOERR_NO_ERROR;
+	if (new_alt->no_of_ep > 0)
+	{
+		err = xhci_init_ep_contexts_if(udev, ctrl, virt_dev, iface);
+		if (err != UHIOERR_NO_ERROR)
+		{
+			Kprintf("xhci_set_interface: failed to init ep contexts (err=%ld)\n", (LONG)err);
+			iface->active_altsetting = current_alt;
+			return err;
+		}
+	}
+
+	u32 add_flags = SLOT_FLAG | add_mask;
+	u32 drop_flags = drop_mask;
+	ctrl_ctx->add_flags = LE32(add_flags);
+	ctrl_ctx->drop_flags = LE32(drop_flags);
+
+	unsigned int max_ep_flag = compute_max_ep_flag(cfg);
+	xhci_update_slot_last_ctx(ctrl, virt_dev, max_ep_flag);
+
+	KprintfH("xhci_set_interface: addr=%ld iface=%ld alt=%ld drop=0x%lx add=0x%lx\n",
+		 (LONG)udev->devnum,
+		 (LONG)iface_number,
+		 (LONG)alt_setting,
+		 (ULONG)drop_mask,
+		 (ULONG)add_mask);
+
+	xhci_configure_endpoints(udev, FALSE, NULL);
+
+	return err;
+}
+
 /*
  * Convert bInterval expressed in microframes (in 1-255 range) to exponent of
  * microframes, rounded down to nearest power of 2.
@@ -515,15 +840,23 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 	unsigned int max_burst;
 	unsigned int avg_trb_len;
 	unsigned int err_count = 0;
-	int num_of_ep = ifdesc->no_of_ep;
+	struct usb_interface_altsetting *active_alt = ifdesc->active_altsetting;
+	if (!active_alt)
+	{
+		Kprintf("xhci_init_ep_contexts_if: no active altsetting for iface %ld\n",
+			(ULONG)ifdesc->interface_number);
+		return UHIOERR_BADPARAMS;
+	}
+
+	int num_of_ep = active_alt->no_of_ep;
 
 	for (cur_ep = 0; cur_ep < num_of_ep; cur_ep++)
 	{
 		struct usb_endpoint_descriptor *endpt_desc = NULL;
 		struct usb_ss_ep_comp_descriptor *ss_ep_comp_desc = NULL;
 
-		endpt_desc = &ifdesc->ep_desc[cur_ep];
-		ss_ep_comp_desc = &ifdesc->ss_ep_comp_desc[cur_ep];
+		endpt_desc = &active_alt->ep_desc[cur_ep];
+		ss_ep_comp_desc = &active_alt->ss_ep_comp_desc[cur_ep];
 		trb_64 = 0;
 
 		/*
@@ -598,118 +931,52 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
 {
 	KprintfH("xhci_set_configuration: config_val=%ld\n", (LONG)config_value);
 
-	struct usb_config *cfg = NULL;
-	for (struct MinNode *node = udev->configurations.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
-	{
-		struct usb_config *checking = (struct usb_config *)node;
-		KprintfH("  found config: bConfigurationValue=%ld\n", (LONG)checking->desc.bConfigurationValue);
-		if (checking->desc.bConfigurationValue == config_value)
-		{
-			cfg = checking;
-			break;
-		}
-	}
-	if (cfg == NULL)
+	struct usb_config *cfg = xhci_find_config(udev, config_value);
+	if (!cfg)
 	{
 		Kprintf("xhci_set_configuration: config_val=%ld not found!\n", (LONG)config_value);
 		return UHIOERR_BADPARAMS;
 	}
-	// Dump entire cfg using kprintf (all fields and all interfaces and endpoints)
-	Kprintf("Addr %ld configuration dump:\n", udev->devnum);
-	Kprintf("  bLength=%ld bDescriptorType=%ld wTotalLength=%ld bNumInterfaces=%ld\n",
-			(ULONG)cfg->desc.bLength, (ULONG)cfg->desc.bDescriptorType,
-			(ULONG)LE16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
-	Kprintf("  bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
-			(ULONG)cfg->desc.bConfigurationValue, (ULONG)cfg->desc.iConfiguration,
-			(ULONG)cfg->desc.bmAttributes, (ULONG)cfg->desc.bMaxPower);
-	Kprintf("  no_of_if=%ld\n", (ULONG)cfg->no_of_if);
 
-	for (unsigned int i = 0; i < cfg->no_of_if; i++)
-	{
-		struct usb_interface *iface = &cfg->if_desc[i];
-		Kprintf("  Interface %ld:\n", (ULONG)i);
-		Kprintf("    bLength=%ld bDescriptorType=%ld bInterfaceNumber=%ld bAlternateSetting=%ld\n",
-				(ULONG)iface->desc.bLength, (ULONG)iface->desc.bDescriptorType,
-				(ULONG)iface->desc.bInterfaceNumber, (ULONG)iface->desc.bAlternateSetting);
-		Kprintf("    bNumEndpoints=%ld bInterfaceClass=%ld bInterfaceSubClass=%ld bInterfaceProtocol=%ld\n",
-				(ULONG)iface->desc.bNumEndpoints, (ULONG)iface->desc.bInterfaceClass,
-				(ULONG)iface->desc.bInterfaceSubClass, (ULONG)iface->desc.bInterfaceProtocol);
-		Kprintf("    iInterface=%ld no_of_ep=%ld\n",
-				(ULONG)iface->desc.iInterface, (ULONG)iface->no_of_ep);
+	udev->active_config = cfg;
+	for (unsigned int i = 0; i < cfg->no_of_if; ++i)
+		xhci_select_active_alt(&cfg->if_desc[i]);
 
-		for (unsigned int j = 0; j < iface->no_of_ep; j++)
-		{
-			struct usb_endpoint_descriptor *ep = &iface->ep_desc[j];
-			struct usb_ss_ep_comp_descriptor *ss_ep = &iface->ss_ep_comp_desc[j];
-			Kprintf("    Endpoint %ld:\n", (ULONG)j);
-			Kprintf("      bLength=%ld bDescriptorType=%ld bEndpointAddress=0x%02lx bmAttributes=0x%02lx\n",
-					(ULONG)ep->bLength, (ULONG)ep->bDescriptorType,
-					(ULONG)ep->bEndpointAddress, (ULONG)ep->bmAttributes);
-			Kprintf("      wMaxPacketSize=%ld bInterval=%ld\n",
-					(ULONG)LE16(ep->wMaxPacketSize), (ULONG)ep->bInterval);
-			Kprintf("      SS Companion: bLength=%ld bDescriptorType=%ld bMaxBurst=%ld bmAttributes=0x%02lx\n",
-					(ULONG)ss_ep->bLength, (ULONG)ss_ep->bDescriptorType,
-					(ULONG)ss_ep->bMaxBurst, (ULONG)ss_ep->bmAttributes);
-			Kprintf("      SS Companion: wBytesPerInterval=%ld\n",
-					(ULONG)LE16(ss_ep->wBytesPerInterval));
-		}
-	}
+	/* Dump entire cfg using kprintf (all fields and all interfaces and endpoints) */
+	xhci_dump_config(cfg, (LONG)udev->devnum);
 
 	struct xhci_container_ctx *out_ctx;
 	struct xhci_container_ctx *in_ctx;
 	struct xhci_input_control_ctx *ctrl_ctx;
-	struct xhci_slot_ctx *slot_ctx;
-	int err;
-	int cur_ep;
-	int max_ep_flag = 0;
 	struct xhci_ctrl *ctrl = udev->controller;
-	int num_of_ep;
-	int ep_flag = 0;
 	int slot_id = udev->slot_id;
 	struct xhci_virt_device *virt_dev = ctrl->devs[slot_id];
-	struct usb_interface *ifdesc;
-	unsigned int ifnum;
-	unsigned int max_ifnum = min((unsigned int)USB_MAX_ACTIVE_INTERFACES,
-								 (unsigned int)cfg->no_of_if);
+	unsigned int max_ifnum = cfg->no_of_if;
+	unsigned int max_ep_flag = 0;
 
 	out_ctx = virt_dev->out_ctx;
 	in_ctx = virt_dev->in_ctx;
 
 	ctrl_ctx = xhci_get_input_control_ctx(in_ctx);
-	/* Initialize the input context control */
-	ctrl_ctx->add_flags = LE32(SLOT_FLAG);
+	u32 add_flags = SLOT_FLAG;
+	u32 mask = xhci_collect_config_masks(cfg, max_ifnum, &max_ep_flag, 1);
+	add_flags |= mask;
+	ctrl_ctx->add_flags = LE32(add_flags);
 	ctrl_ctx->drop_flags = 0;
-
-	for (ifnum = 0; ifnum < max_ifnum; ifnum++)
-	{
-		ifdesc = &cfg->if_desc[ifnum];
-		num_of_ep = ifdesc->no_of_ep;
-		/* EP_FLAG gives values 1 & 4 for EP1OUT and EP2IN */
-		for (cur_ep = 0; cur_ep < num_of_ep; cur_ep++)
-		{
-			KprintfH("Setting up EP ifnum=%ld ep=%ld\n", (ULONG)ifnum, (ULONG)cur_ep);
-			ep_flag = xhci_get_ep_index(&ifdesc->ep_desc[cur_ep]);
-			ctrl_ctx->add_flags |= LE32(1 << (ep_flag + 1));
-			if (max_ep_flag < ep_flag)
-				max_ep_flag = ep_flag;
-		}
-	}
 
 	xhci_inval_cache((uintptr_t)out_ctx->bytes, out_ctx->size);
 
 	/* slot context */
 	xhci_slot_copy(ctrl, in_ctx, out_ctx);
-	slot_ctx = xhci_get_slot_ctx(ctrl, in_ctx);
-	slot_ctx->dev_info &= ~(LE32(LAST_CTX_MASK));
-	slot_ctx->dev_info |= LE32(LAST_CTX(max_ep_flag + 1) | 0);
+	xhci_update_slot_last_ctx(ctrl, virt_dev, max_ep_flag);
 
 	xhci_endpoint_copy(ctrl, in_ctx, out_ctx, 0);
 
 	/* filling up ep contexts */
-	for (ifnum = 0; ifnum < max_ifnum; ifnum++)
+	for (unsigned int ifnum = 0; ifnum < max_ifnum; ++ifnum)
 	{
-		ifdesc = &cfg->if_desc[ifnum];
-		err = xhci_init_ep_contexts_if(udev, ctrl, virt_dev, ifdesc);
+		struct usb_interface *ifdesc = &cfg->if_desc[ifnum];
+		int err = xhci_init_ep_contexts_if(udev, ctrl, virt_dev, ifdesc);
 		if (err != UHIOERR_NO_ERROR)
 		{
 			return err;

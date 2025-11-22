@@ -231,10 +231,15 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
 
     // in 3.x there are association descriptors here
 
-    conf->no_of_if = desc->bNumInterfaces;
+    int interface_map[USB_MAXINTERFACES];
+    for (int i = 0; i < USB_MAXINTERFACES; ++i)
+        interface_map[i] = -1;
+
+    conf->no_of_if = 0;
     int if_index = 0;
-    int endpoint = 0;
+    int current_alt_index = -1;
     struct usb_interface *current_if = NULL;
+    struct usb_interface_altsetting *current_alt = NULL;
 
     while (cursor + 2 <= end)
     {
@@ -256,17 +261,59 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         case USB_DT_INTERFACE:
         {
             struct usb_interface_descriptor *ifd = (struct usb_interface_descriptor *)cursor;
-            if (if_index >= USB_MAXINTERFACES)
+            unsigned int iface_number = ifd->bInterfaceNumber;
+            if (iface_number >= USB_MAXINTERFACES)
             {
-                Kprintf("too many interfaces (%ld)\n", (LONG)if_index);
-                goto error;
+                Kprintf("interface number %ld exceeds max %ld\n", (LONG)iface_number, (LONG)USB_MAXINTERFACES);
+                current_if = NULL;
+                current_alt = NULL;
+                current_alt_index = -1;
+                break;
             }
 
-            CopyMem(ifd, &conf->if_desc[if_index].desc, sizeof(struct usb_interface_descriptor));
-            conf->if_desc[if_index].no_of_ep = ifd->bNumEndpoints;
-            conf->if_desc[if_index].num_altsetting = ifd->bAlternateSetting;
-            KprintfH("interface %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
+            if_index = interface_map[iface_number];
+            if (if_index < 0)
+            {
+                if_index = conf->no_of_if;
+                if (if_index >= USB_MAXINTERFACES)
+                {
+                    Kprintf("too many unique interfaces (%ld)\n", (LONG)if_index);
+                    goto error;
+                }
+                interface_map[iface_number] = if_index;
+                current_if = &conf->if_desc[if_index];
+                _memset(current_if, 0, sizeof(struct usb_interface));
+                current_if->interface_number = (u8)iface_number;
+                current_if->num_altsetting = 0;
+                current_if->active_altsetting = NULL;
+                conf->no_of_if++;
+            }
+            else
+            {
+                current_if = &conf->if_desc[if_index];
+            }
+
+            current_if->interface_number = (u8)iface_number;
+
+            if (current_if->num_altsetting >= USB_ALTSETTINGALLOC)
+            {
+                Kprintf("too many alternate settings (%ld) for interface %ld\n",
+                        (LONG)current_if->num_altsetting, (LONG)iface_number);
+                current_alt = NULL;
+                current_alt_index = -1;
+                break;
+            }
+
+            current_alt_index = current_if->num_altsetting++;
+            current_alt = &current_if->altsetting[current_alt_index];
+            _memset(current_alt, 0, sizeof(struct usb_interface_altsetting));
+
+            CopyMem(ifd, &current_alt->desc, sizeof(struct usb_interface_descriptor));
+            current_alt->no_of_ep = 0;
+
+            KprintfH("interface %ld alt %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
                      (LONG)if_index,
+                     (LONG)current_alt_index,
                      (LONG)ifd->bInterfaceNumber,
                      (LONG)ifd->bAlternateSetting,
                      (LONG)ifd->bNumEndpoints,
@@ -275,43 +322,45 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
                      (LONG)ifd->bInterfaceProtocol,
                      (LONG)ifd->iInterface);
 
-            current_if = &conf->if_desc[if_index];
-            if_index++;
-            endpoint = 0; // reset endpoint index for new interface
+            if (current_if->active_altsetting == NULL || current_alt->desc.bAlternateSetting == 0)
+                current_if->active_altsetting = current_alt;
             break;
         }
         case USB_DT_ENDPOINT:
         {
-            if (!current_if)
+            if (!current_if || !current_alt)
             {
-                Kprintf("endpoint without interface\n");
+                Kprintf("endpoint without interface or altsetting\n");
                 break;
             }
-            if (endpoint >= USB_MAXENDPOINTS)
+            if (current_alt->no_of_ep >= USB_MAXENDPOINTS)
             {
-                Kprintf("too many endpoints for interface %ld\n", (LONG)(if_index - 1));
+                Kprintf("too many endpoints for interface %ld alt %ld\n",
+                        (LONG)if_index, (LONG)current_alt_index);
                 break;
             }
 
             struct usb_endpoint_descriptor *epd = (struct usb_endpoint_descriptor *)cursor;
-            CopyMem(epd, &current_if->ep_desc[endpoint], sizeof(struct usb_endpoint_descriptor));
+            unsigned int ep_idx = current_alt->no_of_ep;
+            CopyMem(epd, &current_alt->ep_desc[ep_idx], sizeof(struct usb_endpoint_descriptor));
             KprintfH("  endpoint %ld: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%ld bInterval=%ld\n",
-                     (LONG)endpoint,
+                     (LONG)ep_idx,
                      (LONG)epd->bEndpointAddress,
                      (LONG)epd->bmAttributes,
                      (LONG)LE16(epd->wMaxPacketSize),
                      (LONG)epd->bInterval);
 
-            endpoint++;
+            current_alt->no_of_ep++;
             break;
         }
         case USB_DT_SS_ENDPOINT_COMP:
         {
             KprintfH("found SS EP COMP descriptor\n");
-            if (current_if && endpoint > 0)
+            if (current_if && current_alt && current_alt->no_of_ep > 0)
             {
                 struct usb_ss_ep_comp_descriptor *comp = (struct usb_ss_ep_comp_descriptor *)cursor;
-                CopyMem(comp, &current_if->ss_ep_comp_desc[endpoint - 1], sizeof(struct usb_ss_ep_comp_descriptor));
+                unsigned int ep_slot = current_alt->no_of_ep - 1;
+                CopyMem(comp, &current_alt->ss_ep_comp_desc[ep_slot], sizeof(struct usb_ss_ep_comp_descriptor));
             }
             break;
         }
@@ -325,9 +374,10 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
     }
     KprintfH("parsed config with %ld interfaces\n", (LONG)conf->no_of_if);
 
-    if (conf->no_of_if != if_index)
+    if (conf->no_of_if != desc->bNumInterfaces)
     {
-        Kprintf("interface count mismatch %ld != %ld\n", (LONG)conf->no_of_if, (LONG)if_index);
+        Kprintf("interface count mismatch %ld != %ld\n",
+                (LONG)conf->no_of_if, (LONG)desc->bNumInterfaces);
         goto error;
     }
 
@@ -720,6 +770,20 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             /* Clear the old address entry to avoid stale references. */
             _memset(from, 0, sizeof(*from));
             Kprintf("migrated ctx from addr %ld to %ld\n", (LONG)old_addr, (LONG)new_addr);
+        }
+    }
+
+    if ((io->iouh_SetupData.bRequest == USB_REQ_SET_INTERFACE) &&
+        ((io->iouh_SetupData.bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD) &&
+        ((io->iouh_SetupData.bmRequestType & 0x1F) == USB_RECIP_INTERFACE))
+    {
+        unsigned int iface = (unsigned int)(LE16(io->iouh_SetupData.wIndex) & 0xFF);
+        unsigned int alt = (unsigned int)(LE16(io->iouh_SetupData.wValue) & 0xFF);
+        int err = xhci_set_interface(udev, iface, alt);
+        if (err != UHIOERR_NO_ERROR)
+        {
+            Kprintf("SET_INTERFACE iface=%ld alt=%ld failed err=%ld\n",
+                    (LONG)iface, (LONG)alt, (LONG)err);
         }
     }
 }
