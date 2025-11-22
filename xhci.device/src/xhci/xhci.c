@@ -26,6 +26,7 @@
 #include <device.h>
 
 #include <xhci/usb.h>
+#include <usb_glue.h>
 #include <devices/usbhardware.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
@@ -47,74 +48,68 @@ static struct descriptor
 	struct usb_config_descriptor config;
 	struct usb_interface_descriptor interface;
 	struct usb_endpoint_descriptor endpoint;
-	struct usb_ss_ep_comp_descriptor ep_companion;
 } __attribute__((packed)) descriptor = {
-	{
-		0xc,			  /* bDescLength */
-		0x2a,			  /* bDescriptorType: hub descriptor */
-		2,				  /* bNrPorts -- runtime modified */
-		cpu_to_le16(0x8), /* wHubCharacteristics */
-		10,				  /* bPwrOn2PwrGood */
-		0,				  /* bHubCntrCurrent */
-		{
-			/* Device removable */
-		} /* at most 7 ports! XXX */
+	.hub = {
+		.bLength            = 0x0b,                  /* placeholder, recalculated once ports known */
+		.bDescriptorType    = USB_DT_HUB,            /* hub descriptor */
+		.bNbrPorts          = 2,                     /* patched to real port count during init */
+		.wHubCharacteristics= cpu_to_le16(HUB_CHAR_INDV_PORT_LPSM |
+						 HUB_CHAR_INDV_PORT_OCPM), /* per-port power + OC */
+		.bPwrOn2PwrGood     = 10,                    /* 20 ms between power on and usable */
+		.bHubContrCurrent   = 0,                     /* self-powered: no bus draw */
+		.u.hs = {
+			.DeviceRemovable   = {0x00, 0x00},         /* all ports permanently wired */
+			.PortPowerCtrlMask = {0x00, 0x00},         /* patched in init when ports known */
+		},
 	},
-	{
-		0x12,				 /* bLength */
-		1,					 /* bDescriptorType: UDESC_DEVICE */
-		cpu_to_le16(0x0300), /* bcdUSB: v3.0 */
-		9,					 /* bDeviceClass: UDCLASS_HUB */
-		0,					 /* bDeviceSubClass: UDSUBCLASS_HUB */
-		3,					 /* bDeviceProtocol: UDPROTO_SSHUBSTT */
-		64,					 /* bMaxPacketSize0: 64 bytes */
-		0x0000,				 /* idVendor */
-		0x0000,				 /* idProduct */
-		cpu_to_le16(0x0100), /* bcdDevice */
-		1,					 /* iManufacturer */
-		2,					 /* iProduct */
-		0,					 /* iSerialNumber */
-		1					 /* bNumConfigurations: 1 */
+	.device = {
+		.bLength            = sizeof(struct usb_device_descriptor), /* size of device descriptor */
+		.bDescriptorType    = USB_DT_DEVICE,         /* device descriptor */
+		.bcdUSB             = cpu_to_le16(0x0200),   /* advertise as USB 2.0 */
+		.bDeviceClass       = USB_CLASS_HUB,         /* hub */
+		.bDeviceSubClass    = 0,                     /* no subclass */
+		.bDeviceProtocol    = USB_HUB_PR_HS_SINGLE_TT, /* single-TT */
+		.bMaxPacketSize0    = 64,                    /* control endpoint max packet */
+		.idVendor           = 0x0000,                /* virtual root hub: leave VID zero */
+		.idProduct          = 0x0000,                /* virtual root hub: leave PID zero */
+		.bcdDevice          = cpu_to_le16(0x0100),   /* device revision */
+		.iManufacturer      = 1,                     /* string index */
+		.iProduct           = 2,                     /* string index */
+		.iSerialNumber      = 0,                     /* no serial */
+		.bNumConfigurations = 1,                     /* single configuration */
 	},
-	{
-		0x9,
-		2,				   /* bDescriptorType: UDESC_CONFIG */
-		cpu_to_le16(0x1f), /* include SS endpoint descriptor */
-		1,				   /* bNumInterface */
-		1,				   /* bConfigurationValue */
-		0,				   /* iConfiguration */
-		0x40,			   /* bmAttributes: UC_SELF_POWER */
-		0				   /* bMaxPower */
+	.config = {
+		.bLength            = sizeof(struct usb_config_descriptor), /* size of configuration descriptor */
+		.bDescriptorType    = USB_DT_CONFIG,         /* configuration descriptor */
+		.wTotalLength       = cpu_to_le16(sizeof(struct usb_config_descriptor) +
+					 sizeof(struct usb_interface_descriptor) +
+					 sizeof(struct usb_endpoint_descriptor)), /* config + interface + endpoint */
+		.bNumInterfaces     = 1,                     /* single interface */
+		.bConfigurationValue= 1,                     /* configuration ID */
+		.iConfiguration     = 0,                     /* no string descriptor */
+		.bmAttributes       = USB_CONFIG_ATT_ONE | USB_CONFIG_ATT_SELFPOWER, /* must-set + self-powered */
+		.bMaxPower          = 0,                     /* no bus power drawn */
 	},
-	{
-		0x9, /* bLength */
-		4,	 /* bDescriptorType: UDESC_INTERFACE */
-		0,	 /* bInterfaceNumber */
-		0,	 /* bAlternateSetting */
-		1,	 /* bNumEndpoints */
-		9,	 /* bInterfaceClass: UICLASS_HUB */
-		0,	 /* bInterfaceSubClass: UISUBCLASS_HUB */
-		0,	 /* bInterfaceProtocol: UIPROTO_HSHUBSTT */
-		0	 /* iInterface */
+	.interface = {
+		.bLength            = sizeof(struct usb_interface_descriptor), /* size of interface descriptor */
+		.bDescriptorType    = USB_DT_INTERFACE,      /* interface descriptor */
+		.bInterfaceNumber   = 0,                     /* interface index */
+		.bAlternateSetting  = 0,                     /* only one setting */
+		.bNumEndpoints      = 1,                     /* interrupt endpoint only */
+		.bInterfaceClass    = USB_CLASS_HUB,         /* hub functional interface */
+		.bInterfaceSubClass = 0,                     /* full/high-speed hub */
+		.bInterfaceProtocol = USB_HUB_PR_HS_SINGLE_TT, /* single-TT */
+		.iInterface         = 0,                     /* no string */
 	},
-	{
-		0x7,  /* bLength */
-		5,	  /* bDescriptorType: UDESC_ENDPOINT */
-		0x81, /* bEndpointAddress: IN endpoint 1 */
-		3,	  /* bmAttributes: UE_INTERRUPT */
-		8,	  /* wMaxPacketSize */
-		255,  /* bInterval */
-		0,	  /* bRefresh */
-		0	  /* bSynchAddress */
-	},
-	{
-		0x06, /* ss_bLength */
-		0x30, /* ss_bDescriptorType: SS EP Companion */
-		0x00, /* ss_bMaxBurst: allows 1 TX between ACKs */
-		/* ss_bmAttributes: 1 packet per service interval */
-		0x00,
-		/* ss_wBytesPerInterval: 15 bits for max 15 ports */
-		cpu_to_le16(0x02),
+	.endpoint = {
+		.bLength            = sizeof(struct usb_endpoint_descriptor), /* size of endpoint descriptor */
+		.bDescriptorType    = USB_DT_ENDPOINT,       /* endpoint descriptor */
+		.bEndpointAddress   = (USB_DIR_IN | 1),      /* INT IN endpoint 1 */
+		.bmAttributes       = USB_ENDPOINT_XFER_INT, /* interrupt */
+		.wMaxPacketSize     = cpu_to_le16(8),        /* patched during init */
+		.bInterval          = 12,                    /* 1ms poll per USB 2.0 hub spec */
+		.bRefresh           = 0,                     /* unused for INT */
+		.bSynchAddress      = 0,                     /* not used */
 	},
 };
 
@@ -338,9 +333,9 @@ static struct usb_interface_altsetting *xhci_find_altsetting(struct usb_interfac
 }
 
 static u32 xhci_collect_ep_mask(struct xhci_virt_device *virt_dev,
-				     const struct usb_interface_altsetting *alt,
-				     int reset_state,
-				     unsigned int *max_flag)
+								const struct usb_interface_altsetting *alt,
+								int reset_state,
+								unsigned int *max_flag)
 {
 	if (!alt)
 		return 0;
@@ -362,9 +357,9 @@ static u32 xhci_collect_ep_mask(struct xhci_virt_device *virt_dev,
 }
 
 static u32 xhci_collect_config_masks(const struct usb_config *cfg,
-				       unsigned int limit,
-				       unsigned int *max_flag,
-				       int log_prepare)
+									 unsigned int limit,
+									 unsigned int *max_flag,
+									 int log_prepare)
 {
 	if (!cfg)
 		return 0;
@@ -381,7 +376,7 @@ static u32 xhci_collect_config_masks(const struct usb_config *cfg,
 
 		if (log_prepare)
 			KprintfH("Preparing iface=%ld alt=%ld\n",
-				 (ULONG)ifnum, (LONG)active_alt->desc.bAlternateSetting);
+					 (ULONG)ifnum, (LONG)active_alt->desc.bAlternateSetting);
 
 		mask |= xhci_collect_ep_mask(NULL, active_alt, 0, max_flag);
 	}
@@ -448,14 +443,14 @@ static void xhci_dump_interface(unsigned int index, const struct usb_interface *
 	if (desc_alt)
 	{
 		Kprintf("    bLength=%ld bDescriptorType=%ld bInterfaceNumber=%ld bAlternateSetting=%ld\n",
-			(ULONG)desc_alt->desc.bLength, (ULONG)desc_alt->desc.bDescriptorType,
-			(ULONG)desc_alt->desc.bInterfaceNumber, (ULONG)desc_alt->desc.bAlternateSetting);
+				(ULONG)desc_alt->desc.bLength, (ULONG)desc_alt->desc.bDescriptorType,
+				(ULONG)desc_alt->desc.bInterfaceNumber, (ULONG)desc_alt->desc.bAlternateSetting);
 		Kprintf("    bNumEndpoints=%ld bInterfaceClass=%ld bInterfaceSubClass=%ld bInterfaceProtocol=%ld\n",
-			(ULONG)desc_alt->desc.bNumEndpoints, (ULONG)desc_alt->desc.bInterfaceClass,
-			(ULONG)desc_alt->desc.bInterfaceSubClass, (ULONG)desc_alt->desc.bInterfaceProtocol);
+				(ULONG)desc_alt->desc.bNumEndpoints, (ULONG)desc_alt->desc.bInterfaceClass,
+				(ULONG)desc_alt->desc.bInterfaceSubClass, (ULONG)desc_alt->desc.bInterfaceProtocol);
 		Kprintf("    iInterface=%ld no_of_ep=%ld\n",
-			(ULONG)desc_alt->desc.iInterface,
-			(ULONG)(active_alt ? active_alt->no_of_ep : desc_alt->no_of_ep));
+				(ULONG)desc_alt->desc.iInterface,
+				(ULONG)(active_alt ? active_alt->no_of_ep : desc_alt->no_of_ep));
 	}
 	else
 	{
@@ -474,15 +469,15 @@ static void xhci_dump_interface(unsigned int index, const struct usb_interface *
 		const struct usb_ss_ep_comp_descriptor *ss_ep = &active_alt->ss_ep_comp_desc[j];
 		Kprintf("    Endpoint %ld:\n", (ULONG)j);
 		Kprintf("      bLength=%ld bDescriptorType=%ld bEndpointAddress=0x%02lx bmAttributes=0x%02lx\n",
-			(ULONG)ep->bLength, (ULONG)ep->bDescriptorType,
-			(ULONG)ep->bEndpointAddress, (ULONG)ep->bmAttributes);
+				(ULONG)ep->bLength, (ULONG)ep->bDescriptorType,
+				(ULONG)ep->bEndpointAddress, (ULONG)ep->bmAttributes);
 		Kprintf("      wMaxPacketSize=%ld bInterval=%ld\n",
-			(ULONG)LE16(ep->wMaxPacketSize), (ULONG)ep->bInterval);
+				(ULONG)LE16(ep->wMaxPacketSize), (ULONG)ep->bInterval);
 		Kprintf("      SS Companion: bLength=%ld bDescriptorType=%ld bMaxBurst=%ld bmAttributes=0x%02lx\n",
-			(ULONG)ss_ep->bLength, (ULONG)ss_ep->bDescriptorType,
-			(ULONG)ss_ep->bMaxBurst, (ULONG)ss_ep->bmAttributes);
+				(ULONG)ss_ep->bLength, (ULONG)ss_ep->bDescriptorType,
+				(ULONG)ss_ep->bMaxBurst, (ULONG)ss_ep->bmAttributes);
 		Kprintf("      SS Companion: wBytesPerInterval=%ld\n",
-			(ULONG)LE16(ss_ep->wBytesPerInterval));
+				(ULONG)LE16(ss_ep->wBytesPerInterval));
 	}
 }
 
@@ -493,11 +488,11 @@ static void xhci_dump_config(const struct usb_config *cfg, LONG devnum)
 
 	Kprintf("Addr %ld configuration dump:\n", devnum);
 	Kprintf("  bLength=%ld bDescriptorType=%ld wTotalLength=%ld bNumInterfaces=%ld\n",
-		(ULONG)cfg->desc.bLength, (ULONG)cfg->desc.bDescriptorType,
-		(ULONG)LE16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
+			(ULONG)cfg->desc.bLength, (ULONG)cfg->desc.bDescriptorType,
+			(ULONG)LE16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
 	Kprintf("  bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
-		(ULONG)cfg->desc.bConfigurationValue, (ULONG)cfg->desc.iConfiguration,
-		(ULONG)cfg->desc.bmAttributes, (ULONG)cfg->desc.bMaxPower);
+			(ULONG)cfg->desc.bConfigurationValue, (ULONG)cfg->desc.iConfiguration,
+			(ULONG)cfg->desc.bmAttributes, (ULONG)cfg->desc.bMaxPower);
 	Kprintf("  no_of_if=%ld\n", (ULONG)cfg->no_of_if);
 
 	for (unsigned int i = 0; i < cfg->no_of_if; ++i)
@@ -505,13 +500,13 @@ static void xhci_dump_config(const struct usb_config *cfg, LONG devnum)
 }
 
 static int xhci_init_ep_contexts_if(struct usb_device *udev,
-					struct xhci_ctrl *ctrl,
-					struct xhci_virt_device *virt_dev,
-					struct usb_interface *ifdesc);
+									struct xhci_ctrl *ctrl,
+									struct xhci_virt_device *virt_dev,
+									struct usb_interface *ifdesc);
 
 static void xhci_update_slot_last_ctx(struct xhci_ctrl *ctrl,
-					 struct xhci_virt_device *virt_dev,
-					 unsigned int max_ep_flag)
+									  struct xhci_virt_device *virt_dev,
+									  unsigned int max_ep_flag)
 {
 	if (!ctrl || !virt_dev)
 		return;
@@ -553,7 +548,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
 	if (!iface)
 	{
 		Kprintf("xhci_set_interface: interface %ld not found in config %ld\n",
-			(LONG)iface_number, (LONG)cfg->desc.bConfigurationValue);
+				(LONG)iface_number, (LONG)cfg->desc.bConfigurationValue);
 		return UHIOERR_BADPARAMS;
 	}
 
@@ -562,7 +557,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
 	if (current_alt && current_alt->desc.bAlternateSetting == alt_setting)
 	{
 		KprintfH("xhci_set_interface: iface %ld already at alt %ld\n",
-			 (LONG)iface_number, (LONG)alt_setting);
+				 (LONG)iface_number, (LONG)alt_setting);
 		return UHIOERR_NO_ERROR;
 	}
 
@@ -570,7 +565,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
 	if (!new_alt)
 	{
 		Kprintf("xhci_set_interface: alt %ld missing for iface %ld\n",
-			(LONG)alt_setting, (LONG)iface_number);
+				(LONG)alt_setting, (LONG)iface_number);
 		return UHIOERR_BADPARAMS;
 	}
 
@@ -622,11 +617,11 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
 	xhci_update_slot_last_ctx(ctrl, virt_dev, max_ep_flag);
 
 	KprintfH("xhci_set_interface: addr=%ld iface=%ld alt=%ld drop=0x%lx add=0x%lx\n",
-		 (LONG)udev->devnum,
-		 (LONG)iface_number,
-		 (LONG)alt_setting,
-		 (ULONG)drop_mask,
-		 (ULONG)add_mask);
+			 (LONG)udev->devnum,
+			 (LONG)iface_number,
+			 (LONG)alt_setting,
+			 (ULONG)drop_mask,
+			 (ULONG)add_mask);
 
 	xhci_configure_endpoints(udev, FALSE, NULL);
 
@@ -844,7 +839,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 	if (!active_alt)
 	{
 		Kprintf("xhci_init_ep_contexts_if: no active altsetting for iface %ld\n",
-			(ULONG)ifdesc->interface_number);
+				(ULONG)ifdesc->interface_number);
 		return UHIOERR_BADPARAMS;
 	}
 
@@ -1105,6 +1100,88 @@ static u32 xhci_port_state_to_neutral(u32 state)
 	return (state & XHCI_PORT_RO) | (state & XHCI_PORT_RWS);
 }
 
+static size_t xhci_roothub_interrupt_bytes(struct xhci_ctrl *ctrl)
+{
+	if (!ctrl)
+		return 0;
+
+	int ports = HCS_MAX_PORTS(xhci_readl(&ctrl->hccr->cr_hcsparams1));
+	if (ports < 0)
+		ports = 0;
+	if (ports > USB_MAXCHILDREN)
+		ports = USB_MAXCHILDREN;
+	return 1 + ((size_t)ports + 7U) / 8U;
+}
+
+static BOOL xhci_roothub_collect_status(struct xhci_ctrl *ctrl,
+										uint8_t *buffer,
+										size_t buffer_len,
+										ULONG *actual_len)
+{
+	if (!buffer || buffer_len == 0)
+		return FALSE;
+
+	const size_t needed = xhci_roothub_interrupt_bytes(ctrl);
+	const size_t out_len = min(buffer_len, needed);
+	_memset(buffer, 0, buffer_len);
+
+	BOOL change = FALSE;
+	BOOL truncated = FALSE;
+	int ports = HCS_MAX_PORTS(xhci_readl(&ctrl->hccr->cr_hcsparams1));
+	if (ports > USB_MAXCHILDREN)
+		ports = USB_MAXCHILDREN;
+	const u32 change_mask = PORT_CSC | PORT_PEC | PORT_OCC | PORT_RC |
+							PORT_PLC | PORT_WRC | PORT_CEC;
+	for (int port = 0; port < ports; ++port)
+	{
+		u32 portsc = xhci_readl(&ctrl->hcor->portregs[port].or_portsc);
+		u32 change_bits = portsc & change_mask;
+		if (!change_bits)
+			continue;
+
+		size_t index = 1U + (port / 8U);
+		if (index >= out_len)
+		{
+			truncated = TRUE;
+			continue;
+		}
+
+		buffer[index] |= 1U << (port % 8);
+		change = TRUE;
+	}
+
+	if (!change && truncated)
+		Kprintf("roothub status truncated: need %ld bytes, have %ld\n",
+				(LONG)needed, (LONG)buffer_len);
+
+	if (change && actual_len)
+		*actual_len = (ULONG)out_len;
+
+	return change;
+}
+
+void xhci_roothub_maybe_complete(struct xhci_ctrl *ctrl)
+{
+	if (!ctrl || !ctrl->root_int_req)
+		return;
+
+	struct IOUsbHWReq *req = ctrl->root_int_req;
+	struct usb_device *udev = &ctrl->devices[req->iouh_DevAddr];
+
+	ULONG actual = 0;
+	if (!xhci_roothub_collect_status(ctrl, (uint8_t *)req->iouh_Data,
+									 req->iouh_Length, &actual))
+	{
+		KprintfH("xhci_roothub_maybe_complete: no status change, not completing root hub interrupt\n");
+		return;
+	}
+
+	KprintfH("xhci_roothub_maybe_complete: completing root hub interrupt, actual=%ld\n", (LONG)actual);
+
+	ctrl->root_int_req = NULL;
+	io_reply_data(udev, req, UHIOERR_NO_ERROR, actual);
+}
+
 /**
  * Submits the Requests to the XHCI Host Controller
  *
@@ -1150,7 +1227,7 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		case USB_DT_CONFIG:
 			KprintfH("get USB_DT_CONFIG\n");
 			srcptr = &descriptor.config;
-			srclen = 0x19;
+			srclen = LE16(descriptor.config.wTotalLength);
 			break;
 		case USB_DT_STRING:
 			KprintfH("get USB_DT_STRING\n");
@@ -1196,7 +1273,7 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		case USB_DT_SS_HUB:
 			KprintfH("get USB_DT_HUB config\n");
 			srcptr = &ctrl->hub_desc;
-			srclen = 0x8;
+			srclen = ctrl->hub_desc.bLength;
 			break;
 		default:
 			Kprintf("get unknown value %lx\n", LE16(req->wValue));
@@ -1205,7 +1282,7 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		break;
 	case USB_REQ_SET_ADDRESS | (USB_RECIP_DEVICE << 8):
 		KprintfH("USB_REQ_SET_ADDRESS rootdev=%ld\n", (LONG)LE16(req->wValue));
-		udev->speed = USB_SPEED_SUPER;
+		udev->speed = USB_SPEED_HIGH;
 		ctrl->rootdev = LE16(req->wValue);
 		ctrl->devices[ctrl->rootdev] = *udev;
 		_memset(udev, 0, sizeof(struct usb_device));
@@ -1408,6 +1485,30 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 
 	reg = xhci_readl(&hccr->cr_hcsparams1);
 	ctrl->hub_desc.bNbrPorts = HCS_MAX_PORTS(reg);
+	if (ctrl->hub_desc.bNbrPorts > USB_MAXCHILDREN)
+		ctrl->hub_desc.bNbrPorts = USB_MAXCHILDREN;
+	{
+		unsigned int removable_bytes = (ctrl->hub_desc.bNbrPorts + 1U + 7U) / 8U;
+		const unsigned int max_bitmap = sizeof(ctrl->hub_desc.u.hs.DeviceRemovable);
+		if (removable_bytes == 0)
+			removable_bytes = 1;
+		if (removable_bytes > max_bitmap)
+			removable_bytes = max_bitmap;
+		ctrl->hub_desc.bLength = (unsigned char)(7U + (removable_bytes * 2U));
+		for (unsigned int i = 0; i < max_bitmap; ++i)
+		{
+			ctrl->hub_desc.u.hs.DeviceRemovable[i] = 0x00;
+			ctrl->hub_desc.u.hs.PortPowerCtrlMask[i] = (i < removable_bytes) ? 0xFF : 0x00;
+		}
+		unsigned int intr_bitmap_bytes = (ctrl->hub_desc.bNbrPorts + 7U) / 8U;
+		if (intr_bitmap_bytes == 0)
+			intr_bitmap_bytes = 1;
+		descriptor.endpoint.wMaxPacketSize = cpu_to_le16(1U + intr_bitmap_bytes);
+		KprintfH("root hub ports=%ld status-bytes=%ld removable-bytes=%ld\n",
+			 (LONG)ctrl->hub_desc.bNbrPorts,
+			 (LONG)(1U + intr_bitmap_bytes),
+			 (LONG)removable_bytes);
+	}
 	Kprintf("Register %lx NbrPorts %ld\n", reg, ctrl->hub_desc.bNbrPorts);
 
 	/* Port Indicators */

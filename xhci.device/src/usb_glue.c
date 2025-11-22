@@ -12,6 +12,7 @@
 
 #include <xhci/usb.h>
 #include <xhci/xhci.h>
+#include <xhci/xhci-events.h>
 #include <xhci/xhci-commands.h>
 
 #include <device.h>
@@ -549,13 +550,19 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    /* Root hub doesn't have a real interrupt endpoint ring here; synthesize success */
-    if (udev->devnum == unit->xhci_ctrl->rootdev)
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    if (udev->devnum == ctrl->rootdev)
     {
-        io->iouh_Actual = 0;
-        io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-        // TODO do we need to process it somehow? - yes, these are port state changes
-        return COMMAND_PROCESSED;
+        if (ctrl->root_int_req)
+        {
+            KprintfH("root hub interrupt request already pending\n");
+            io_reply_failed(io, UHIOERR_HOSTERROR);
+            return COMMAND_PROCESSED;
+        }
+
+        ctrl->root_int_req = io;
+        xhci_roothub_maybe_complete(ctrl);
+        return COMMAND_SCHEDULED;
     }
 
     KprintfH("dev=%lx addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx timeout=%ld maxpkt=%ld\n",
@@ -816,6 +823,14 @@ void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULON
 
 static void usb_glue_flush_udev(struct usb_device *udev)
 {
+    struct xhci_ctrl *ctrl = udev->controller;
+    if (ctrl && ctrl->root_int_req && ctrl->root_int_req->iouh_DevAddr == udev->devnum)
+    {
+        struct IOUsbHWReq *req = ctrl->root_int_req;
+        ctrl->root_int_req = NULL;
+        io_reply_failed(req, IOERR_ABORTED);
+    }
+
     for (int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
     {
         struct ep_context *ep_ctx = &udev->ep_context[ep];
@@ -823,6 +838,19 @@ static void usb_glue_flush_udev(struct usb_device *udev)
         while ((node = RemHeadMinList(&ep_ctx->req_list)) != NULL)
         {
             io_reply_failed((struct IOUsbHWReq *)node, IOERR_ABORTED);
+        }
+
+        if (ep_ctx->current_req)
+        {
+            struct IOUsbHWReq *pending = ep_ctx->current_req;
+            ep_ctx->current_req = NULL;
+            io_reply_failed(pending, IOERR_ABORTED);
+            xhci_ep_set_idle(udev, ep);
+        }
+        else
+        {
+            if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
+                xhci_ep_set_idle(udev, ep);
         }
     }
 }

@@ -307,14 +307,13 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
             break;
 
         case TRB_PORT_STATUS:
-            // TODO handle port status change events
-            //  likely somehow pass to INT transfer on root hub
-            Kprintf("Port Status Change Event TRB detected: (%08lx %08lx %08lx %08lx)\n",
-                    (ULONG)LE32(event->generic.field[0]),
-                    (ULONG)LE32(event->generic.field[1]),
-                    (ULONG)LE32(event->generic.field[2]),
-                    (ULONG)LE32(event->generic.field[3]));
+            KprintfH("Port Status Change Event TRB: (%08lx %08lx %08lx %08lx)\n",
+                     (ULONG)LE32(event->generic.field[0]),
+                     (ULONG)LE32(event->generic.field[1]),
+                     (ULONG)LE32(event->generic.field[2]),
+                     (ULONG)LE32(event->generic.field[3]));
             xhci_acknowledge_event(ctrl);
+            xhci_roothub_maybe_complete(ctrl);
             break;
         default:
             Kprintf("Unexpected XHCI event type %ld, skipping... (%08lx %08lx %08lx %08lx)\n",

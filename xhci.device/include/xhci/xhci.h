@@ -1245,6 +1245,7 @@ struct xhci_ctrl
 	struct xhci_virt_device *devs[MAX_HC_SLOTS];
 	struct usb_hub_descriptor hub_desc;
 	unsigned int rootdev;
+	struct IOUsbHWReq *root_int_req;
 	u16 hci_version;
 	int page_size;
 	struct xhci_dma_bounce *dma_bounce_list;
@@ -1321,4 +1322,5 @@ dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
 					 BOOL more_trbs_coming, unsigned int *trb_fields);
 void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io);
 int xhci_set_configuration(struct usb_device *udev, int config_value);
+void xhci_roothub_maybe_complete(struct xhci_ctrl *ctrl);
 #endif /* HOST_XHCI_H_ */
