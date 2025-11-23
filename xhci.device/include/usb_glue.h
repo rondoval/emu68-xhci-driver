@@ -11,6 +11,7 @@ struct XHCIUnit;
 int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io);
+int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 
 /* Root hub bus ops */
 int usb_glue_bus_reset(struct XHCIUnit *unit);

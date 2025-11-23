@@ -1276,6 +1276,8 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 									 struct usb_device *udev, int hop_portnr);
 void xhci_update_hub_tt(struct usb_device *udev);
 int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
+int xhci_int_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
+int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_check_maxpacket(struct usb_device *udev, unsigned int maxpacket);
 int xhci_set_interface(struct usb_device *udev, unsigned int interface_number, unsigned int alt_setting);

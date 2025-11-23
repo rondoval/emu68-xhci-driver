@@ -7,7 +7,6 @@
 #include <proto/utility.h>
 #endif
 
-#include <devices/usb.h>
 #include <devices/usbhardware.h>
 
 #include <xhci/usb.h>
@@ -167,6 +166,9 @@ static void dispatch_request(struct IOUsbHWReq *req)
     {
     case UHCMD_CONTROLXFER:
         usb_glue_ctrl(unit, req);
+        break;
+    case UHCMD_ISOXFER:
+        usb_glue_iso(unit, req);
         break;
     case UHCMD_BULKXFER:
         usb_glue_bulk(unit, req);
@@ -580,7 +582,50 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
-    int ret = xhci_bulk_tx(udev, io, timeout_ms);
+    int ret = xhci_int_tx(udev, io, timeout_ms);
+    if (ret != UHIOERR_NO_ERROR)
+    {
+        io->iouh_Req.io_Error = ret;
+        return COMMAND_PROCESSED;
+    }
+
+    return COMMAND_SCHEDULED;
+}
+
+int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
+{
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+    {
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return COMMAND_PROCESSED;
+    }
+
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    if (udev->devnum == ctrl->rootdev)
+    {
+        Kprintf("isochronous transfer on root hub not supported\n");
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return COMMAND_PROCESSED;
+    }
+
+    KprintfH("dev=%lx addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx maxpkt=%ld\n",
+             (ULONG)udev, (ULONG)udev->devnum, io->iouh_Endpoint & 0x0F,
+             (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+             (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
+             (ULONG)io->iouh_Flags, (LONG)io->iouh_MaxPktSize);
+
+    int queue_state = queue_request_if_busy(udev, io);
+    if (queue_state > 0)
+        return COMMAND_SCHEDULED;
+    if (queue_state < 0)
+        return COMMAND_PROCESSED;
+
+    unsigned int timeout_ms = 0;
+    if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
+        timeout_ms = (unsigned int)io->iouh_NakTimeout;
+
+    int ret = xhci_iso_tx(udev, io, timeout_ms);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;

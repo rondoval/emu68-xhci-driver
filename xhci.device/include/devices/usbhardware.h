@@ -1,11 +1,12 @@
 #ifndef DEVICES_USBHARDWARE_H
 #define DEVICES_USBHARDWARE_H
 /*
-**	$VER: usbhardware.h 2.1 (14.02.07)
+**	$VER: usbhardware.h 2.4 (01.04.2023)
 **
 **	standard usb hardware device include file
 **
 **	(C) Copyright 2002-2007 Chris Hodges
+**	(C) Copyright 2023 AROS Development Team
 **	    All Rights Reserved
 */
 
@@ -17,74 +18,89 @@
 #include <exec/errors.h>
 #endif
 
-#ifndef DEVICES_USB_H
-#include "devices/usb.h"
-#endif
-
 #if defined(__GNUC__)
 # pragma pack(2)
 #endif
+
+struct UsbSetupData
+{
+    UBYTE bmRequestType;       /* Request type and direction */
+    UBYTE bRequest;            /* Request identifier */
+    UWORD wValue;              /* request specific value, little endian! */
+    UWORD wIndex;              /* request specific index, little endian! */
+    UWORD wLength;             /* length of data to transfer, little endian! */
+};
 
 /* IO Request structure */
 
 struct IOUsbHWReq
 {
-    struct IORequest iouh_Req;
-    UWORD iouh_Flags;          /* Transfer flags */
-    UWORD iouh_State;          /* USB State Flags */
-    UWORD iouh_Dir;            /* Direction of transfer */
-    UWORD iouh_DevAddr;        /* USB Device Address (0-127) */
-    UWORD iouh_Endpoint;       /* USB Device Endpoint (0-15) */
-    UWORD iouh_MaxPktSize;     /* Maximum packet size for multiple packet transfers */
-    ULONG iouh_Actual;         /* Actual bytes transferred */
-    ULONG iouh_Length;         /* Size of buffer */
-    APTR  iouh_Data;           /* Pointer to in/out buffer */
-    UWORD iouh_Interval;       /* Interrupt Interval (in ms or 125 µSec units) */
-    ULONG iouh_NakTimeout;     /* Timeout in ms before request will be retired */
-    struct UsbSetupData iouh_SetupData; /* Setup fields for ctrl transfers */
-    APTR  iouh_UserData;       /* private data, may not be touched by hardware driver,
-                                  do not make assumptions about its contents */
-    UWORD iouh_ExtError;       /* Extended error code */
+    struct IORequest    iouh_Req;
+    UWORD               iouh_Flags;          /* Transfer flags */
+    UWORD               iouh_State;          /* USB State Flags */
+    UWORD               iouh_Dir;            /* Direction of transfer */
+    UWORD               iouh_DevAddr;        /* USB Device Address (0-127) */
+    UWORD               iouh_Endpoint;       /* USB Device Endpoint (0-15) */
+    UWORD               iouh_MaxPktSize;     /* Maximum packet size for multiple packet transfers */
+    ULONG               iouh_Actual;         /* Actual bytes transferred */
+    ULONG               iouh_Length;         /* Size of buffer */
+    APTR                iouh_Data;           /* Pointer to in/out buffer */
+    UWORD               iouh_Interval;       /* Interrupt Interval (in ms or 125 ï¿½Sec units) */
+    ULONG               iouh_NakTimeout;     /* Timeout in ms before request will be retired */
+    struct UsbSetupData iouh_SetupData;      /* Setup fields for ctrl transfers */
+    APTR                iouh_UserData;       /* private data, may not be touched by hardware driver, do not make assumptions about its contents */
+    UWORD               iouh_ExtError;       /* Extended error code */
     /* V2 structure extension */
-    UWORD iouh_Frame;          /* current USB-Frame value */
-    UWORD iouh_SplitHubAddr;   /* For Split-Transaction HUB address */
-    UWORD iouh_SplitHubPort;   /* For Split-Transaction HUB downstream port */
-    APTR  iouh_DriverPrivate1; /* private data for internal driver use */
-    APTR  iouh_DriverPrivate2; /* private data for internal driver use */
+    UWORD               iouh_Frame;          /* current USB-Frame value and ISO start frame*/
+    UWORD               iouh_SplitHubAddr;   /* For Split-Transaction HUB address */
+    UWORD               iouh_SplitHubPort;   /* For Split-Transaction HUB downstream port */
+    APTR                iouh_DriverPrivate1; /* private data for internal driver use */
+    APTR                iouh_DriverPrivate2; /* private data for internal driver use */
 };
 
-
-struct IOUsbHWReqObsolete
+/* Realtime ISO transfer structure as given in iouh_Data */
+struct IOUsbHWRTIso
 {
-    struct IORequest iouh_Req;
-    UWORD iouh_Flags;          /* Transfer flags */
-    UWORD iouh_State;          /* USB State Flags */
-    UWORD iouh_Dir;            /* Direction of transfer */
-    UWORD iouh_DevAddr;        /* USB Device Address (0-127) */
-    UWORD iouh_Endpoint;       /* USB Device Endpoint (0-15) */
-    UWORD iouh_MaxPktSize;     /* Maximum packet size for multiple packet transfers */
-    ULONG iouh_Actual;         /* Actual bytes transferred */
-    ULONG iouh_Length;         /* Size of buffer */
-    APTR  iouh_Data;           /* Pointer to in/out buffer */
-    UWORD iouh_Interval;       /* Interrupt Interval */
-    ULONG iouh_NakTimeout;     /* Timeout in ms before request will be retired */
-    struct UsbSetupData iouh_SetupData; /* Setup fields for ctrl transfers */
-    APTR  iouh_UserData;       /* private data, may not be touched by hardware driver,
-                                  do not make assumptions about its contents */
-    UWORD iouh_ExtError;       /* Extended error code */
+    struct Node *urti_Node;           /* Driver's linkage (private) */
+    struct Hook *urti_InReqHook;      /* Called with struct IOUsbHWBufferReq whenever input data has arrived and is ready to be copied */
+    struct Hook *urti_OutReqHook;     /* Called with struct IOUsbHWBufferReq to prepare output buffer copying */
+    struct Hook *urti_InDoneHook;     /* Called with struct IOUsbHWBufferReq when input buffer has been copied */
+    struct Hook *urti_OutDoneHook;    /* Called with struct IOUsbHWBufferReq when output buffer has been sent */
+    ULONG        urti_OutPrefetch;    /* Maximum prefetch in bytes allowed for output */
+    APTR         urti_DriverPrivate1; /* private data for internal driver use */
+    APTR         urti_DriverPrivate2; /* private data for internal driver use */
 };
+
+struct IOUsbHWBufferReq
+{
+    UBYTE *ubr_Buffer;        /* Pointer to buffer, filled by called function */
+    ULONG  ubr_Length;        /* Length of input received or output to be sent (may be adjusted by hook to force a partial copy) */
+    UWORD  ubr_Frame;         /* Frame number, filled by caller (may be adjusted by output hook) */
+    UWORD  ubr_Flags;         /* Flags, may be inspected and changed by hooks */
+};
+
+/* Definitions for ubr_Flags */
+
+#define UBFB_CONTBUFFER    0  /* Set by InReqHook or OutReqHook to indicate that more buffer needs to be copied (scatter/gather) */
+
+#define UBFF_CONTBUFFER    (1<<UBFB_CONTBUFFER)
+
 
 /* non-standard commands */
 
-#define UHCMD_QUERYDEVICE (CMD_NONSTD+0)
-#define UHCMD_USBRESET    (CMD_NONSTD+1)
-#define UHCMD_USBRESUME   (CMD_NONSTD+2)
-#define UHCMD_USBSUSPEND  CMD_STOP
-#define UHCMD_USBOPER     CMD_START
-#define UHCMD_CONTROLXFER (CMD_NONSTD+3)
-#define UHCMD_ISOXFER     (CMD_NONSTD+4)
-#define UHCMD_INTXFER     (CMD_NONSTD+5)
-#define UHCMD_BULKXFER    (CMD_NONSTD+6)
+#define UHCMD_QUERYDEVICE   (CMD_NONSTD+0)
+#define UHCMD_USBRESET      (CMD_NONSTD+1)
+#define UHCMD_USBRESUME     (CMD_NONSTD+2)
+#define UHCMD_USBSUSPEND    CMD_STOP
+#define UHCMD_USBOPER       CMD_START
+#define UHCMD_CONTROLXFER   (CMD_NONSTD+3)
+#define UHCMD_ISOXFER       (CMD_NONSTD+4)
+#define UHCMD_INTXFER       (CMD_NONSTD+5)
+#define UHCMD_BULKXFER      (CMD_NONSTD+6)
+#define UHCMD_ADDISOHANDLER (CMD_NONSTD+7)
+#define UHCMD_REMISOHANDLER (CMD_NONSTD+8)
+#define UHCMD_STARTRTISO    (CMD_NONSTD+9)
+#define UHCMD_STOPRTISO     (CMD_NONSTD+10)
 
 /* Error codes for io_Error field */
 
@@ -101,6 +117,7 @@ struct IOUsbHWReqObsolete
 #define UHIOERR_NAKTIMEOUT   10   /* Timeout due to NAKs */
 #define UHIOERR_BADPARAMS    11   /* Illegal parameters in request */
 #define UHIOERR_OUTOFMEMORY  12   /* Out of auxiliary memory for the driver */
+#define UHIOERR_BABBLE       13   /* Babble condition */
 
 /* Values for iouh_Dir */
 
@@ -109,25 +126,31 @@ struct IOUsbHWReqObsolete
 #define UHDIR_IN         2  /* This is a device to host transfer */
 
 /* Definitions for iouh_Flags */
+#   define UHFB_LOWSPEED      0  /* Device operates at low speed */
+#   define UHFB_HIGHSPEED     1  /* Device operates at high speed (USB 2.0) */
+#   define UHFB_NOSHORTPKT    2  /* Inhibit sending of a short packet at the end of a transfer (if possible) */
+#   define UHFB_NAKTIMEOUT    3  /* Allow the request to time-out after the given timeout value */
+#   define UHFB_ALLOWRUNTPKTS 4  /* Receiving less data than expected will not cause an UHIOERR_RUNTPACKET */
+#   define UHFB_SPLITTRANS    5  /* new for V2.0: Split transaction for Lowspeed/Fullspeed devices at USB2.0 hubs */
+#   define UHFB_MULTI_1       6  /* new for V2.1: Number of transactions per microframe bit 0 */
+#   define UHFB_MULTI_2       7  /* new for V2.1: Number of transactions per microframe bit 1 */
+#   define UHFS_THINKTIME     8  /* new for V2.2: Bit times required at most for intertransaction gap on LS/FS */
+#   define UHFB_SUPERSPEED    9  /* Device operates at super speed (USB 3.0) */
 
-#define UHFB_LOWSPEED      0  /* Device operates at low speed */
-#define UHFB_HIGHSPEED     1  /* Device operates at high speed (USB 2.0) */
-#define UHFB_NOSHORTPKT    2  /* Inhibit sending of a short packet at the end of a transfer (if possible) */
-#define UHFB_NAKTIMEOUT    3  /* Allow the request to time-out after the given timeout value */
-#define UHFB_ALLOWRUNTPKTS 4  /* Receiving less data than expected will not cause an UHIOERR_RUNTPACKET */
-#define UHFB_SPLITTRANS    5  /* new for V2: Split transaction for Lowspeed/Fullspeed devices at USB2.0 hubs */
-#define UHFB_MULTI_1       6  /* new for V2.1: Number of transactions per microframe bit 0 */
-#define UHFB_MULTI_2       7  /* new for V2.1: Number of transactions per microframe bit 1 */
-
-#define UHFF_LOWSPEED      (1<<UHFB_LOWSPEED)
-#define UHFF_HIGHSPEED     (1<<UHFB_HIGHSPEED)
-#define UHFF_NOSHORTPKT    (1<<UHFB_NOSHORTPKT)
-#define UHFF_NAKTIMEOUT    (1<<UHFB_NAKTIMEOUT)
-#define UHFF_ALLOWRUNTPKTS (1<<UHFB_ALLOWRUNTPKTS)
-#define UHFF_SPLITTRANS    (1<<UHFB_SPLITTRANS)
-#define UHFF_MULTI_1       (1<<UHFB_MULTI_1)
-#define UHFF_MULTI_2       (1<<UHFB_MULTI_2)
-#define UHFF_MULTI_3       ((1<<UHFB_MULTI_1)|(1<<UHFB_MULTI_2))
+#   define UHFF_LOWSPEED      (1<<UHFB_LOWSPEED)
+#   define UHFF_HIGHSPEED     (1<<UHFB_HIGHSPEED)
+#   define UHFF_NOSHORTPKT    (1<<UHFB_NOSHORTPKT)
+#   define UHFF_NAKTIMEOUT    (1<<UHFB_NAKTIMEOUT)
+#   define UHFF_ALLOWRUNTPKTS (1<<UHFB_ALLOWRUNTPKTS)
+#   define UHFF_SPLITTRANS    (1<<UHFB_SPLITTRANS)
+#   define UHFF_MULTI_1       (1<<UHFB_MULTI_1)
+#   define UHFF_MULTI_2       (1<<UHFB_MULTI_2)
+#   define UHFF_MULTI_3       ((1<<UHFB_MULTI_1)|(1<<UHFB_MULTI_2))
+#   define UHFF_THINKTIME_8   (0<<UHFS_THINKTIME)
+#   define UHFF_THINKTIME_16  (1<<UHFS_THINKTIME)
+#   define UHFF_THINKTIME_24  (2<<UHFS_THINKTIME)
+#   define UHFF_THINKTIME_32  (3<<UHFS_THINKTIME)
+#   define UHFF_SUPERSPEED    (1<<UHFB_SUPERSPEED)
 
 /* Tags for UHCMD_QUERYDEVICE */
 
@@ -140,6 +163,28 @@ struct IOUsbHWReqObsolete
 #define UHA_Description    (UHA_Dummy + 0x14)
 #define UHA_Copyright      (UHA_Dummy + 0x15)
 #define UHA_DriverVersion  (UHA_Dummy + 0x20)
+#define UHA_Capabilities   (UHA_Dummy + 0x21)
+
+/*
+ *  Capabilities as returned by UHA_Capabities
+ *  Only the main USB generations are defined.
+ */
+#define UHCB_USB20         0 /* Host controller supports USB 2.0 Highspeed                                     */
+#define UHCB_ISO           1 /* Host controller driver supports ISO transfers (UHCMD_ISOXFER)                  */
+#define UHCB_RT_ISO        2 /* Host controller driver supports real time ISO transfers (UHCMD_ADDISOHANDLER)  */
+#define UHCB_QUICKIO       3 /* BeginIO()/AbortIO() may be called from interrupts for less overhead            */
+#define UHCB_USB2OTG       4 /* Host controller supports USB2OTG device mode                                   */
+
+#define UHCB_USB40         30 /* Host controller supports USB 4.x SuperSpeed/+                                 */
+#define UHCB_USB30         31 /* Host controller supports USB 3.x SuperSpeed/+                                 */
+
+#define UHCF_USB20         (1<<UHCB_USB20)
+#define UHCF_ISO           (1<<UHCB_ISO)
+#define UHCF_RT_ISO        (1<<UHCB_RT_ISO)
+#define UHCF_QUICKIO       (1<<UHCB_QUICKIO)
+#define UHCF_USB2OTG       (1<<UHCB_USB2OTG)
+#define UHCF_USB30         (1<<UHCB_USB30)
+#define UHCF_USB40         (1<<UHCB_USB40)
 
 /* Definitions for UHA_State/iouh_State */
 

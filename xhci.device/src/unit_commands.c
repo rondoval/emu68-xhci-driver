@@ -164,7 +164,7 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
             filled++;
             break;
         case UHA_Copyright:
-            *out = (ULONG)(APTR) "GPLv2 or later";
+            *out = (ULONG)(APTR) "GPLv2";
             filled++;
             break;
         case UHA_DriverVersion:
@@ -172,8 +172,13 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
             *out = 0x0200;
             filled++;
             break;
+        case UHA_Capabilities:
+            *out = UHCF_USB20 | UHCF_ISO | UHCF_RT_ISO | UHCF_USB30;// | UHCF_QUICKIO;
+            filled++;
+            break;
         default:
             // Unknown tag: leave untouched
+            Kprintf("[xhci] %s: Unknown tag 0x%lx, skipping\n", __func__, tag->ti_Tag);
             break;
         }
         KprintfH("[xhci] %s: Processed tag 0x%lx\n", __func__, tag->ti_Tag);
@@ -253,12 +258,10 @@ static inline int Do_UHCMD_CONTROLXFER(struct IOUsbHWReq *io)
  */
 static inline int Do_UHCMD_ISOXFER(struct IOUsbHWReq *io)
 {
-    // struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     Kprintf("[xhci] %s: UHCMD_ISOXFER\n", __func__);
 
-    io->iouh_Req.io_Error = IOERR_NOCMD; /* not supported yet */
-    // TODO implement
-    return COMMAND_PROCESSED;
+    return usb_glue_iso(unit, io);
 }
 
 /*
@@ -352,6 +355,7 @@ void ProcessCommand(struct IOUsbHWReq *io)
             break;
 
         default:
+            Kprintf("[xhci] %s: Unsupported command %ld\n", __func__, (LONG)io->iouh_Req.io_Command);
             io->iouh_Req.io_Error = IOERR_NOCMD;
             complete = COMMAND_PROCESSED;
             break;
