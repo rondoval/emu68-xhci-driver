@@ -375,8 +375,10 @@ static u32 xhci_collect_config_masks(const struct usb_config *cfg,
 			continue;
 
 		if (log_prepare)
+		{
 			KprintfH("Preparing iface=%ld alt=%ld\n",
 					 (ULONG)ifnum, (LONG)active_alt->desc.bAlternateSetting);
+		}
 
 		mask |= xhci_collect_ep_mask(NULL, active_alt, 0, max_flag);
 	}

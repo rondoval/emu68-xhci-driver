@@ -286,6 +286,37 @@ static inline int Do_UHCMD_BULKXFER(struct IOUsbHWReq *io)
     return usb_glue_bulk(unit, io);
 }
 
+static inline int Do_UHCMD_ADDISOHANDLER(struct IOUsbHWReq *io)
+{
+    struct XHCIUnit *unit = (struct XHCIUnit *) io->iouh_Req.io_Unit;
+    KprintfH("[xhci] %s: UHCMD_ADDISOHANDLER\n", __func__);   
+
+    return usb_glue_add_iso_handler(unit, io);
+}
+
+static inline int Do_UHCMD_REMISOHANDLER(struct IOUsbHWReq *io)
+{
+    struct XHCIUnit *unit = (struct XHCIUnit *) io->iouh_Req.io_Unit;
+    KprintfH("[xhci] %s: UHCMD_REMISOHANDLER\n", __func__);
+
+    return usb_glue_rem_iso_handler(unit, io);
+}
+
+static inline int Do_UHCMD_STARTRTISO(struct IOUsbHWReq *io)
+{
+    struct XHCIUnit *unit = (struct XHCIUnit *) io->iouh_Req.io_Unit;
+    KprintfH("[xhci] %s: UHCMD_STARTRTISO\n", __func__);
+
+    return usb_glue_start_rt_iso(unit, io);
+}
+
+static inline int Do_UHCMD_STOPRTISO(struct IOUsbHWReq *io)
+{
+    struct XHCIUnit *unit = (struct XHCIUnit *) io->iouh_Req.io_Unit;
+    KprintfH("[xhci] %s: UHCMD_STOPRTISO\n", __func__);
+    return usb_glue_stop_rt_iso(unit, io);
+}
+
 void ProcessCommand(struct IOUsbHWReq *io)
 {
     ULONG complete = COMMAND_SCHEDULED;
@@ -352,6 +383,22 @@ void ProcessCommand(struct IOUsbHWReq *io)
 
         case NSCMD_DEVICEQUERY:
             complete = Do_NSCMD_DEVICEQUERY((struct IOStdReq *)io);
+            break;
+
+        case UHCMD_ADDISOHANDLER:
+            complete = Do_UHCMD_ADDISOHANDLER(io);
+            break;
+
+        case UHCMD_REMISOHANDLER:
+            complete = Do_UHCMD_REMISOHANDLER(io);
+            break;
+
+        case UHCMD_STARTRTISO:
+            complete = Do_UHCMD_STARTRTISO(io);
+            break;
+
+        case UHCMD_STOPRTISO:
+            complete = Do_UHCMD_STOPRTISO(io);
             break;
 
         default:

@@ -13,6 +13,12 @@
  * Authors: Vivek Gautam <gautam.vivek@samsung.com>
  *	    Vikas Sajjan <vikas.sajjan@samsung.com>
  */
+#ifdef __INTELLISENSE__
+#include <clib/utility_protos.h>
+#else
+#include <proto/utility.h>
+#endif
+
 #include <compat.h>
 #include <debug.h>
 #include <usb_glue.h>
@@ -52,7 +58,9 @@ static const ep_state_handler ep_state_dispatch[] = {
     [USB_DEV_EP_STATE_ABORTING] = ep_handle_aborting,
     [USB_DEV_EP_STATE_RESETTING] = NULL,
     [USB_DEV_EP_STATE_FAILED] = NULL,
-};
+    [USB_DEV_EP_STATE_RT_ISO_STOPPED] = NULL,
+    [USB_DEV_EP_STATE_RT_ISO_RUNNING] = ep_handle_receiving_bulk,
+    [USB_DEV_EP_STATE_RT_ISO_STOPPING] = ep_handle_receiving_bulk};
 
 /*
  * So generally, XHCI has got separate endpoint context per direction
@@ -122,15 +130,19 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
-    if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
+    if (!(ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_STOPPED || state == USB_DEV_EP_STATE_RT_ISO_RUNNING || ep_ctx->state == USB_DEV_EP_STATE_IDLE))
     {
         Kprintf("EP %ld not IDLE (state %ld)\n", (LONG)endpoint, (LONG)ep_ctx->state);
         xhci_ep_set_failed(udev, endpoint);
         return;
     }
 
+    if (state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    {
+        ep_ctx->current_req = req;
+    }
+
     ep_ctx->state = state;
-    ep_ctx->current_req = req;
     ep_ctx->trb_addr = trb_addr;
     ep_ctx->trb_length = req->iouh_Length;
     ep_ctx->trb_available_length = req->iouh_Length;
@@ -144,6 +156,26 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
         ep_ctx->timeout_stamp = get_time() + timeout_ms * 1000;
         ep_ctx->timeout_active = TRUE;
     }
+}
+
+void xhci_ep_set_cont_iso(struct usb_device *udev, int endpoint)
+{
+    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
+    {
+        Kprintf("Invalid endpoint %ld\n", (LONG)endpoint);
+        return;
+    }
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    {
+        Kprintf("EP %ld not RT_ISO_RUNNING (state %ld)\n", (LONG)endpoint, (LONG)ep_ctx->state);
+        xhci_ep_set_failed(udev, endpoint);
+        return;
+    }
+
+    xhci_ep_schedule_rt_iso(udev, endpoint);
 }
 
 void xhci_ep_set_resetting(struct usb_device *udev, int endpoint)
@@ -385,13 +417,16 @@ static void record_transfer_result(union xhci_trb *event, int length,
         *status = UHIOERR_NO_ERROR;
         break;
     case COMP_STALL:
+        Kprintf("Device stalled\n");
         *status = UHIOERR_STALL;
         break;
     case COMP_DB_ERR:
     case COMP_TRB_ERR:
+        Kprintf("TRB error\n");
         *status = UHIOERR_HOSTERROR;
         break;
     case COMP_BABBLE:
+        Kprintf("Babble detected\n");
         *status = UHIOERR_OVERFLOW;
         break;
     default:
@@ -515,17 +550,17 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     }
 
     KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
-            (ULONG)flags,
-            (ULONG)LE32(event->trans_event.transfer_len),
-            (ULONG)upper_32_bits(trb_addr),
-            (ULONG)lower_32_bits(trb_addr));
+             (ULONG)flags,
+             (ULONG)LE32(event->trans_event.transfer_len),
+             (ULONG)upper_32_bits(trb_addr),
+             (ULONG)lower_32_bits(trb_addr));
 
     ULONG status;
     int act_len;
     record_transfer_result(event, length, &status, &act_len);
     KprintfH("result status=%ld act_len=%ld comp=%ld\n",
-            (LONG)status, (LONG)act_len,
-            (LONG)GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
+             (LONG)status, (LONG)act_len,
+             (LONG)GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
 
     xhci_acknowledge_event(ctrl);
 
@@ -533,16 +568,37 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     if (act_len > 0 && ep_ctx->current_req->iouh_Dir == UHDIR_IN)
         xhci_inval_cache((uintptr_t)ep_ctx->current_req->iouh_Data, (ULONG)act_len);
 
-    if (status == UHIOERR_STALL)
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
-        // xhci_reset_ep(udev, endpoint);
-        io_reply_failed(ep_ctx->current_req, UHIOERR_STALL);
-        return;
+        if (status == UHIOERR_STALL)
+        {
+            // xhci_reset_ep(udev, endpoint);
+            io_reply_failed(ep_ctx->current_req, UHIOERR_STALL);
+            return;
+        }
+        io_reply_data(udev, ep_ctx->current_req, status, act_len);
+        ep_ctx->current_req = NULL;
+        xhci_ep_set_idle(udev, endpoint);
     }
+    else
+    {
+        if (ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
+        {
+            Kprintf("Stopping RT ISO transfer\n");
+            xhci_ep_set_idle(udev, endpoint);
+        }
+        else
+        {
+            // call hook to push data to the stack
+            ep_ctx->rt_buffer_req.ubr_Length = act_len;
+            ep_ctx->rt_buffer_req.ubr_Flags = 0;
+            struct Hook *hook = (ep_ctx->current_req->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InDoneHook : ep_ctx->rt_req->urti_OutDoneHook;
+            if (hook)
+                CallHookPkt(hook, ep_ctx->rt_req, &ep_ctx->rt_buffer_req);
 
-    io_reply_data(udev, ep_ctx->current_req, status, act_len);
-    ep_ctx->current_req = NULL;
-    xhci_ep_set_idle(udev, endpoint);
+            xhci_ep_set_cont_iso(udev, endpoint);
+        }
+    }
 }
 
 void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)

@@ -621,6 +621,19 @@ int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int tim
 						  TRB_TYPE(TRB_ISOC) | TRB_SIA, FALSE);
 }
 
+int xhci_rt_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io)
+{
+	KprintfH("slot=%ld ep=%ld dir=%s buf=%lx len=%ld interval=%ld\n",
+			 (LONG)udev->slot_id,
+			 (LONG)(io->iouh_Endpoint & 0xf),
+			 (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+			 io->iouh_Data, io->iouh_Length, (LONG)io->iouh_Interval);
+
+	return xhci_stream_tx(udev, io, 0,
+						  USB_DEV_EP_STATE_RT_ISO_RUNNING,
+						  TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE);
+}
+
 /**
  * Queues up the Control Transfer Request
  *

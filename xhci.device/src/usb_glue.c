@@ -635,6 +635,214 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     return COMMAND_SCHEDULED;
 }
 
+int usb_glue_add_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
+{
+    // TODO check if UHSF_OPERATIONAL
+    // TODO cleanup, move to EP state machine
+    if (!io->iouh_Data)
+        goto badparams;
+
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+        goto badparams;
+
+    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
+    if (endpoint >= USB_MAXENDPOINTS)
+        goto badparams;
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
+    {
+        /* can only enable RT ISO if EP is idle */
+        Kprintf("EP not idle\n");
+        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+        return COMMAND_PROCESSED;
+    }
+
+    ep_ctx->rt_req = (struct IOUsbHWRTIso *)io->iouh_Data;
+    ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
+
+    ep_ctx->current_req = AllocVecPooled(unit->xhci_ctrl->memoryPool, sizeof(struct IOUsbHWReq));
+    if (!ep_ctx->current_req)
+    {
+        Kprintf("Failed to allocate memory\n");
+        io->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
+        return COMMAND_PROCESSED;
+    }
+
+    CopyMem(io, ep_ctx->current_req, sizeof(struct IOUsbHWReq));
+
+    struct IOUsbHWRTIso *rt = (struct IOUsbHWRTIso *)io->iouh_Data;
+    if (io->iouh_Dir == UHDIR_IN)
+    {
+        Kprintf("Added ISO handler: in req hook: %lx, in done hook: %lx, prefetch: %ld\n", rt->urti_InReqHook, rt->urti_InDoneHook, rt->urti_OutPrefetch);
+    }
+    else
+    {
+        Kprintf("Added ISO handler: out req hook: %lx, out done hook: %lx, prefetch: %ld\n", rt->urti_OutReqHook, rt->urti_OutDoneHook, rt->urti_OutPrefetch);
+    }
+
+    io->iouh_Actual = 0;
+    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+    return COMMAND_PROCESSED;
+
+badparams:
+    Kprintf("Bad params\n");
+    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    return COMMAND_PROCESSED;
+}
+
+int usb_glue_rem_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
+{
+    // TODO cleanup, move to EP state machine
+    if (!io->iouh_Data)
+        goto badparams;
+
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+        goto badparams;
+
+    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
+    if (endpoint >= USB_MAXENDPOINTS)
+        goto badparams;
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
+    {
+        Kprintf("EP not in RT_ISO_STOPPED state\n");
+        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+        return COMMAND_PROCESSED;
+    }
+
+    if (io->iouh_Data == ep_ctx->rt_req)
+    {
+        ep_ctx->rt_req = NULL;
+        if (ep_ctx->current_req)
+        {
+            FreeVecPooled(unit->xhci_ctrl->memoryPool, ep_ctx->current_req);
+            ep_ctx->current_req = NULL;
+        }
+        xhci_ep_set_idle(udev, endpoint);
+        Kprintf("Successfully removed ISO handler\n");
+        io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+        return COMMAND_PROCESSED;
+    }
+
+badparams:
+    Kprintf("Bad parameters while removing ISO handler\n");
+    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    return COMMAND_PROCESSED;
+}
+
+void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint)
+{
+    Kprintf("Scheduling RT ISO transfer\n");
+    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
+        return;
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    {
+        Kprintf("EP not in RT_ISO_RUNNING\n");
+        return;
+    }
+
+    // call hook and fill in ioData in current_req
+    ep_ctx->rt_buffer_req.ubr_Length = ep_ctx->rt_req->urti_OutPrefetch;
+    ep_ctx->rt_buffer_req.ubr_Buffer = NULL;
+    ep_ctx->rt_buffer_req.ubr_Flags = 0;
+    ep_ctx->rt_buffer_req.ubr_Frame = readl(udev->controller->run_regs->microframe_index) & 0xffff; // TODO looks wrong
+    Kprintf("requesting buffer for frame %ld\n", ep_ctx->rt_buffer_req.ubr_Frame);
+    struct Hook *hook = (ep_ctx->current_req->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InReqHook : ep_ctx->rt_req->urti_OutReqHook;
+    CallHookPkt(hook, ep_ctx->rt_req, &ep_ctx->rt_buffer_req);
+
+    if (ep_ctx->rt_buffer_req.ubr_Flags & UBFF_CONTBUFFER)
+    {
+        Kprintf("Continuous buffer not supported yet\n");
+    }
+    Kprintf("hook filled addr=%lx len=%ld frame=%ld flags=%lx\n",
+            ep_ctx->rt_buffer_req.ubr_Buffer,
+            ep_ctx->rt_buffer_req.ubr_Length,
+            ep_ctx->rt_buffer_req.ubr_Frame,
+            ep_ctx->rt_buffer_req.ubr_Flags);
+
+    ep_ctx->current_req->iouh_Data = (APTR)(ULONG)ep_ctx->rt_buffer_req.ubr_Buffer;
+    ep_ctx->current_req->iouh_Length = ep_ctx->rt_buffer_req.ubr_Length;
+
+    // TODO we should schedule TDs for up to OutPrefetch worth of data...
+    // TODO handle ubr_Frame - discard past frames?
+    // TODO handle ubr_Flags - UBFF_CONTBUFFER
+
+    // call iso transfer function
+    xhci_rt_iso_tx(udev, ep_ctx->current_req);
+}
+
+int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
+{
+    Kprintf("Starting RT ISO transfer\n");
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+        goto badparams;
+
+    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
+    if (endpoint >= USB_MAXENDPOINTS)
+        goto badparams;
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
+    {
+        Kprintf("EP not in RT_ISO_STOPPED\n");
+        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+        return COMMAND_PROCESSED;
+    }
+
+    ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
+    xhci_ep_schedule_rt_iso(udev, endpoint);
+
+    io->iouh_Actual = 0;
+    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+    return COMMAND_PROCESSED;
+
+badparams:
+    Kprintf("bad params\n");
+    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    return COMMAND_PROCESSED;
+}
+
+int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
+{
+    Kprintf("Stopping RT ISO transfer\n");
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+        goto badparams;
+
+    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
+    if (endpoint >= USB_MAXENDPOINTS)
+        goto badparams;
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    {
+        Kprintf("EP not in RT_ISO_RUNNING\n");
+        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+        return COMMAND_PROCESSED;
+    }
+
+    if (ep_ctx->rt_req != io->iouh_Data)
+        goto badparams;
+
+    ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPING;
+
+    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+    return COMMAND_PROCESSED;
+
+badparams:
+    Kprintf("bad params\n");
+    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    return COMMAND_PROCESSED;
+}
+
 void xhci_ep_schedule_next(struct usb_device *udev, int endpoint)
 {
     if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
@@ -653,6 +861,7 @@ void xhci_ep_schedule_next(struct usb_device *udev, int endpoint)
     if (ep_ctx->state == USB_DEV_EP_STATE_IDLE)
         xhci_ep_schedule_next(udev, endpoint);
 }
+
 static inline int root_hub_max_ports(struct xhci_ctrl *ctrl)
 {
     return HCS_MAX_PORTS(xhci_readl(&ctrl->hccr->cr_hcsparams1));

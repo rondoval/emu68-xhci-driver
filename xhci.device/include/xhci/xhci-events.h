@@ -4,6 +4,7 @@
 #include <exec/lists.h>
 #include <exec/types.h>
 #include <compat.h>
+#include <devices/usbhardware.h>
 
 enum ep_state
 {
@@ -15,11 +16,15 @@ enum ep_state
     USB_DEV_EP_STATE_RECEIVING_ISOC,
     USB_DEV_EP_STATE_ABORTING,
     USB_DEV_EP_STATE_RESETTING,
-    USB_DEV_EP_STATE_FAILED
+    USB_DEV_EP_STATE_FAILED,
+    USB_DEV_EP_STATE_RT_ISO_STOPPED,
+    USB_DEV_EP_STATE_RT_ISO_RUNNING,
+    USB_DEV_EP_STATE_RT_ISO_STOPPING
 };
 
 struct ep_context
 {
+    //TODO would be nice to schedule multiple TDs at once
     struct MinList req_list; /* list of pending requests */
 
     struct IOUsbHWReq *current_req; /* current request being processed */
@@ -30,6 +35,16 @@ struct ep_context
     dma_addr_t trb_addr;
     ULONG trb_length;
     ULONG trb_available_length;
+
+    /* RT ISO data */
+    /*
+     * The idea here is that if this is filled, the event handlers will use
+     * hooks to get more data.
+     * So this is instead of current_req/req_list.
+     * As such, we will fail an attempt to enter RT ISO mode if there are requests ongoing.
+     */
+    struct IOUsbHWRTIso * rt_req;
+    struct IOUsbHWBufferReq rt_buffer_req;
 };
 
 struct usb_device; /* forward declaration */
