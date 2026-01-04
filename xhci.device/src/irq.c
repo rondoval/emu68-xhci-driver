@@ -18,7 +18,6 @@
 
 static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 {
-	KprintfH("[xhci] %s: disabling runtime IRQs\n", __func__);
 	u32 iman = xhci_readl(&ctrl->ir_set->irq_pending);
 	xhci_writel(&ctrl->ir_set->irq_pending,
 		       ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman));
@@ -26,7 +25,6 @@ static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
-	KprintfH("[xhci] %s: enabling runtime IRQs\n", __func__);
 	u32 iman = xhci_readl(&ctrl->ir_set->irq_pending);
 	xhci_writel(&ctrl->ir_set->irq_pending,
 		       ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman));

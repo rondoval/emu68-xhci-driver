@@ -304,6 +304,7 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring)
 	ring->enq_seg = ring->first_seg;
 	ring->dequeue = ring->enqueue;
 	ring->deq_seg = ring->first_seg;
+	ring->queued_trbs = 0;
 
 	/*
 	 * The ring is initialized to 0. The producer must write 1 to the
@@ -363,6 +364,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 {
 	struct xhci_ring *ring;
 	struct xhci_segment *prev;
+	unsigned int remaining = num_segs;
 
 	ring = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_ring));
 	if (!ring)
@@ -371,8 +373,10 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 				(ULONG)sizeof(struct xhci_ring));
 		return NULL;
 	}
+	_memset(ring, 0, sizeof(struct xhci_ring));
+	ring->num_segs = num_segs;
 
-	if (num_segs == 0)
+	if (remaining == 0)
 		return ring;
 
 	ring->first_seg = xhci_segment_alloc(ctrl);
@@ -383,10 +387,10 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 		return NULL;
 	}
 
-	num_segs--;
+	remaining--;
 
 	prev = ring->first_seg;
-	while (num_segs > 0)
+	while (remaining > 0)
 	{
 		struct xhci_segment *next;
 
@@ -401,7 +405,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 		xhci_link_segments(prev, next, link_trbs);
 
 		prev = next;
-		num_segs--;
+		remaining--;
 	}
 	xhci_link_segments(prev, ring->first_seg, link_trbs);
 	if (link_trbs)

@@ -907,6 +907,13 @@ union xhci_trb
 	struct xhci_generic_trb generic;
 };
 
+struct xhci_giveback_info
+{
+	int start_cycle;
+	int ep_index;
+	struct xhci_generic_trb *start_trb;
+};
+
 /* TRB bit mask */
 #define TRB_TYPE_BITMASK (0xfc00)
 #define TRB_TYPE(p) ((p) << 10)
@@ -1035,6 +1042,7 @@ struct xhci_ring
 	 */
 	volatile u32 cycle_state;
 	unsigned int num_segs;
+	unsigned int queued_trbs;
 };
 
 struct xhci_erst_entry
@@ -1252,7 +1260,7 @@ struct xhci_ctrl
 
 	APTR memoryPool;
 	struct pci_device *pci_dev;
-	struct usb_device devices[MAX_HC_SLOTS];
+	struct usb_device *devices[MAX_HC_SLOTS];
 	struct MinList pending_commands; /* list of pending commands */
 };
 
@@ -1278,7 +1286,8 @@ void xhci_update_hub_tt(struct usb_device *udev);
 int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_int_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
-int xhci_rt_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io);
+int xhci_rt_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, BOOL defer_doorbell, struct xhci_giveback_info *giveback);
+void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info *giveback);
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_check_maxpacket(struct usb_device *udev, unsigned int maxpacket);
 int xhci_set_interface(struct usb_device *udev, unsigned int interface_number, unsigned int alt_setting);

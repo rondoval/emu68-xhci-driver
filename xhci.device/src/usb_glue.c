@@ -31,6 +31,12 @@
 #define KprintfH(fmt, ...) PrintPistorm("[usb_glue] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
+static void usb_glue_flush_udev(struct usb_device *udev);
+static void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr);
+static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr);
+static UBYTE usb_glue_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum);
+static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUsbHWReq *io);
+
 static unsigned int route_depth(unsigned int route)
 {
     unsigned int depth = 0;
@@ -58,13 +64,100 @@ static unsigned int build_route_string(struct usb_device *parent, unsigned int p
     return parent->route | (nibble << (depth * 4));
 }
 
+static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr)
+{
+    if (!ctrl || addr > 127)
+        return NULL;
+
+    if (ctrl->devices[addr])
+        usb_glue_free_udev_slot(ctrl, addr);
+
+    struct usb_device *udev = AllocVecPooled(ctrl->memoryPool, sizeof(*udev));
+    if (!udev)
+    {
+        Kprintf("Failed to allocate usb_device for addr %ld\n", (LONG)addr);
+        return NULL;
+    }
+
+    _memset(udev, 0, sizeof(*udev));
+    udev->used = 1;
+    udev->devnum = addr;
+    udev->controller = ctrl;
+    udev->maxpacketsize0 = PACKET_SIZE_8;
+
+    _NewMinList(&udev->configurations);
+
+    for (int i = 0; i < USB_MAXENDPOINTS; ++i)
+    {
+        _NewMinList(&udev->ep_context[i].pending_reqs);
+        _NewMinList(&udev->ep_context[i].active_tds);
+    }
+
+    ctrl->devices[addr] = udev;
+    return udev;
+}
+
+static UBYTE usb_glue_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum)
+{
+    if (!udev || !udev->active_config || epnum == 0)
+        return 0;
+
+    struct usb_config *cfg = udev->active_config;
+
+    for (int i = 0; i < cfg->no_of_if; ++i)
+    {
+        struct usb_interface *iface = &cfg->if_desc[i];
+        struct usb_interface_altsetting *alt = iface->active_altsetting;
+        if (!alt)
+            continue;
+
+        for (int e = 0; e < alt->no_of_ep; ++e)
+        {
+            UBYTE addr = alt->ep_desc[e].bEndpointAddress;
+            if ((addr & 0x0F) == epnum)
+                return addr;
+        }
+    }
+
+    return 0;
+}
+
+static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUsbHWReq *io)
+{
+    struct UsbSetupData *setup = &io->iouh_SetupData;
+
+    /* Only patch class+endpoint recipient control requests. */
+    if ((setup->bmRequestType & (USB_TYPE_MASK | USB_RECIP_MASK)) != (USB_TYPE_CLASS | USB_RECIP_ENDPOINT))
+        return;
+
+    /* If direction bit is already present, leave untouched. */
+    UWORD wIndex = LE16(setup->wIndex);
+    if (wIndex & 0x0080)
+        return;
+
+    UBYTE epnum = wIndex & 0x0F;
+    if (epnum == 0)
+        return;
+
+    UBYTE fixed = usb_glue_find_epaddr_by_num(udev, epnum);
+    if (!fixed || fixed == (UBYTE)wIndex)
+        return;
+
+    setup->wIndex = cpu_to_le16(fixed);
+
+#ifdef DEBUG_HIGH
+    KprintfH("patched endpoint address wIndex from %02lx to %02lx for epnum %ld\n",
+             (ULONG)wIndex, (ULONG)fixed, (LONG)epnum);
+#endif
+}
+
 static struct usb_device *resolve_parent(struct XHCIUnit *unit, UWORD addr)
 {
     if (addr > 127)
         return NULL;
 
-    struct usb_device *udev = &unit->xhci_ctrl->devices[addr];
-    if (!udev->used)
+    struct usb_device *udev = unit->xhci_ctrl->devices[addr];
+    if (!udev || !udev->used)
         return NULL;
 
     return udev;
@@ -105,31 +198,95 @@ static void update_device_topology(struct XHCIUnit *unit, struct usb_device *ude
 
 static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
 {
-    if (devaddr > 127)
+    if (!unit || !unit->xhci_ctrl || devaddr > 127)
         return NULL;
 
-    struct usb_device *udev = &unit->xhci_ctrl->devices[devaddr];
-    if (!udev->used)
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    struct usb_device *udev = ctrl->devices[devaddr];
+    if (!udev)
     {
         KprintfH("new device addr=%ld\n", (LONG)devaddr);
-        _memset(udev, 0, sizeof(struct usb_device));
-        udev->used = 1;
-        udev->devnum = devaddr;
-        udev->controller = unit->xhci_ctrl;
-        /* Default EP0 packet size for new address (8) */
-        udev->maxpacketsize0 = PACKET_SIZE_8;
-        /* Default toggles cleared */
-
-        _NewMinList(&udev->configurations);
-
-        for (int i = 0; i < USB_MAXENDPOINTS; ++i)
-            _NewMinList(&udev->ep_context[i].req_list);
+        udev = usb_glue_alloc_udev(ctrl, devaddr);
     }
     else
     {
         KprintfH("existing device addr=%ld\n", (LONG)devaddr);
     }
+
     return udev;
+}
+
+/* Sum bytes of in-flight RT ISO TDs to honor Poseidon OutPrefetch budget. */
+static inline BOOL minlist_empty(const struct MinList *list)
+{
+    return list->mlh_Head == (struct MinNode *)&list->mlh_Tail;
+}
+
+static ULONG rt_iso_inflight_bytes(const struct ep_context *ep_ctx)
+{
+    ULONG total = 0;
+    const struct MinNode *n = ep_ctx->active_tds.mlh_Head;
+    while (n && n->mln_Succ)
+    {
+        const struct xhci_td *td = (const struct xhci_td *)n;
+        if (td->rt_iso)
+            total += td->length;
+        n = n->mln_Succ;
+    }
+    return total;
+}
+
+static void enqueue_pending_request(struct ep_context *ep_ctx, struct IOUsbHWReq *io, const char *reason)
+{
+    io->iouh_DriverPrivate1 = ep_ctx;
+    AddTailMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
+    Kprintf("queued request cmd=%ld ep=%ld (%s)\n",
+             (LONG)io->iouh_Req.io_Command,
+             (LONG)(io->iouh_Endpoint & 0x0F),
+             reason);
+}
+
+static void enqueue_pending_request_front(struct ep_context *ep_ctx, struct IOUsbHWReq *io, const char *reason)
+{
+    io->iouh_DriverPrivate1 = ep_ctx;
+    AddHeadMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
+    Kprintf("requeued request cmd=%ld ep=%ld (%s)\n",
+             (LONG)io->iouh_Req.io_Command,
+             (LONG)(io->iouh_Endpoint & 0x0F),
+             reason);
+}
+
+static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
+{
+    struct MinNode *node;
+
+    while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
+    {
+        struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
+        req->iouh_DriverPrivate1 = NULL;
+        req->iouh_DriverPrivate2 = NULL;
+        io_reply_failed(req, IOERR_ABORTED);
+    }
+
+    while ((node = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
+    {
+        struct xhci_td *td = (struct xhci_td *)node;
+        xhci_td_release_trbs(td);
+        if (td->req)
+        {
+            io_reply_failed(td->req, IOERR_ABORTED);
+            if (td->rt_iso)
+                FreeVecPooled(ctrl->memoryPool, td->req);
+        }
+        FreeVecPooled(ctrl->memoryPool, td);
+    }
+
+    if (ep_ctx->rt_template_req)
+    {
+        FreeVecPooled(ctrl->memoryPool, ep_ctx->rt_template_req);
+        ep_ctx->rt_template_req = NULL;
+    }
+    ep_ctx->rt_req = NULL;
 }
 
 static int queue_request_if_busy(struct usb_device *udev, struct IOUsbHWReq *io)
@@ -146,10 +303,34 @@ static int queue_request_if_busy(struct usb_device *udev, struct IOUsbHWReq *io)
     if (ep_ctx->state == USB_DEV_EP_STATE_IDLE)
         return 0;
 
-    AddTailMinList(&ep_ctx->req_list, (struct MinNode *)io);
-    KprintfH("queued request cmd=%ld ep=%ld\n", (LONG)io->iouh_Req.io_Command, (LONG)endpoint);
+    if (ep_ctx->state == USB_DEV_EP_STATE_FAILED ||
+        ep_ctx->state == USB_DEV_EP_STATE_RESETTING ||
+        ep_ctx->state == USB_DEV_EP_STATE_ABORTING)
+    {
+        enqueue_pending_request(ep_ctx, io, "ep-not-ready");
+        return 1;
+    }
 
-    return 1;
+    /* Allow pipelining; lower layers will requeue if the ring is full */
+    return 0;
+}
+
+static int handle_ring_busy(struct usb_device *udev, struct IOUsbHWReq *io)
+{
+    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
+    if (endpoint >= USB_MAXENDPOINTS)
+    {
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return COMMAND_PROCESSED;
+    }
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    if (io->iouh_DriverPrivate1 == ep_ctx)
+        enqueue_pending_request_front(ep_ctx, io, "ring-busy");
+    else
+        enqueue_pending_request(ep_ctx, io, "ring-busy");
+
+    return COMMAND_SCHEDULED;
 }
 
 static void dispatch_request(struct IOUsbHWReq *req)
@@ -433,14 +614,17 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 
     update_device_topology(unit, udev, io);
 
+    /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
+    usb_glue_patch_endpoint_address(udev, io);
+
     {
         KprintfH("dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx flags=%lx timeout=%ld maxPktSize=%ld\n",
                  (ULONG)udev, (ULONG)udev->devnum,
                  (ULONG)io->iouh_SetupData.bmRequestType,
                  (ULONG)io->iouh_SetupData.bRequest,
-                 (ULONG)io->iouh_SetupData.wValue,
-                 (ULONG)io->iouh_SetupData.wIndex,
-                 (ULONG)io->iouh_SetupData.wLength,
+                 LE16(io->iouh_SetupData.wValue),
+                 LE16(io->iouh_SetupData.wIndex),
+                 LE16(io->iouh_SetupData.wLength),
                  (ULONG)io->iouh_Flags,
                  (ULONG)io->iouh_NakTimeout,
                  (ULONG)io->iouh_MaxPktSize);
@@ -499,14 +683,34 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = io->iouh_NakTimeout;
+    
+    /* If we don't have a slot yet, enable one and allocate Virt Dev */
+    if (udev->slot_id == 0)
+    {
+        //TODO ugly hack, we should create the slot...
+        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+        return COMMAND_PROCESSED;
+    }
 
+    // Log OUT control data before scheduling TRBs (for EP0 only)
+    if ((io->iouh_Endpoint & 0xf) == 0 && io->iouh_Length > 0 && io->iouh_Data && (io->iouh_SetupData.bmRequestType & USB_DIR_IN) == 0)
+    {
+        KprintfH("CONTROL OUT DATA (pre-TRB): ");
+        unsigned char *data = (unsigned char *)io->iouh_Data;
+        for (unsigned int i = 0; i < io->iouh_Length && i < 64; ++i)
+            PrintPistorm("%02lx ", data[i]);
+        PrintPistorm("\n");
+    }
     int ret = xhci_ctrl_tx(udev, io, timeout_ms);
+    if (ret == UHIOERR_RING_BUSY)
+        return handle_ring_busy(udev, io);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;
         return COMMAND_PROCESSED;
     }
 
+    io->iouh_DriverPrivate1 = NULL;
     return COMMAND_SCHEDULED;
 }
 
@@ -534,12 +738,15 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_bulk_tx(udev, io, timeout_ms);
+    if (ret == UHIOERR_RING_BUSY)
+        return handle_ring_busy(udev, io);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;
         return COMMAND_PROCESSED;
     }
 
+    io->iouh_DriverPrivate1 = NULL;
     return COMMAND_SCHEDULED;
 }
 
@@ -583,12 +790,15 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_int_tx(udev, io, timeout_ms);
+    if (ret == UHIOERR_RING_BUSY)
+        return handle_ring_busy(udev, io);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;
         return COMMAND_PROCESSED;
     }
 
+    io->iouh_DriverPrivate1 = NULL;
     return COMMAND_SCHEDULED;
 }
 
@@ -626,12 +836,15 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_iso_tx(udev, io, timeout_ms);
+    if (ret == UHIOERR_RING_BUSY)
+        return handle_ring_busy(udev, io);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;
         return COMMAND_PROCESSED;
     }
 
+    io->iouh_DriverPrivate1 = NULL;
     return COMMAND_SCHEDULED;
 }
 
@@ -654,32 +867,34 @@ int usb_glue_add_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
     {
         /* can only enable RT ISO if EP is idle */
-        Kprintf("EP not idle\n");
+        Kprintf("EP not idle. Current state: %ld\n", ep_ctx->state);
         io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
         return COMMAND_PROCESSED;
     }
 
     ep_ctx->rt_req = (struct IOUsbHWRTIso *)io->iouh_Data;
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
+    ep_ctx->rt_last_buffer = NULL;
+    ep_ctx->rt_last_filled = 0;
 
-    ep_ctx->current_req = AllocVecPooled(unit->xhci_ctrl->memoryPool, sizeof(struct IOUsbHWReq));
-    if (!ep_ctx->current_req)
+    ep_ctx->rt_template_req = AllocVecPooled(unit->xhci_ctrl->memoryPool, sizeof(struct IOUsbHWReq));
+    if (!ep_ctx->rt_template_req)
     {
         Kprintf("Failed to allocate memory\n");
         io->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
         return COMMAND_PROCESSED;
     }
 
-    CopyMem(io, ep_ctx->current_req, sizeof(struct IOUsbHWReq));
+    CopyMem(io, ep_ctx->rt_template_req, sizeof(struct IOUsbHWReq));
 
     struct IOUsbHWRTIso *rt = (struct IOUsbHWRTIso *)io->iouh_Data;
     if (io->iouh_Dir == UHDIR_IN)
     {
-        Kprintf("Added ISO handler: in req hook: %lx, in done hook: %lx, prefetch: %ld\n", rt->urti_InReqHook, rt->urti_InDoneHook, rt->urti_OutPrefetch);
+        Kprintf("Added ISO handler: EP %ld in req hook: %lx, in done hook: %lx, prefetch: %ld\n", endpoint, rt->urti_InReqHook, rt->urti_InDoneHook, rt->urti_OutPrefetch);
     }
     else
     {
-        Kprintf("Added ISO handler: out req hook: %lx, out done hook: %lx, prefetch: %ld\n", rt->urti_OutReqHook, rt->urti_OutDoneHook, rt->urti_OutPrefetch);
+        Kprintf("Added ISO handler: EP %ld out req hook: %lx, out done hook: %lx, prefetch: %ld\n", endpoint, rt->urti_OutReqHook, rt->urti_OutDoneHook, rt->urti_OutPrefetch);
     }
 
     io->iouh_Actual = 0;
@@ -708,9 +923,9 @@ int usb_glue_rem_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED && ep_ctx->state != USB_DEV_EP_STATE_IDLE && ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPING)
     {
-        Kprintf("EP not in RT_ISO_STOPPED state\n");
+        Kprintf("EP not in RT_ISO_STOPPED/IDLE state. Current state: %ld\n", ep_ctx->state);
         io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
         return COMMAND_PROCESSED;
     }
@@ -718,13 +933,15 @@ int usb_glue_rem_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (io->iouh_Data == ep_ctx->rt_req)
     {
         ep_ctx->rt_req = NULL;
-        if (ep_ctx->current_req)
+        ep_ctx->rt_last_buffer = NULL;
+        ep_ctx->rt_last_filled = 0;
+        if (ep_ctx->rt_template_req)
         {
-            FreeVecPooled(unit->xhci_ctrl->memoryPool, ep_ctx->current_req);
-            ep_ctx->current_req = NULL;
+            FreeVecPooled(unit->xhci_ctrl->memoryPool, ep_ctx->rt_template_req);
+            ep_ctx->rt_template_req = NULL;
         }
         xhci_ep_set_idle(udev, endpoint);
-        Kprintf("Successfully removed ISO handler\n");
+        Kprintf("Successfully removed ISO handler (state reset to IDLE)\n");
         io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
         return COMMAND_PROCESSED;
     }
@@ -735,11 +952,13 @@ badparams:
     return COMMAND_PROCESSED;
 }
 
-void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint)
+static void xhci_ep_schedule_rt_iso_run(struct usb_device *udev, int endpoint)
 {
-    Kprintf("Scheduling RT ISO transfer\n");
     if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
+    {
+        Kprintf("Invalid endpoint %d\n", endpoint);
         return;
+    }
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
@@ -748,34 +967,104 @@ void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint)
         return;
     }
 
-    // call hook and fill in ioData in current_req
-    ep_ctx->rt_buffer_req.ubr_Length = ep_ctx->rt_req->urti_OutPrefetch;
-    ep_ctx->rt_buffer_req.ubr_Buffer = NULL;
-    ep_ctx->rt_buffer_req.ubr_Flags = 0;
-    ep_ctx->rt_buffer_req.ubr_Frame = readl(udev->controller->run_regs->microframe_index) & 0xffff; // TODO looks wrong
-    Kprintf("requesting buffer for frame %ld\n", ep_ctx->rt_buffer_req.ubr_Frame);
-    struct Hook *hook = (ep_ctx->current_req->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InReqHook : ep_ctx->rt_req->urti_OutReqHook;
-    CallHookPkt(hook, ep_ctx->rt_req, &ep_ctx->rt_buffer_req);
-
-    if (ep_ctx->rt_buffer_req.ubr_Flags & UBFF_CONTBUFFER)
+    struct xhci_ctrl *ctrl = udev->controller;
+    struct IOUsbHWReq *template = ep_ctx->rt_template_req;
+    if (!template)
     {
-        Kprintf("Continuous buffer not supported yet\n");
+        Kprintf("No RT ISO template request\n");
+        xhci_ep_set_failed(udev, endpoint);
+        return;
     }
-    Kprintf("hook filled addr=%lx len=%ld frame=%ld flags=%lx\n",
-            ep_ctx->rt_buffer_req.ubr_Buffer,
-            ep_ctx->rt_buffer_req.ubr_Length,
-            ep_ctx->rt_buffer_req.ubr_Frame,
-            ep_ctx->rt_buffer_req.ubr_Flags);
 
-    ep_ctx->current_req->iouh_Data = (APTR)(ULONG)ep_ctx->rt_buffer_req.ubr_Buffer;
-    ep_ctx->current_req->iouh_Length = ep_ctx->rt_buffer_req.ubr_Length;
+    ULONG prefetch_bytes = ep_ctx->rt_req->urti_OutPrefetch;
+    if (prefetch_bytes == 0)
+    {
+        Kprintf("RT ISO OutPrefetch is zero, skipping schedule\n");
+        return;
+    }
 
-    // TODO we should schedule TDs for up to OutPrefetch worth of data...
-    // TODO handle ubr_Frame - discard past frames?
-    // TODO handle ubr_Flags - UBFF_CONTBUFFER
+    struct xhci_giveback_info giveback = {0};
+    BOOL have_giveback = FALSE;
+    ULONG inflight = rt_iso_inflight_bytes(ep_ctx);
+    BOOL first_td = TRUE;
+    while (inflight < prefetch_bytes)
+    {
+        struct IOUsbHWBufferReq rt_buffer_req;
+        ULONG frame = ep_ctx->rt_next_frame;
 
-    // call iso transfer function
-    xhci_rt_iso_tx(udev, ep_ctx->current_req);
+        rt_buffer_req.ubr_Length = ep_ctx->rt_req->urti_OutPrefetch;
+        rt_buffer_req.ubr_Buffer = ep_ctx->rt_last_buffer;
+        rt_buffer_req.ubr_Flags = 0;
+        rt_buffer_req.ubr_Frame = frame; /* monotonic frame counter to avoid jumps */
+        struct Hook *hook = (template->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InReqHook : ep_ctx->rt_req->urti_OutReqHook;
+        CallHookPkt(hook, ep_ctx->rt_req, &rt_buffer_req);
+
+        if (!rt_buffer_req.ubr_Buffer || rt_buffer_req.ubr_Length == 0)
+        {
+            Kprintf("RT ISO hook provided no buffer/length\n");
+            break;
+        }
+
+        ULONG offset = 0;
+        if (rt_buffer_req.ubr_Buffer == ep_ctx->rt_last_buffer)
+        {
+            offset = ep_ctx->rt_last_filled;
+        }
+        else
+        {
+            ep_ctx->rt_last_buffer = rt_buffer_req.ubr_Buffer;
+        }
+        ep_ctx->rt_last_filled = offset + rt_buffer_req.ubr_Length;
+
+        if (rt_buffer_req.ubr_Flags & UBFF_CONTBUFFER)
+        {
+            Kprintf("Continuous buffer not supported yet\n");
+        }
+
+        struct IOUsbHWReq *rt_io = AllocVecPooled(ctrl->memoryPool, sizeof(struct IOUsbHWReq));
+        if (!rt_io)
+        {
+            Kprintf("Failed to alloc RT ISO IO req\n");
+            break;
+        }
+        CopyMem(template, rt_io, sizeof(struct IOUsbHWReq));
+        rt_io->iouh_Data = (APTR)((ULONG)rt_buffer_req.ubr_Buffer + offset);
+        rt_io->iouh_Length = rt_buffer_req.ubr_Length;
+
+        struct xhci_giveback_info local_giveback = {0};
+        BOOL defer = TRUE; /* RT ISO defers doorbell to per-run giveback */
+        int ret = xhci_rt_iso_tx(udev, rt_io, defer, first_td ? &local_giveback : NULL);
+        if (ret == UHIOERR_RING_BUSY)
+        {
+            FreeVecPooled(ctrl->memoryPool, rt_io);
+            KprintfH("RT ISO ring busy, deferring\n");
+            break;
+        }
+        if (ret != UHIOERR_NO_ERROR)
+        {
+            FreeVecPooled(ctrl->memoryPool, rt_io);
+            Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
+            break;
+        }
+
+        if (first_td && local_giveback.start_trb)
+        {
+            giveback = local_giveback;
+            have_giveback = TRUE;
+        }
+
+        ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
+        inflight += rt_io->iouh_Length;
+        first_td = FALSE;
+    }
+
+    if (have_giveback)
+        xhci_ring_giveback(udev, &giveback);
+}
+
+void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint)
+{
+    xhci_ep_schedule_rt_iso_run(udev, endpoint);
 }
 
 int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
@@ -797,6 +1086,8 @@ int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
+    /* microframe_index is in 125us units; for FS frames use the frame number (divide by 8). */
+    ep_ctx->rt_next_frame = (readl(unit->xhci_ctrl->run_regs->microframe_index) >> 3) & 0xffff;
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
     xhci_ep_schedule_rt_iso(udev, endpoint);
 
@@ -849,17 +1140,30 @@ void xhci_ep_schedule_next(struct usb_device *udev, int endpoint)
         return;
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    struct MinNode *node = RemHeadMinList(&ep_ctx->req_list);
-    if (!node)
-        return;
+    while (1)
+    {
+        struct MinNode *node = RemHeadMinList(&ep_ctx->pending_reqs);
+        if (!node)
+            return;
 
-    struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
+        struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
+        req->iouh_DriverPrivate2 = NULL;
 
-    KprintfH("starting queued request cmd=%ld ep=%ld\n", (LONG)req->iouh_Req.io_Command, (LONG)(req->iouh_Endpoint & 0x0F));
-    dispatch_request(req);
+        KprintfH("starting queued request cmd=%ld ep=%ld\n",
+             (LONG)req->iouh_Req.io_Command,
+             (LONG)(req->iouh_Endpoint & 0x0F));
+        dispatch_request(req);
 
-    if (ep_ctx->state == USB_DEV_EP_STATE_IDLE)
-        xhci_ep_schedule_next(udev, endpoint);
+        /* If the endpoint went idle immediately (e.g. zero-length or error), keep draining */
+        if (ep_ctx->state == USB_DEV_EP_STATE_FAILED)
+            return;
+
+        if (req->iouh_DriverPrivate2 == XHCI_REQ_RING_BUSY)
+            return;
+
+        if (minlist_empty(&ep_ctx->pending_reqs))
+            return;
+    }
 }
 
 static inline int root_hub_max_ports(struct xhci_ctrl *ctrl)
@@ -968,9 +1272,9 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
              (ULONG)udev, (ULONG)udev->devnum,
              (ULONG)io->iouh_SetupData.bmRequestType,
              (ULONG)io->iouh_SetupData.bRequest,
-             (ULONG)io->iouh_SetupData.wValue,
-             (ULONG)io->iouh_SetupData.wIndex,
-             (ULONG)io->iouh_SetupData.wLength,
+             LE16(io->iouh_SetupData.wValue),
+             LE16(io->iouh_SetupData.wIndex),
+             LE16(io->iouh_SetupData.wLength),
              (LONG)io->iouh_Actual);
 
     /* If this was a successful GET_DESCRIPTOR(CONFIGURATION),
@@ -1013,23 +1317,29 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
         if (new_addr != old_addr)
         {
             struct xhci_ctrl *ctrl = udev->controller;
-            struct usb_device *from = &ctrl->devices[old_addr];
-            struct usb_device *to = &ctrl->devices[new_addr];
+            if (!ctrl)
+                return;
 
-            if (to->used)
+            struct usb_device *current = ctrl->devices[old_addr];
+            if (!current)
+                current = udev;
+
+            if (ctrl->devices[new_addr] && ctrl->devices[new_addr] != current)
             {
                 Kprintf("overwriting existing ctx for addr %ld\n", (LONG)new_addr);
-                _memset(to, 0, sizeof(*to));
+                usb_glue_free_udev_slot(ctrl, new_addr);
             }
 
-            /* Copy the entire device context so slot/endpoint state follows the device. */
-            *to = *from;
-            to->used = 1;
-            to->devnum = new_addr;
-            ctrl->devs[to->slot_id]->udev = to;
+            ctrl->devices[new_addr] = current;
+            if (old_addr <= 127 && ctrl->devices[old_addr] == current)
+                ctrl->devices[old_addr] = NULL;
 
-            /* Clear the old address entry to avoid stale references. */
-            _memset(from, 0, sizeof(*from));
+            current->devnum = new_addr;
+            current->used = 1;
+
+            if (current->slot_id && ctrl->devs[current->slot_id])
+                ctrl->devs[current->slot_id]->udev = current;
+
             Kprintf("migrated ctx from addr %ld to %ld\n", (LONG)old_addr, (LONG)new_addr);
         }
     }
@@ -1077,8 +1387,14 @@ void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULON
 
 static void usb_glue_flush_udev(struct usb_device *udev)
 {
+    if (!udev)
+        return;
+
     struct xhci_ctrl *ctrl = udev->controller;
-    if (ctrl && ctrl->root_int_req && ctrl->root_int_req->iouh_DevAddr == udev->devnum)
+    if (!ctrl)
+        return;
+
+    if (ctrl->root_int_req && ctrl->root_int_req->iouh_DevAddr == udev->devnum)
     {
         struct IOUsbHWReq *req = ctrl->root_int_req;
         ctrl->root_int_req = NULL;
@@ -1088,34 +1404,48 @@ static void usb_glue_flush_udev(struct usb_device *udev)
     for (int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
     {
         struct ep_context *ep_ctx = &udev->ep_context[ep];
-        struct MinNode *node;
-        while ((node = RemHeadMinList(&ep_ctx->req_list)) != NULL)
-        {
-            io_reply_failed((struct IOUsbHWReq *)node, IOERR_ABORTED);
-        }
+        ep_teardown(ctrl, ep_ctx);
 
-        if (ep_ctx->current_req)
-        {
-            struct IOUsbHWReq *pending = ep_ctx->current_req;
-            ep_ctx->current_req = NULL;
-            io_reply_failed(pending, IOERR_ABORTED);
+        if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
             xhci_ep_set_idle(udev, ep);
-        }
-        else
-        {
-            if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
-                xhci_ep_set_idle(udev, ep);
-        }
     }
+}
+
+static void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr)
+{
+    if (!ctrl || addr > 127)
+        return;
+
+    struct usb_device *udev = ctrl->devices[addr];
+    if (!udev)
+        return;
+
+    usb_glue_flush_udev(udev);
+
+    struct MinNode *node;
+    while ((node = RemHeadMinList(&udev->configurations)) != NULL)
+    {
+        struct usb_config *conf = (struct usb_config *)node;
+        FreeVecPooled(ctrl->memoryPool, conf);
+    }
+
+    if (udev->slot_id && ctrl->devs[udev->slot_id])
+        ctrl->devs[udev->slot_id]->udev = NULL;
+
+    ctrl->devices[addr] = NULL;
+    udev->used = 0;
+    FreeVecPooled(ctrl->memoryPool, udev);
 }
 
 void usb_glue_flush_queues(struct XHCIUnit *unit)
 {
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    if (!ctrl)
+        return;
     for (int addr = 0; addr <= 127; ++addr)
     {
-        struct usb_device *udev = &ctrl->devices[addr];
-        if (udev->used)
+        struct usb_device *udev = ctrl->devices[addr];
+        if (udev)
             usb_glue_flush_udev(udev);
     }
 }

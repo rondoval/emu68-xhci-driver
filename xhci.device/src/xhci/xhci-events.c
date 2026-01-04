@@ -48,6 +48,8 @@ static void ep_handle_receiving_control_short(struct usb_device *udev, struct ep
 static void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
+static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event, struct xhci_td *td, BOOL allow_control_short);
+
 static const ep_state_handler ep_state_dispatch[] = {
     [USB_DEV_EP_STATE_IDLE] = NULL, /* use default handler */
     [USB_DEV_EP_STATE_RECEIVING_CONTROL] = ep_handle_receiving_control,
@@ -61,6 +63,98 @@ static const ep_state_handler ep_state_dispatch[] = {
     [USB_DEV_EP_STATE_RT_ISO_STOPPED] = NULL,
     [USB_DEV_EP_STATE_RT_ISO_RUNNING] = ep_handle_receiving_bulk,
     [USB_DEV_EP_STATE_RT_ISO_STOPPING] = ep_handle_receiving_bulk};
+
+static void td_free_all(struct usb_device *udev, struct ep_context *ep_ctx)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+    struct MinNode *n;
+    while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
+    {
+        struct xhci_td *td = (struct xhci_td *)n;
+        xhci_td_release_trbs(td);
+        xhci_td_free(ctrl, td);
+    }
+}
+
+static struct xhci_td *td_find_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr)
+{
+    struct MinNode *n = ep_ctx->active_tds.mlh_Head;
+    while (n && n->mln_Succ)
+    {
+        struct xhci_td *td = (struct xhci_td *)n;
+        if (td->completion_trb == trb_addr)
+            return td;
+        if (td->trb_addrs)
+        {
+            for (unsigned int i = 0; i < td->trb_count; ++i)
+            {
+                if (td->trb_addrs[i] == trb_addr)
+                    return td;
+            }
+        }
+        n = n->mln_Succ;
+    }
+    return NULL;
+}
+
+static BOOL minlist_is_empty(const struct MinList *list)
+{
+    return list->mlh_Head == (struct MinNode *)&list->mlh_Tail;
+}
+
+static void td_remove(struct ep_context *ep_ctx, struct xhci_td *td)
+{
+    (void)ep_ctx;
+    struct MinNode *pred = td->node.mln_Pred;
+    struct MinNode *succ = td->node.mln_Succ;
+    if (pred)
+        pred->mln_Succ = succ;
+    if (succ)
+        succ->mln_Pred = pred;
+    td->node.mln_Pred = NULL;
+    td->node.mln_Succ = NULL;
+}
+
+static void ep_refresh_timeout(struct ep_context *ep_ctx)
+{
+    ULONG earliest = 0;
+    struct MinNode *n = ep_ctx->active_tds.mlh_Head;
+    while (n && n->mln_Succ)
+    {
+        struct xhci_td *td = (struct xhci_td *)n;
+        if (td->deadline_us != 0 && (earliest == 0 || td->deadline_us < earliest))
+            earliest = td->deadline_us;
+        n = n->mln_Succ;
+    }
+}
+
+void xhci_td_release_trbs(struct xhci_td *td)
+{
+    if (!td || !td->ring || td->trb_count == 0)
+        return;
+
+    if (td->ring->queued_trbs >= td->trb_count)
+        td->ring->queued_trbs -= td->trb_count;
+    else
+        td->ring->queued_trbs = 0;
+
+    td->ring = NULL;
+    td->trb_count = 0;
+}
+
+void xhci_td_free(struct xhci_ctrl *ctrl, struct xhci_td *td)
+{
+    if (!td || !ctrl)
+        return;
+
+    if (td->trb_addrs)
+    {
+        FreeVecPooled(ctrl->memoryPool, td->trb_addrs);
+        td->trb_addrs = NULL;
+    }
+
+    FreeVecPooled(ctrl->memoryPool, td);
+}
 
 /*
  * So generally, XHCI has got separate endpoint context per direction
@@ -86,16 +180,7 @@ void xhci_ep_set_failed(struct usb_device *udev, int endpoint)
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
     Kprintf("EP %ld state %ld -> FAILED\n", (LONG)endpoint, (LONG)ep_ctx->state);
     ep_ctx->state = USB_DEV_EP_STATE_FAILED;
-
-    if (ep_ctx->current_req)
-        Kprintf("WARNING: current_req not NULL (%lx)\n", (LONG)ep_ctx->current_req);
-
-    ep_ctx->trb_addr = 0;
-    ep_ctx->trb_length = 0;
-    ep_ctx->trb_available_length = 0;
-    ep_ctx->timeout_stamp = 0;
-    ep_ctx->timeout_active = FALSE;
-    ep_ctx->current_req = NULL;
+    td_free_all(udev, ep_ctx);
 }
 
 void xhci_ep_set_idle(struct usb_device *udev, int endpoint)
@@ -108,18 +193,11 @@ void xhci_ep_set_idle(struct usb_device *udev, int endpoint)
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
     KprintfH("EP %ld state %ld -> IDLE\n", (LONG)endpoint, (LONG)ep_ctx->state);
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
-    ep_ctx->trb_addr = 0;
-    ep_ctx->trb_length = 0;
-    ep_ctx->trb_available_length = 0;
-    ep_ctx->timeout_stamp = 0;
-    ep_ctx->timeout_active = FALSE;
-    if (ep_ctx->current_req)
-        Kprintf("WARNING: current_req not NULL (%lx)\n", (LONG)ep_ctx->current_req);
-    ep_ctx->current_req = NULL;
+    td_free_all(udev, ep_ctx);
     xhci_ep_schedule_next(udev, endpoint);
 }
 
-void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t trb_addr, ULONG timeout_ms)
+void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t *trb_addrs, ULONG timeout_ms, struct xhci_ring *ring, unsigned int trb_count)
 {
     int endpoint = req->iouh_Endpoint & 0xf;
     if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
@@ -129,33 +207,49 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
     }
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    struct xhci_ctrl *ctrl = udev->controller;
 
-    if (!(ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_STOPPED || state == USB_DEV_EP_STATE_RT_ISO_RUNNING || ep_ctx->state == USB_DEV_EP_STATE_IDLE))
+    if (!trb_addrs || trb_count == 0)
     {
-        Kprintf("EP %ld not IDLE (state %ld)\n", (LONG)endpoint, (LONG)ep_ctx->state);
+        Kprintf("Invalid TRB list for EP %ld\n", (LONG)endpoint);
         xhci_ep_set_failed(udev, endpoint);
         return;
     }
 
-    if (state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    struct xhci_td *td = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_td));
+    if (!td)
     {
-        ep_ctx->current_req = req;
+        Kprintf("Failed to alloc TD\n");
+        FreeVecPooled(ctrl->memoryPool, trb_addrs);
+        xhci_ep_set_failed(udev, endpoint);
+        return;
     }
 
-    ep_ctx->state = state;
-    ep_ctx->trb_addr = trb_addr;
-    ep_ctx->trb_length = req->iouh_Length;
-    ep_ctx->trb_available_length = req->iouh_Length;
+    td->req = req;
+    td->trb_addrs = trb_addrs;
+    td->trb_count = trb_count;
+    td->completion_trb = trb_addrs[trb_count - 1];
+    td->length = req->iouh_Length;
+    td->rt_iso = (state == USB_DEV_EP_STATE_RT_ISO_RUNNING);
+    td->ring = ring;
+    if (ring && trb_count)
+        ring->queued_trbs += trb_count;
     if (timeout_ms == 0)
     {
-        ep_ctx->timeout_stamp = 0;
-        ep_ctx->timeout_active = FALSE;
+        td->deadline_us = 0;
     }
     else
     {
-        ep_ctx->timeout_stamp = get_time() + timeout_ms * 1000;
-        ep_ctx->timeout_active = TRUE;
+        td->deadline_us = get_time() + timeout_ms * 1000;
     }
+
+    td->node.mln_Pred = td->node.mln_Succ = NULL;   
+
+    AddTailMinList(&ep_ctx->active_tds, (struct MinNode *)td);
+
+    ep_ctx->state = state;
+
+    ep_refresh_timeout(ep_ctx);
 }
 
 void xhci_ep_set_cont_iso(struct usb_device *udev, int endpoint)
@@ -189,8 +283,6 @@ void xhci_ep_set_resetting(struct usb_device *udev, int endpoint)
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
     ep_ctx->state = USB_DEV_EP_STATE_RESETTING;
-    ep_ctx->timeout_stamp = get_time() + XHCI_TIMEOUT * 1000;
-    ep_ctx->timeout_active = TRUE;
 }
 
 void xhci_ep_set_aborting(struct usb_device *udev, int endpoint)
@@ -207,23 +299,15 @@ void xhci_ep_set_aborting(struct usb_device *udev, int endpoint)
         ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT &&
         ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_BULK &&
         ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_INT &&
-        ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_ISOC)
+        ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_ISOC &&
+        ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
         Kprintf("EP %ld not RECEIVING (state %ld)\n", (LONG)endpoint, (LONG)ep_ctx->state);
         xhci_ep_set_failed(udev, endpoint);
         return;
     }
 
-    if (ep_ctx->current_req == NULL)
-    {
-        Kprintf("EP %ld current_req is NULL\n", (LONG)endpoint);
-        xhci_ep_set_failed(udev, endpoint);
-        return;
-    }
-
     ep_ctx->state = USB_DEV_EP_STATE_ABORTING;
-    ep_ctx->timeout_stamp = get_time() + XHCI_TIMEOUT * 1000;
-    ep_ctx->timeout_active = TRUE;
 }
 
 /**
@@ -376,20 +460,48 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
         for (int ep = 0; ep < USB_MAXENDPOINTS; ep++)
         {
             struct ep_context *ep_ctx = &udev->ep_context[ep];
-            if (ep_ctx->state == USB_DEV_EP_STATE_IDLE)
-                continue;
-            if (ep_ctx->state == USB_DEV_EP_STATE_FAILED)
-            {
-                // xhci_reset_ep(udev, ep);
-                continue;
-            }
-            if (!ep_ctx->timeout_active)
-                continue;
-            if (ep_ctx->timeout_stamp > now)
+            if (ep_ctx->state == USB_DEV_EP_STATE_IDLE || ep_ctx->state == USB_DEV_EP_STATE_FAILED)
                 continue;
 
-            Kprintf("XHCI event timeout on slot %ld ep %ld state %ld\n", (LONG)udev->slot_id, (LONG)ep, (LONG)ep_ctx->state);
-            xhci_abort_td(udev, ep);
+            /* Find earliest-expired TD */
+            struct xhci_td *expired = NULL;
+            ULONG earliest = 0;
+            struct MinNode *n = ep_ctx->active_tds.mlh_Head;
+            while (n && n->mln_Succ)
+            {
+                struct xhci_td *td = (struct xhci_td *)n;
+                if (td->deadline_us != 0 && td->deadline_us <= now)
+                {
+                    if (!expired || td->deadline_us < earliest)
+                    {
+                        expired = td;
+                        earliest = td->deadline_us;
+                    }
+                }
+                n = n->mln_Succ;
+            }
+
+            if (!expired)
+            {
+                ep_refresh_timeout(ep_ctx);
+                continue;
+            }
+
+            Kprintf("XHCI TD timeout on slot %ld ep %ld (req=%lx deadline=%ld now=%ld)\n",
+                    (LONG)udev->slot_id, (LONG)ep, (LONG)expired->req, (LONG)expired->deadline_us, (LONG)now);
+
+            struct IOUsbHWReq *expired_req = expired->req;
+            io_reply_failed(expired_req, UHIOERR_TIMEOUT);
+            td_remove(ep_ctx, expired);
+            if (expired->rt_iso)
+                FreeVecPooled(ctrl->memoryPool, expired_req);
+            xhci_td_free(ctrl, expired);
+            ep_refresh_timeout(ep_ctx);
+
+            if (minlist_is_empty(&ep_ctx->active_tds))
+                xhci_ep_set_idle(udev, ep);
+            else
+                xhci_ep_schedule_next(udev, ep);
         }
     }
 }
@@ -429,6 +541,7 @@ static void record_transfer_result(union xhci_trb *event, int length,
         Kprintf("Babble detected\n");
         *status = UHIOERR_OVERFLOW;
         break;
+        //TODO more codes, e.g. underrun/overrun
     default:
         *status = UHIOERR_HOSTERROR;
     }
@@ -456,6 +569,82 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
     xhci_ep_set_failed(udev, TRB_TO_ENDPOINT(LE32(event->trans_event.flags)));
 }
 
+/* Shared TD completion helper for control/bulk/int/isoc (non-RT) and RT ISO hooks. */
+static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event, struct xhci_td *td, BOOL allow_control_short)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+    struct IOUsbHWReq *req = td->req;
+    int length = td->length;
+    ULONG status;
+    int act_len;
+    xhci_comp_code comp = GET_COMP_CODE(LE32(event->trans_event.transfer_len));
+
+    record_transfer_result(event, length, &status, &act_len);
+    KprintfH("result status=%ld act_len=%ld comp=%ld\n", (LONG)status, (LONG)act_len, (LONG)comp);
+    xhci_acknowledge_event(ctrl);
+    xhci_td_release_trbs(td);
+
+    if (req)
+    {
+        xhci_dma_unmap(ctrl, (dma_addr_t)req->iouh_Data, length);
+        //TOOD dir may be wrong for control?
+        //if (act_len > 0 && req->iouh_Dir == UHDIR_IN)
+            xhci_inval_cache((uintptr_t)req->iouh_Data, (ULONG)act_len);
+    }
+
+    if (td->rt_iso)
+    {
+        if (ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
+        {
+            td_remove(ep_ctx, td);
+            xhci_td_free(ctrl, td);
+            if (minlist_is_empty(&ep_ctx->active_tds))
+                xhci_ep_set_idle(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+            return;
+        }
+
+        struct IOUsbHWBufferReq rt_buffer_req;
+        rt_buffer_req.ubr_Buffer = req->iouh_Data;
+        rt_buffer_req.ubr_Frame = 0; //TODO set frame number?
+        rt_buffer_req.ubr_Length = act_len;
+        rt_buffer_req.ubr_Flags = 0;
+        struct Hook *hook = (req && req->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InDoneHook : ep_ctx->rt_req->urti_OutDoneHook;
+        if (hook)
+            CallHookPkt(hook, ep_ctx->rt_req, &rt_buffer_req);
+
+        td_remove(ep_ctx, td);
+        xhci_td_free(ctrl, td);
+        ep_refresh_timeout(ep_ctx);
+
+        xhci_ep_set_cont_iso(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+        return;
+    }
+
+    if (req)
+    {
+        if (status == UHIOERR_STALL)
+        {
+            io_reply_failed(req, UHIOERR_STALL);
+        }
+        else
+        {
+            io_reply_data(udev, req, status, act_len);
+            if (allow_control_short && comp == COMP_SHORT_TX)
+                ep_ctx->state = USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT;
+        }
+    }
+
+    td_remove(ep_ctx, td);
+    xhci_td_free(ctrl, td);
+    ep_refresh_timeout(ep_ctx);
+
+    if (minlist_is_empty(&ep_ctx->active_tds))
+        xhci_ep_set_idle(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+    else
+        xhci_ep_schedule_next(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+        //TODO TRB_TO_ENDPOINT(flags)?
+}
+
 static void ep_handle_receiving_control(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
     struct xhci_ctrl *ctrl = udev->controller;
@@ -463,7 +652,6 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
     u32 flags = LE32(event->trans_event.flags);
     int endpoint = TRB_TO_ENDPOINT(flags);
     u64 trb_addr = LE64(event->trans_event.buffer);
-    int length = ep_ctx->trb_length;
 
     KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
              (ULONG)flags,
@@ -471,40 +659,26 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
              (ULONG)upper_32_bits(trb_addr),
              (ULONG)lower_32_bits(trb_addr));
 
-    ULONG status;
-    int act_len;
-    record_transfer_result(event, length, &status, &act_len);
-    KprintfH("result status=%ld act_len=%ld comp=%ld\n",
-             (LONG)status, (LONG)act_len,
-             (LONG)GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
-
-    xhci_acknowledge_event(ctrl);
-
-    /* Invalidate buffer to make it available to usb-core */
-    if (length > 0)
+    struct xhci_td *td = td_find_by_trb(ep_ctx, trb_addr);
+    if (!td)
     {
-        // TODO is this required
-        xhci_inval_cache((uintptr_t)trb_addr, length); // TODO dma_map should not realocate buffer... then revert to buffer
-        xhci_dma_unmap(ctrl, (dma_addr_t)ep_ctx->current_req->iouh_Data, length);
-    }
+        /* Late/stale event: if EP not actively receiving, just ack and continue. */
+        if (ep_ctx->state == USB_DEV_EP_STATE_RESETTING || ep_ctx->state == USB_DEV_EP_STATE_IDLE || ep_ctx->state == USB_DEV_EP_STATE_FAILED)
+        {
+            KprintfH("Stale control event for TRB %08lx%08lx on EP %ld state=%ld\n",
+                     (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (LONG)endpoint, (LONG)ep_ctx->state);
+            xhci_acknowledge_event(ctrl);
+            return;
+        }
 
-    if (status == UHIOERR_STALL)
-    {
-        // xhci_reset_ep(udev, endpoint);
-        io_reply_failed(ep_ctx->current_req, UHIOERR_STALL);
+        Kprintf("No TD found for TRB %08lx%08lx on EP %ld (state=%ld)\n",
+                (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (LONG)endpoint, (LONG)ep_ctx->state);
+        xhci_acknowledge_event(ctrl);
         return;
     }
 
-    io_reply_data(udev, ep_ctx->current_req, status, act_len);
-    ep_ctx->current_req = NULL;
-    if (GET_COMP_CODE(LE32(event->trans_event.transfer_len)) == COMP_SHORT_TX)
-    {
-        ep_ctx->state = USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT;
-    }
-    else
-    {
-        xhci_ep_set_idle(udev, endpoint);
-    }
+    /* Reuse shared completion helper for control paths */
+    td_complete(udev, ep_ctx, event, td, TRUE);
 }
 
 void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
@@ -529,7 +703,6 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     u32 flags = LE32(event->trans_event.flags);
     int endpoint = TRB_TO_ENDPOINT(flags);
     u64 trb_addr = LE64(event->trans_event.buffer);
-    int length = ep_ctx->trb_length;
 
 #ifdef DEBUG_HIGH
     struct xhci_container_ctx *out_ctx = ctrl->devs[udev->slot_id]->out_ctx;
@@ -537,17 +710,7 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     xhci_dump_ep_ctx("xhci_bulk_tx: ", endpoint, xhci_get_ep_ctx(ctrl, out_ctx, TRB_TO_EP_INDEX(flags)));
 #endif
 
-    if (trb_addr != ep_ctx->trb_addr)
-    {
-        Kprintf("addr %ld slot %ld EP %ld\n",
-                (LONG)udev->devnum, (LONG)udev->slot_id, (LONG)endpoint);
-        Kprintf("Unexpected buffer, expected %08lx%08lx got %08lx%08lx\n",
-                (ULONG)upper_32_bits(ep_ctx->trb_addr),
-                (ULONG)lower_32_bits(ep_ctx->trb_addr),
-                (ULONG)upper_32_bits(trb_addr),
-                (ULONG)lower_32_bits(trb_addr));
-        ep_ctx->trb_addr = trb_addr;
-    }
+        /* Legacy trb_addr check removed; TD lookup enforces matching. */
 
     KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
              (ULONG)flags,
@@ -555,50 +718,16 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
              (ULONG)upper_32_bits(trb_addr),
              (ULONG)lower_32_bits(trb_addr));
 
-    ULONG status;
-    int act_len;
-    record_transfer_result(event, length, &status, &act_len);
-    KprintfH("result status=%ld act_len=%ld comp=%ld\n",
-             (LONG)status, (LONG)act_len,
-             (LONG)GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
-
-    xhci_acknowledge_event(ctrl);
-
-    xhci_dma_unmap(ctrl, (dma_addr_t)ep_ctx->current_req->iouh_Data, length);
-    if (act_len > 0 && ep_ctx->current_req->iouh_Dir == UHDIR_IN)
-        xhci_inval_cache((uintptr_t)ep_ctx->current_req->iouh_Data, (ULONG)act_len);
-
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    struct xhci_td *td = td_find_by_trb(ep_ctx, trb_addr);
+    if (!td)
     {
-        if (status == UHIOERR_STALL)
-        {
-            // xhci_reset_ep(udev, endpoint);
-            io_reply_failed(ep_ctx->current_req, UHIOERR_STALL);
-            return;
-        }
-        io_reply_data(udev, ep_ctx->current_req, status, act_len);
-        ep_ctx->current_req = NULL;
-        xhci_ep_set_idle(udev, endpoint);
+        Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %ld\n",
+                (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (ULONG)flags, (ULONG)LE32(event->trans_event.transfer_len), (LONG)endpoint);
+        xhci_acknowledge_event(ctrl);
+        return;
     }
-    else
-    {
-        if (ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
-        {
-            Kprintf("Stopping RT ISO transfer\n");
-            xhci_ep_set_idle(udev, endpoint);
-        }
-        else
-        {
-            // call hook to push data to the stack
-            ep_ctx->rt_buffer_req.ubr_Length = act_len;
-            ep_ctx->rt_buffer_req.ubr_Flags = 0;
-            struct Hook *hook = (ep_ctx->current_req->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InDoneHook : ep_ctx->rt_req->urti_OutDoneHook;
-            if (hook)
-                CallHookPkt(hook, ep_ctx->rt_req, &ep_ctx->rt_buffer_req);
 
-            xhci_ep_set_cont_iso(udev, endpoint);
-        }
-    }
+    td_complete(udev, ep_ctx, event, td, FALSE);
 }
 
 void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
@@ -617,9 +746,6 @@ void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, unio
     {
         Kprintf("Expected a TRB with STOP, got %ld with %ld\n", GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
     }
-
-    io_reply_failed(ep_ctx->current_req, IOERR_ABORTED);
-    ep_ctx->current_req = NULL;
 
     xhci_acknowledge_event(ctrl);
     /* no state change - that is done by handle_abort_stop_ring */

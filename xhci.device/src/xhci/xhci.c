@@ -151,8 +151,6 @@ dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, size_t size)
 	bounce->next = ctrl->dma_bounce_list;
 	ctrl->dma_bounce_list = bounce;
 
-	KprintfH("bounce %lx -> %lx len=%ld\n", (ULONG)addr, (ULONG)aligned, (LONG)size);
-
 	return (dma_addr_t)(uintptr_t)aligned;
 }
 
@@ -175,7 +173,6 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, size_t size)
 			memalign_free(ctrl->memoryPool, node->bounce);
 			*link = node->next;
 			FreeVecPooled(ctrl->memoryPool, node);
-			KprintfH("restored %lx from %lx len=%ld\n", (ULONG)node->orig, (ULONG)node->bounce, (LONG)size);
 			return;
 		}
 		link = &(*link)->next;
@@ -1168,7 +1165,14 @@ void xhci_roothub_maybe_complete(struct xhci_ctrl *ctrl)
 		return;
 
 	struct IOUsbHWReq *req = ctrl->root_int_req;
-	struct usb_device *udev = &ctrl->devices[req->iouh_DevAddr];
+	struct usb_device *udev = ctrl->devices[req->iouh_DevAddr];
+	if (!udev)
+	{
+		Kprintf("missing root hub context for addr %ld\n", (LONG)req->iouh_DevAddr);
+		ctrl->root_int_req = NULL;
+		io_reply_failed(req, UHIOERR_HOSTERROR);
+		return;
+	}
 
 	ULONG actual = 0;
 	if (!xhci_roothub_collect_status(ctrl, (uint8_t *)req->iouh_Data,
@@ -1285,10 +1289,20 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 	case USB_REQ_SET_ADDRESS | (USB_RECIP_DEVICE << 8):
 		KprintfH("USB_REQ_SET_ADDRESS rootdev=%ld\n", (LONG)LE16(req->wValue));
 		udev->speed = USB_SPEED_HIGH;
-		ctrl->rootdev = LE16(req->wValue);
-		ctrl->devices[ctrl->rootdev] = *udev;
-		_memset(udev, 0, sizeof(struct usb_device));
-		ctrl->devices[ctrl->rootdev].devnum = ctrl->rootdev;
+		UWORD new_addr = (UWORD)(LE16(req->wValue) & 0x7F);
+		UWORD old_addr = (UWORD)(udev->devnum & 0x7F);
+		if (new_addr > 127)
+			new_addr &= 0x7F;
+
+		if (ctrl->devices[new_addr] && ctrl->devices[new_addr] != udev)
+			Kprintf("root hub addr %ld already in use, overwriting\n", (LONG)new_addr);
+
+		ctrl->devices[new_addr] = udev;
+		if (old_addr <= 127 && ctrl->devices[old_addr] == udev)
+			ctrl->devices[old_addr] = NULL;
+
+		ctrl->rootdev = new_addr;
+		udev->devnum = new_addr;
 		break;
 	case DeviceOutRequest | USB_REQ_SET_CONFIGURATION:
 		KprintfH("USB_REQ_SET_CONFIGURATION\n");

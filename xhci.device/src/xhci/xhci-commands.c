@@ -397,10 +397,25 @@ void xhci_reset_ep(struct usb_device *udev, int endpoint)
 {
     //TODO seems to fail... test and debug
     struct xhci_ctrl *ctrl = udev->controller;
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+
+    /* Fail and free any in-flight TDs so callers get a reply before reset. */
+    struct MinNode *n;
+    while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
+    {
+        struct xhci_td *td = (struct xhci_td *)n;
+        if (td->req)
+        {
+            if (td->rt_iso)
+                FreeVecPooled(ctrl->memoryPool, td->req);
+            else
+                io_reply_failed(td->req, IOERR_ABORTED);
+        }
+        xhci_td_release_trbs(td);
+        xhci_td_free(ctrl, td);
+    }
 
     Kprintf("Resetting EP %ld...\n", endpoint);
-    io_reply_failed(udev->ep_context[endpoint].current_req, UHIOERR_STALL);
-    udev->ep_context[endpoint].current_req = NULL;
     xhci_ep_set_resetting(udev, endpoint);
 
     //TODO due to the unwise decision to use endpoint numbers to track state, now we may need to send two resets...
@@ -423,17 +438,31 @@ void xhci_reset_ep(struct usb_device *udev, int endpoint)
 void xhci_abort_td(struct usb_device *udev, unsigned int endpoint)
 {
     struct xhci_ctrl *ctrl = udev->controller;
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
-    io_reply_failed(udev->ep_context[endpoint].current_req, UHIOERR_TIMEOUT);
-    udev->ep_context[endpoint].current_req = NULL;
-    xhci_ep_set_aborting(udev, endpoint);
-    //TODO due to the unwise decision to use endpoint numbers to track state, now we may need to send two stops...
-    // because we don't know which exactly to abort
-    xhci_queue_command(ctrl, 0, udev->slot_id, endpoint*2, TRB_STOP_RING, NULL, udev); // handle_abort_stop_ring
-    if(endpoint > 0)
+    /* Fail all active TDs on this endpoint */
+    struct MinNode *n;
+    while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
     {
-        //TODO also this is wrong for control endpoints > 0
-        xhci_queue_command(ctrl, 0, udev->slot_id, endpoint*2-1, TRB_STOP_RING, NULL, udev); // handle_abort_stop_ring
+        struct xhci_td *td = (struct xhci_td *)n;
+        if (td->req)
+        {
+            if (td->rt_iso)
+                FreeVecPooled(ctrl->memoryPool, td->req);
+            else
+                io_reply_failed(td->req, IOERR_ABORTED);
+        }
+        xhci_td_release_trbs(td);
+        xhci_td_free(ctrl, td);
+    }
+
+    xhci_ep_set_aborting(udev, endpoint);
+
+    /* Stop both directions where applicable */
+    xhci_queue_command(ctrl, 0, udev->slot_id, endpoint * 2, TRB_STOP_RING, NULL, udev); // handle_abort_stop_ring
+    if (endpoint > 0)
+    {
+        xhci_queue_command(ctrl, 0, udev->slot_id, endpoint * 2 - 1, TRB_STOP_RING, NULL, udev); // handle_abort_stop_ring
     }
 }
 

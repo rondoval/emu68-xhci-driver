@@ -17,10 +17,13 @@
 #include <debug.h>
 #include <xhci/usb.h>
 #include <devices/usbhardware.h>
+#include <minlist.h>
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>
+#include <xhci/xhci-events.h>
+#include <usb_glue.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -266,7 +269,7 @@ int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
 		return UHIOERR_HOSTERROR;
 	case EP_STATE_STOPPED:
 	case EP_STATE_RUNNING:
-		KprintfH("EP STATE RUNNING.\n");
+		// KprintfH("EP STATE RUNNING.\n");
 		break;
 	default:
 		Kprintf("ERROR unknown endpoint state for ep state=%ld\n", (LONG)ep_state);
@@ -345,6 +348,21 @@ static u32 xhci_td_remainder(struct xhci_ctrl *ctrl, int transferred,
 	return (total_packet_count - ((transferred + trb_buff_len) / maxp));
 }
 
+static inline unsigned int ring_capacity(const struct xhci_ring *ring)
+{
+	if (!ring || ring->num_segs == 0)
+		return 0;
+	return ring->num_segs * (TRBS_PER_SEGMENT - 1);
+}
+
+static int ring_has_room(struct xhci_ring *ring, unsigned int needed)
+{
+	unsigned int capacity = ring_capacity(ring);
+	if (capacity == 0)
+		return 0;
+	return ring->queued_trbs + needed <= capacity;
+}
+
 /**
  * Ring the doorbell of the End Point
  *
@@ -354,36 +372,48 @@ static u32 xhci_td_remainder(struct xhci_ctrl *ctrl, int transferred,
  * @param start_trb	pionter to the first TRB
  * Return: none
  */
-static void giveback_first_trb(struct usb_device *udev, int ep_index,
-							   int start_cycle,
-							   struct xhci_generic_trb *start_trb)
+static void prime_first_trb(int start_cycle, struct xhci_generic_trb *start_trb)
 {
-	struct xhci_ctrl *ctrl = udev->controller;
-
-	/*
-	 * Pass all the TRBs to the hardware at once and make sure this write
-	 * isn't reordered.
-	 */
 	if (start_cycle)
 		start_trb->field[3] |= LE32(start_cycle);
 	else
 		start_trb->field[3] &= LE32(~TRB_CYCLE);
 
 	xhci_flush_cache((uintptr_t)start_trb, sizeof(struct xhci_generic_trb));
+}
+
+static void giveback_first_trb(struct usb_device *udev, int ep_index,
+				   int start_cycle,
+				   struct xhci_generic_trb *start_trb)
+{
+	struct xhci_ctrl *ctrl = udev->controller;
+
+	prime_first_trb(start_cycle, start_trb);
 
 	/* Ringing EP doorbell here */
 	xhci_writel(&ctrl->dba->doorbell[udev->slot_id],
-				DB_VALUE(ep_index, 0));
+			DB_VALUE(ep_index, 0));
 
 	return;
+}
+
+void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info *giveback)
+{
+	if (!giveback || !giveback->start_trb)
+		return;
+
+	giveback_first_trb(udev, giveback->ep_index, giveback->start_cycle,
+			      giveback->start_trb);
 }
 
 /*
  * Common helper for bulk/int/isoc rings.
  */
 static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
-						  unsigned int timeout_ms, enum ep_state state,
-						  u32 trb_type_bits, BOOL enable_short_packet)
+				  unsigned int timeout_ms, enum ep_state state,
+				  u32 trb_type_bits, BOOL enable_short_packet,
+				  BOOL defer_doorbell,
+				  struct xhci_giveback_info *deferred_giveback)
 {
 	int num_trbs = 0;
 	struct xhci_generic_trb *start_trb;
@@ -402,6 +432,8 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	u64 addr;
 	int ret;
 	u32 trb_fields[4];
+	dma_addr_t *td_trb_addrs = NULL;
+	unsigned int td_trb_index = 0;
 	const int length = io->iouh_Length;
 	unsigned int ep = io->iouh_Endpoint & 0xf;
 	if (ep == 0)
@@ -417,6 +449,13 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	virt_dev = ctrl->devs[slot_id];
 	if (!virt_dev)
 		return UHIOERR_HOSTERROR;
+
+	if (deferred_giveback)
+	{
+		deferred_giveback->start_trb = NULL;
+		deferred_giveback->ep_index = ep_index;
+		deferred_giveback->start_cycle = 0;
+	}
 
 	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
 					 virt_dev->out_ctx->size);
@@ -467,10 +506,33 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		running_total += TRB_MAX_BUFF_SIZE;
 	}
 
+	unsigned int td_trb_count = (unsigned int)num_trbs;
+	if (!ring_has_room(ring, num_trbs + 1))
+	{
+		Kprintf("Ring full ep=%ld needed=%ld queued=%ld capacity=%ld\n",
+			   (LONG)ep,
+			   (LONG)num_trbs + 1,
+			   (LONG)ring->queued_trbs,
+			   (LONG)ring_capacity(ring));
+		io->iouh_DriverPrivate2 = XHCI_REQ_RING_BUSY;
+		return UHIOERR_RING_BUSY;
+	}
+
+	td_trb_addrs = AllocVecPooled(ctrl->memoryPool, td_trb_count * sizeof(dma_addr_t));
+	if (!td_trb_addrs)
+	{
+		Kprintf("Failed to alloc stream TD TRB list\n");
+		io->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
+		return UHIOERR_OUTOFMEMORY;
+	}
+
 	/* Prepare the ring (resumes from stopped state, sets dequeue pointers, etc.). */
 	ret = prepare_ring(ctrl, ring, LE32(ep_ctx->ep_info) & EP_STATE_MASK);
 	if (ret < 0)
+	{
+		FreeVecPooled(ctrl->memoryPool, td_trb_addrs);
 		return ret;
+	}
 
 	/* Defer toggling the cycle bit on the first TRB until the full TD is ready. */
 	start_trb = &ring->enqueue->generic;
@@ -552,6 +614,7 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 				 (ULONG)trb_fields[1], (ULONG)trb_fields[0], (ULONG)trb_fields[2], (ULONG)trb_fields[3], (LONG)num_trbs);
 
 		last_transfer_trb_addr = queue_trb(ctrl, ring, (num_trbs > 1), trb_fields);
+		td_trb_addrs[td_trb_index++] = last_transfer_trb_addr;
 
 		--num_trbs;
 
@@ -562,13 +625,28 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		trb_buff_len = min((length - running_total), TRB_MAX_BUFF_SIZE);
 	} while (running_total < length);
 
-	/* Hand the first TRB back to the controller once the TD is ready. */
-	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
-	KprintfH("waiting, last_trb_addr=%08lx%08lx start_cycle=%ld\n",
-			 (ULONG)upper_32_bits((u64)last_transfer_trb_addr),
-			 (ULONG)lower_32_bits((u64)last_transfer_trb_addr), (LONG)start_cycle);
+	xhci_ep_set_receiving(udev, io, state, td_trb_addrs, timeout_ms, ring, td_trb_count);
 
-	xhci_ep_set_receiving(udev, io, state, last_transfer_trb_addr, timeout_ms);
+	/* Hand the first TRB back to the controller once the TD is ready. */
+	if (defer_doorbell)
+	{
+		if (deferred_giveback)
+		{
+			/* First TD of a run: record TRB for later doorbell */
+			deferred_giveback->start_cycle = start_cycle;
+			deferred_giveback->start_trb = start_trb;
+		}
+		else
+		{
+			/* Additional TDs: make TRBs visible now but do not ring */
+			prime_first_trb(start_cycle, start_trb);
+		}
+	}
+	else
+	{
+		giveback_first_trb(udev, ep_index, start_cycle, start_trb);
+	}
+
 	return UHIOERR_NO_ERROR;
 }
 
@@ -591,8 +669,10 @@ int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 			 io->iouh_Data, io->iouh_Length);
 
 	return xhci_stream_tx(udev, io, timeout_ms,
-						  USB_DEV_EP_STATE_RECEIVING_BULK,
-						  TRB_TYPE(TRB_NORMAL), TRUE);
+				  USB_DEV_EP_STATE_RECEIVING_BULK,
+				  TRB_TYPE(TRB_NORMAL), TRUE,
+				  FALSE,
+				  NULL);
 }
 
 int xhci_int_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms)
@@ -604,8 +684,10 @@ int xhci_int_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int tim
 			 io->iouh_Data, io->iouh_Length);
 
 	return xhci_stream_tx(udev, io, timeout_ms,
-						  USB_DEV_EP_STATE_RECEIVING_INT,
-						  TRB_TYPE(TRB_NORMAL), TRUE);
+				  USB_DEV_EP_STATE_RECEIVING_INT,
+				  TRB_TYPE(TRB_NORMAL), TRUE,
+				  FALSE,
+				  NULL);
 }
 
 int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms)
@@ -617,21 +699,19 @@ int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int tim
 			 io->iouh_Data, io->iouh_Length, (LONG)io->iouh_Interval);
 
 	return xhci_stream_tx(udev, io, timeout_ms,
-						  USB_DEV_EP_STATE_RECEIVING_ISOC,
-						  TRB_TYPE(TRB_ISOC) | TRB_SIA, FALSE);
+				  USB_DEV_EP_STATE_RECEIVING_ISOC,
+				  TRB_TYPE(TRB_ISOC) | TRB_SIA, FALSE,
+				  FALSE,
+				  NULL);
 }
 
-int xhci_rt_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io)
+int xhci_rt_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, BOOL defer_doorbell, struct xhci_giveback_info *giveback)
 {
-	KprintfH("slot=%ld ep=%ld dir=%s buf=%lx len=%ld interval=%ld\n",
-			 (LONG)udev->slot_id,
-			 (LONG)(io->iouh_Endpoint & 0xf),
-			 (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-			 io->iouh_Data, io->iouh_Length, (LONG)io->iouh_Interval);
-
 	return xhci_stream_tx(udev, io, 0,
-						  USB_DEV_EP_STATE_RT_ISO_RUNNING,
-						  TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE);
+				  USB_DEV_EP_STATE_RT_ISO_RUNNING,
+				  TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE,
+				  defer_doorbell,
+				  giveback);
 }
 
 /**
@@ -658,6 +738,8 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	unsigned int slot_id = udev->slot_id;
 	unsigned int ep_index;
 	u32 trb_fields[4];
+	dma_addr_t *td_trb_addrs = NULL;
+	unsigned int td_trb_index = 0;
 	struct xhci_virt_device *virt_dev = ctrl->devs[slot_id];
 	struct xhci_ring *ep_ring;
 	u32 remainder;
@@ -702,11 +784,29 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	 * prepare_trasfer() as there in 'Linux' since we are not
 	 * maintaining multiple TDs/transfer at the same time.
 	 */
+	unsigned int td_trb_count = (unsigned int)num_trbs;
 	KprintfH("prepare_ring ep_state=%lx\n", (ULONG)(LE32(ep_ctx->ep_info) & EP_STATE_MASK));
+	if (!ring_has_room(ep_ring, num_trbs + 1))
+	{
+		Kprintf("Control ring full: needed %ld TRBs\n", (LONG)(num_trbs + 1));
+		io->iouh_DriverPrivate2 = XHCI_REQ_RING_BUSY;
+		return UHIOERR_RING_BUSY;
+	}
+
+	td_trb_addrs = AllocVecPooled(ctrl->memoryPool, td_trb_count * sizeof(dma_addr_t));
+	if (!td_trb_addrs)
+	{
+		Kprintf("Failed to alloc control TD TRB list\n");
+		io->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
+		return UHIOERR_OUTOFMEMORY;
+	}
 	ret = prepare_ring(ctrl, ep_ring, LE32(ep_ctx->ep_info) & EP_STATE_MASK);
 
 	if (ret != UHIOERR_NO_ERROR)
+	{
+		FreeVecPooled(ctrl->memoryPool, td_trb_addrs);
 		return ret;
+	}
 
 	/*
 	 * Don't give the first TRB to the hardware (by toggling the cycle bit)
@@ -746,7 +846,9 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	trb_fields[3] = field;
 	KprintfH("setup TRB fields: %08lx %08lx %08lx %08lx\n",
 			 (ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
-	queue_trb(ctrl, ep_ring, TRUE, trb_fields);
+	ULONG setup_trb = queue_trb(ctrl, ep_ring, TRUE, trb_fields);
+	KprintfH("setup TRB addr: %lx\n", (ULONG)setup_trb);
+	td_trb_addrs[td_trb_index++] = setup_trb;
 
 	/* Re-initializing field to zero */
 	field = 0;
@@ -779,7 +881,9 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		xhci_flush_cache((uintptr_t)buf_64, length); // TODO dma_map should not realocate buffer... then revert to buffer
 		KprintfH("data TRB fields: %08lx %08lx %08lx %08lx\n",
 				 (ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
-		queue_trb(ctrl, ep_ring, TRUE, trb_fields);
+		ULONG data_trb = queue_trb(ctrl, ep_ring, TRUE, trb_fields);
+		KprintfH("data TRB addr: %lx\n", (ULONG)data_trb);
+		td_trb_addrs[td_trb_index++] = data_trb;
 	}
 
 	/*
@@ -804,9 +908,12 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	KprintfH("status TRB fields: %08lx %08lx %08lx %08lx\n",
 			 (ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
 	dma_addr_t event_trb = queue_trb(ctrl, ep_ring, FALSE, trb_fields);
+	KprintfH("event TRB addr: %lx\n", (ULONG)event_trb);
+	td_trb_addrs[td_trb_index++] = event_trb;
+
+	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING_CONTROL, td_trb_addrs, timeout_ms, ep_ring, td_trb_count);
 
 	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
 
-	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING_CONTROL, event_trb, timeout_ms);
 	return UHIOERR_NO_ERROR;
 }

@@ -7,6 +7,8 @@
 
 struct XHCIUnit;
 
+#define XHCI_REQ_RING_BUSY ((APTR)~0UL)
+
 /* Transfer helpers */
 int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io);

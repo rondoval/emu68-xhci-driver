@@ -22,38 +22,55 @@ enum ep_state
     USB_DEV_EP_STATE_RT_ISO_STOPPING
 };
 
+struct xhci_ring; /* forward declaration */
+
+struct xhci_td
+{
+    struct MinNode node;            /* linkage in active TD list */
+    struct IOUsbHWReq *req;         /* owning request */
+    dma_addr_t completion_trb;      /* TRB address we expect a completion for */
+    ULONG length;                   /* total length for completion accounting */
+    ULONG deadline_us;              /* absolute deadline in usec, 0 means no timeout */
+    BOOL rt_iso;                    /* true if this TD is part of RT ISO pipeline */
+    struct xhci_ring *ring;         /* ring that owns the queued TRBs */
+    unsigned int trb_count;         /* number of TRBs consumed by this TD */
+    dma_addr_t *trb_addrs;          /* DMA addresses for every TRB in this TD */
+};
+
 struct ep_context
 {
-    //TODO would be nice to schedule multiple TDs at once
-    struct MinList req_list; /* list of pending requests */
+    struct MinList pending_reqs; /* list of pending requests */
+    struct MinList active_tds;   /* list of in-flight TDs */
 
-    struct IOUsbHWReq *current_req; /* current request being processed */
-    ULONG timeout_stamp;            /* deadline of the request */
-    BOOL timeout_active;            /* whether timeout_stamp is valid */
     enum ep_state state;
-
-    dma_addr_t trb_addr;
-    ULONG trb_length;
-    ULONG trb_available_length;
 
     /* RT ISO data */
     /*
      * The idea here is that if this is filled, the event handlers will use
      * hooks to get more data.
-     * So this is instead of current_req/req_list.
      * As such, we will fail an attempt to enter RT ISO mode if there are requests ongoing.
      */
     struct IOUsbHWRTIso * rt_req;
-    struct IOUsbHWBufferReq rt_buffer_req;
+    struct IOUsbHWReq *rt_template_req; /* template for cloning per TD */
+    //TODO remove?
+
+    /* RT ISO frame tracking (monotonic frame number modulo 2^16) */
+    ULONG rt_next_frame;
+    /* Cache the last RT ISO buffer so hooks can omit repeating it */
+    APTR rt_last_buffer;
+    ULONG rt_last_filled;
 };
 
 struct usb_device; /* forward declaration */
 struct xhci_ctrl;  /* forward declaration */
 void xhci_ep_set_failed(struct usb_device *udev, int endpoint);
 void xhci_ep_set_idle(struct usb_device *udev, int endpoint);
-void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t trb_addr, ULONG timeout_ms);
+void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t *trb_addrs, ULONG timeout_ms, struct xhci_ring *ring, unsigned int trb_count);
 void xhci_ep_set_resetting(struct usb_device *udev, int endpoint);
 void xhci_ep_set_aborting(struct usb_device *udev, int endpoint);
+
+void xhci_td_release_trbs(struct xhci_td *td);
+void xhci_td_free(struct xhci_ctrl *ctrl, struct xhci_td *td);
 
 BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl);
 void xhci_process_event_timeouts(struct xhci_ctrl *ctrl);
