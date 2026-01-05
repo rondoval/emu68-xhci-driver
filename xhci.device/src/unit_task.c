@@ -169,7 +169,7 @@ int UnitTaskStart(struct XHCIUnit *unit)
     *--stack = (ULONG)unit;
     task->tc_SPReg = stack;
 
-    task->tc_Node.ln_Name = "xhci rx/tx";
+    task->tc_Node.ln_Name = "XHCI USB driver";
     task->tc_Node.ln_Type = NT_TASK;
     task->tc_Node.ln_Pri = UNIT_TASK_PRIORITY;
 

@@ -91,6 +91,7 @@ static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr
     {
         _NewMinList(&udev->ep_context[i].pending_reqs);
         _NewMinList(&udev->ep_context[i].active_tds);
+        InitSemaphore(&udev->ep_context[i].active_tds_lock);
     }
 
     ctrl->devices[addr] = udev;
@@ -222,9 +223,10 @@ static inline BOOL minlist_empty(const struct MinList *list)
     return list->mlh_Head == (struct MinNode *)&list->mlh_Tail;
 }
 
-static ULONG rt_iso_inflight_bytes(const struct ep_context *ep_ctx)
+static ULONG rt_iso_inflight_bytes(struct ep_context *ep_ctx)
 {
     ULONG total = 0;
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     const struct MinNode *n = ep_ctx->active_tds.mlh_Head;
     while (n && n->mln_Succ)
     {
@@ -233,6 +235,7 @@ static ULONG rt_iso_inflight_bytes(const struct ep_context *ep_ctx)
             total += td->length;
         n = n->mln_Succ;
     }
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
     return total;
 }
 
@@ -258,6 +261,7 @@ static void enqueue_pending_request_front(struct ep_context *ep_ctx, struct IOUs
 
 static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
 {
+    Kprintf("tearing down EP context\n");
     struct MinNode *node;
 
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
@@ -268,6 +272,7 @@ static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
         io_reply_failed(req, IOERR_ABORTED);
     }
 
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     while ((node = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)node;
@@ -280,11 +285,17 @@ static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
         }
         FreeVecPooled(ctrl->memoryPool, td);
     }
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
 
     if (ep_ctx->rt_template_req)
     {
         FreeVecPooled(ctrl->memoryPool, ep_ctx->rt_template_req);
         ep_ctx->rt_template_req = NULL;
+    }
+    if (ep_ctx->rt_stop_pending)
+    {
+        io_reply_failed(ep_ctx->rt_stop_pending, IOERR_ABORTED);
+        ep_ctx->rt_stop_pending = NULL;
     }
     ep_ctx->rt_req = NULL;
 }
@@ -815,6 +826,7 @@ int usb_glue_add_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 
     ep_ctx->rt_req = (struct IOUsbHWRTIso *)io->iouh_Data;
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
+    ep_ctx->rt_stop_pending = NULL;
     ep_ctx->rt_last_buffer = NULL;
     ep_ctx->rt_last_filled = 0;
 
@@ -1008,6 +1020,21 @@ void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint)
     xhci_ep_schedule_rt_iso_run(udev, endpoint);
 }
 
+void usb_glue_notify_rt_iso_stopped(struct usb_device *udev, int endpoint)
+{
+    if (!udev || endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
+        return;
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    struct IOUsbHWReq *stop_req = ep_ctx->rt_stop_pending;
+
+    if (!stop_req)
+        return;
+
+    ep_ctx->rt_stop_pending = NULL;
+    io_reply_data(udev, stop_req, UHIOERR_NO_ERROR, 0);
+}
+
 int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
     Kprintf("Starting RT ISO transfer\n");
@@ -1064,10 +1091,32 @@ int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (ep_ctx->rt_req != io->iouh_Data)
         goto badparams;
 
-    ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPING;
+    if (ep_ctx->rt_stop_pending)
+    {
+        Kprintf("STOPRTISO already pending\n");
+        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
+        return COMMAND_PROCESSED;
+    }
 
+    ep_ctx->rt_stop_pending = io;
     io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-    return COMMAND_PROCESSED;
+
+    BOOL no_inflight;
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
+    no_inflight = minlist_empty(&ep_ctx->active_tds);
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
+
+    if (no_inflight)
+    {
+        ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
+        usb_glue_notify_rt_iso_stopped(udev, endpoint);
+    }
+    else
+    {
+        ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPING;
+    }
+
+    return COMMAND_SCHEDULED;
 
 badparams:
     Kprintf("bad params\n");

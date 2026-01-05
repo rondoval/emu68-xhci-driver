@@ -401,6 +401,7 @@ void xhci_reset_ep(struct usb_device *udev, int endpoint)
 
     /* Fail and free any in-flight TDs so callers get a reply before reset. */
     struct MinNode *n;
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)n;
@@ -414,6 +415,7 @@ void xhci_reset_ep(struct usb_device *udev, int endpoint)
         xhci_td_release_trbs(td);
         xhci_td_free(ctrl, td);
     }
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
 
     Kprintf("Resetting EP %ld...\n", endpoint);
     xhci_ep_set_resetting(udev, endpoint);
@@ -442,6 +444,7 @@ void xhci_abort_td(struct usb_device *udev, unsigned int endpoint)
 
     /* Fail all active TDs on this endpoint */
     struct MinNode *n;
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)n;
@@ -455,6 +458,7 @@ void xhci_abort_td(struct usb_device *udev, unsigned int endpoint)
         xhci_td_release_trbs(td);
         xhci_td_free(ctrl, td);
     }
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
 
     xhci_ep_set_aborting(udev, endpoint);
 

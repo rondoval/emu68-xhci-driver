@@ -4,6 +4,7 @@
 #include <exec/lists.h>
 #include <exec/types.h>
 #include <compat.h>
+#include <exec/semaphores.h>
 #include <devices/usbhardware.h>
 
 enum ep_state
@@ -41,6 +42,7 @@ struct ep_context
 {
     struct MinList pending_reqs; /* list of pending requests */
     struct MinList active_tds;   /* list of in-flight TDs */
+    struct SignalSemaphore active_tds_lock; /* protects active_tds */
 
     enum ep_state state;
 
@@ -53,6 +55,9 @@ struct ep_context
     struct IOUsbHWRTIso * rt_req;
     struct IOUsbHWReq *rt_template_req; /* template for cloning per TD */
     //TODO remove?
+
+    /* Pending STOPRTISO command to reply once the pipe is fully stopped */
+    struct IOUsbHWReq *rt_stop_pending;
 
     /* RT ISO frame tracking (monotonic frame number modulo 2^16) */
     ULONG rt_next_frame;

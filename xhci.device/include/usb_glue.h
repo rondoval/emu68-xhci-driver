@@ -20,6 +20,7 @@ int usb_glue_add_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_rem_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io);
+void usb_glue_notify_rt_iso_stopped(struct usb_device *udev, int endpoint);
 
 /* Root hub bus ops */
 int usb_glue_bus_reset(struct XHCIUnit *unit);

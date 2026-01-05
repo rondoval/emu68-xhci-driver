@@ -22,6 +22,7 @@
 #include <compat.h>
 #include <debug.h>
 #include <usb_glue.h>
+#include <exec/semaphores.h>
 
 #include <xhci/usb.h>
 #include <devices/usbhardware.h>
@@ -68,12 +69,15 @@ static void td_free_all(struct usb_device *udev, struct ep_context *ep_ctx)
 {
     struct xhci_ctrl *ctrl = udev->controller;
     struct MinNode *n;
+
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)n;
         xhci_td_release_trbs(td);
         xhci_td_free(ctrl, td);
     }
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
 }
 
 static struct xhci_td *td_find_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr)
@@ -118,6 +122,7 @@ static void td_remove(struct ep_context *ep_ctx, struct xhci_td *td)
 static void ep_refresh_timeout(struct ep_context *ep_ctx)
 {
     ULONG earliest = 0;
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     struct MinNode *n = ep_ctx->active_tds.mlh_Head;
     while (n && n->mln_Succ)
     {
@@ -126,6 +131,7 @@ static void ep_refresh_timeout(struct ep_context *ep_ctx)
             earliest = td->deadline_us;
         n = n->mln_Succ;
     }
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
 }
 
 void xhci_td_release_trbs(struct xhci_td *td)
@@ -245,7 +251,9 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
 
     td->node.mln_Pred = td->node.mln_Succ = NULL;   
 
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     AddTailMinList(&ep_ctx->active_tds, (struct MinNode *)td);
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
 
     ep_ctx->state = state;
 
@@ -447,6 +455,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
             /* Find earliest-expired TD */
             struct xhci_td *expired = NULL;
             ULONG earliest = 0;
+            ObtainSemaphore(&ep_ctx->active_tds_lock);
             struct MinNode *n = ep_ctx->active_tds.mlh_Head;
             while (n && n->mln_Succ)
             {
@@ -464,6 +473,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
 
             if (!expired)
             {
+                ReleaseSemaphore(&ep_ctx->active_tds_lock);
                 ep_refresh_timeout(ep_ctx);
                 continue;
             }
@@ -478,6 +488,8 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
                 FreeVecPooled(ctrl->memoryPool, expired_req);
             xhci_td_free(ctrl, expired);
             ep_refresh_timeout(ep_ctx);
+
+            ReleaseSemaphore(&ep_ctx->active_tds_lock);
 
             if (minlist_is_empty(&ep_ctx->active_tds))
                 xhci_ep_set_idle(udev, ep);
@@ -559,6 +571,7 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
     ULONG status;
     int act_len;
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->trans_event.transfer_len));
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
 
     record_transfer_result(event, length, &status, &act_len);
     KprintfH("result status=%ld act_len=%ld comp=%ld\n", (LONG)status, (LONG)act_len, (LONG)comp);
@@ -586,17 +599,29 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
             CallHookPkt(hook, ep_ctx->rt_req, &rt_buffer_req);
         }
 
+        /* RT ISO TDs clone IO requests; free them after completion to avoid leaks. */
+        if (req)
+        {
+            FreeVecPooled(ctrl->memoryPool, req);
+            td->req = NULL;
+        }
+
         td_remove(ep_ctx, td);
         xhci_td_free(ctrl, td);
         ep_refresh_timeout(ep_ctx);
 
+        int endpoint = req ? (req->iouh_Endpoint & 0xf) : 0;
+
+        ReleaseSemaphore(&ep_ctx->active_tds_lock);
+
         if (ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
         {
-            xhci_ep_schedule_rt_iso(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+            xhci_ep_schedule_rt_iso(udev, endpoint);
         }
         else if (minlist_is_empty(&ep_ctx->active_tds))
         {
             ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
+            usb_glue_notify_rt_iso_stopped(udev, endpoint);
         }
         return;
     }
@@ -619,6 +644,8 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
     xhci_td_free(ctrl, td);
     ep_refresh_timeout(ep_ctx);
 
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
+
     if (minlist_is_empty(&ep_ctx->active_tds))
         xhci_ep_set_idle(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
     else
@@ -640,7 +667,9 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
              (ULONG)upper_32_bits(trb_addr),
              (ULONG)lower_32_bits(trb_addr));
 
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     struct xhci_td *td = td_find_by_trb(ep_ctx, trb_addr);
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
     if (!td)
     {
         /* Late/stale event: if EP not actively receiving, just ack and continue. */
@@ -691,15 +720,31 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     xhci_dump_ep_ctx("xhci_bulk_tx: ", endpoint, xhci_get_ep_ctx(ctrl, out_ctx, TRB_TO_EP_INDEX(flags)));
 #endif
 
-        /* Legacy trb_addr check removed; TD lookup enforces matching. */
-
     KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
              (ULONG)flags,
              (ULONG)LE32(event->trans_event.transfer_len),
              (ULONG)upper_32_bits(trb_addr),
              (ULONG)lower_32_bits(trb_addr));
 
+    /* Isoch OUT rings signal underrun/overrun with null TRB pointers. Do not treat those as lost TDs. */
+    int comp = GET_COMP_CODE(LE32(event->trans_event.transfer_len));
+    if ((comp == COMP_UNDERRUN || comp == COMP_OVERRUN) && trb_addr == 0)
+    {
+        Kprintf("Ring %s on EP %ld state=%ld\n",
+                (comp == COMP_UNDERRUN) ? "underrun" : "overrun",
+                (LONG)endpoint, (LONG)ep_ctx->state);
+
+        xhci_acknowledge_event(ctrl);
+
+        if (ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
+            xhci_ep_schedule_rt_iso(udev, endpoint);
+
+        return;
+    }
+
+    ObtainSemaphore(&ep_ctx->active_tds_lock);
     struct xhci_td *td = td_find_by_trb(ep_ctx, trb_addr);
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
     if (!td)
     {
         Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %ld\n",
