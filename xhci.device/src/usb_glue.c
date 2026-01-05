@@ -289,32 +289,6 @@ static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
     ep_ctx->rt_req = NULL;
 }
 
-static int queue_request_if_busy(struct usb_device *udev, struct IOUsbHWReq *io)
-{
-    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    if (endpoint >= USB_MAXENDPOINTS)
-    {
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-        return -1;
-    }
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-
-    if (ep_ctx->state == USB_DEV_EP_STATE_IDLE)
-        return 0;
-
-    if (ep_ctx->state == USB_DEV_EP_STATE_FAILED ||
-        ep_ctx->state == USB_DEV_EP_STATE_RESETTING ||
-        ep_ctx->state == USB_DEV_EP_STATE_ABORTING)
-    {
-        enqueue_pending_request(ep_ctx, io, "ep-not-ready");
-        return 1;
-    }
-
-    /* Allow pipelining; lower layers will requeue if the ring is full */
-    return 0;
-}
-
 static int handle_ring_busy(struct usb_device *udev, struct IOUsbHWReq *io)
 {
     unsigned int endpoint = io->iouh_Endpoint & 0x0F;
@@ -650,12 +624,6 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    int queue_state = queue_request_if_busy(udev, io);
-    if (queue_state > 0)
-        return COMMAND_SCHEDULED;
-    if (queue_state < 0)
-        return COMMAND_PROCESSED;
-
     struct UsbSetupData *setup = &io->iouh_SetupData;
 
     if (setup->bRequest == USB_REQ_SET_ADDRESS && (setup->bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD)
@@ -692,15 +660,6 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    // Log OUT control data before scheduling TRBs (for EP0 only)
-    if ((io->iouh_Endpoint & 0xf) == 0 && io->iouh_Length > 0 && io->iouh_Data && (io->iouh_SetupData.bmRequestType & USB_DIR_IN) == 0)
-    {
-        KprintfH("CONTROL OUT DATA (pre-TRB): ");
-        unsigned char *data = (unsigned char *)io->iouh_Data;
-        for (unsigned int i = 0; i < io->iouh_Length && i < 64; ++i)
-            PrintPistorm("%02lx ", data[i]);
-        PrintPistorm("\n");
-    }
     int ret = xhci_ctrl_tx(udev, io, timeout_ms);
     if (ret == UHIOERR_RING_BUSY)
         return handle_ring_busy(udev, io);
@@ -726,12 +685,6 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     KprintfH("dev=%ld addr=%ld ep=%ld dir=%s len=%ld flags=%lx tmo=%ld\n",
              (ULONG)udev, (ULONG)udev->devnum, io->iouh_Endpoint & 0x0F, (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
              (LONG)io->iouh_Length, (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout);
-
-    int queue_state = queue_request_if_busy(udev, io);
-    if (queue_state > 0)
-        return COMMAND_SCHEDULED;
-    if (queue_state < 0)
-        return COMMAND_PROCESSED;
 
     unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
@@ -779,12 +732,6 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
              (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
              (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout, (LONG)io->iouh_MaxPktSize);
 
-    int queue_state = queue_request_if_busy(udev, io);
-    if (queue_state > 0)
-        return COMMAND_SCHEDULED;
-    if (queue_state < 0)
-        return COMMAND_PROCESSED;
-
     unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
@@ -824,12 +771,6 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
              (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
              (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
              (ULONG)io->iouh_Flags, (LONG)io->iouh_MaxPktSize);
-
-    int queue_state = queue_request_if_busy(udev, io);
-    if (queue_state > 0)
-        return COMMAND_SCHEDULED;
-    if (queue_state < 0)
-        return COMMAND_PROCESSED;
 
     unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
@@ -923,7 +864,7 @@ int usb_glue_rem_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED && ep_ctx->state != USB_DEV_EP_STATE_IDLE && ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPING)
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
     {
         Kprintf("EP not in RT_ISO_STOPPED/IDLE state. Current state: %ld\n", ep_ctx->state);
         io->iouh_Req.io_Error = UHIOERR_HOSTERROR;

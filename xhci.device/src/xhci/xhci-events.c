@@ -252,25 +252,6 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
     ep_refresh_timeout(ep_ctx);
 }
 
-void xhci_ep_set_cont_iso(struct usb_device *udev, int endpoint)
-{
-    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
-    {
-        Kprintf("Invalid endpoint %ld\n", (LONG)endpoint);
-        return;
-    }
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
-    {
-        Kprintf("EP %ld not RT_ISO_RUNNING (state %ld)\n", (LONG)endpoint, (LONG)ep_ctx->state);
-        xhci_ep_set_failed(udev, endpoint);
-        return;
-    }
-
-    xhci_ep_schedule_rt_iso(udev, endpoint);
-}
 
 void xhci_ep_set_resetting(struct usb_device *udev, int endpoint)
 {
@@ -566,7 +547,7 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
             (ULONG)LE32(event->generic.field[3]));
 
     xhci_acknowledge_event(udev->controller);
-    xhci_ep_set_failed(udev, TRB_TO_ENDPOINT(LE32(event->trans_event.flags)));
+    // xhci_ep_set_failed(udev, TRB_TO_ENDPOINT(LE32(event->trans_event.flags)));
 }
 
 /* Shared TD completion helper for control/bulk/int/isoc (non-RT) and RT ISO hooks. */
@@ -594,29 +575,29 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
 
     if (td->rt_iso)
     {
-        if (ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
-        {
-            td_remove(ep_ctx, td);
-            xhci_td_free(ctrl, td);
-            if (minlist_is_empty(&ep_ctx->active_tds))
-                xhci_ep_set_idle(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
-            return;
-        }
-
-        struct IOUsbHWBufferReq rt_buffer_req;
-        rt_buffer_req.ubr_Buffer = req->iouh_Data;
-        rt_buffer_req.ubr_Frame = 0; //TODO set frame number?
-        rt_buffer_req.ubr_Length = act_len;
-        rt_buffer_req.ubr_Flags = 0;
         struct Hook *hook = (req && req->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InDoneHook : ep_ctx->rt_req->urti_OutDoneHook;
         if (hook)
+        {
+            struct IOUsbHWBufferReq rt_buffer_req;
+            rt_buffer_req.ubr_Buffer = req->iouh_Data;
+            rt_buffer_req.ubr_Frame = 0; //TODO set frame number?
+            rt_buffer_req.ubr_Length = act_len;
+            rt_buffer_req.ubr_Flags = 0;
             CallHookPkt(hook, ep_ctx->rt_req, &rt_buffer_req);
+        }
 
         td_remove(ep_ctx, td);
         xhci_td_free(ctrl, td);
         ep_refresh_timeout(ep_ctx);
 
-        xhci_ep_set_cont_iso(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+        if (ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
+        {
+            xhci_ep_schedule_rt_iso(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+        }
+        else if (minlist_is_empty(&ep_ctx->active_tds))
+        {
+            ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
+        }
         return;
     }
 
@@ -667,12 +648,12 @@ static void ep_handle_receiving_control(struct usb_device *udev, struct ep_conte
         {
             KprintfH("Stale control event for TRB %08lx%08lx on EP %ld state=%ld\n",
                      (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (LONG)endpoint, (LONG)ep_ctx->state);
-            xhci_acknowledge_event(ctrl);
-            return;
         }
-
-        Kprintf("No TD found for TRB %08lx%08lx on EP %ld (state=%ld)\n",
-                (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (LONG)endpoint, (LONG)ep_ctx->state);
+        else
+        {
+            Kprintf("No TD found for TRB %08lx%08lx on EP %ld (state=%ld)\n",
+                    (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (LONG)endpoint, (LONG)ep_ctx->state);
+        }
         xhci_acknowledge_event(ctrl);
         return;
     }
