@@ -30,8 +30,8 @@
 #endif
 
 /* Everything is aribtrary */
-#define USB_ALTSETTINGALLOC		8
-#define USB_MAXINTERFACES		8
+#define USB_ALTSETTINGALLOC		16
+#define USB_MAXINTERFACES		16
 #define USB_MAXENDPOINTS		16
 #define USB_MAXCHILDREN			8	/* This is arbitrary */
 

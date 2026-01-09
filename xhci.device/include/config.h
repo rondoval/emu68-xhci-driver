@@ -18,7 +18,7 @@
 #endif
 
 #define STACK_SIZE 65535
-#define UNIT_TASK_PRIORITY 10
+#define UNIT_TASK_PRIORITY 15
 #define UNIT_TASK_POLL_DELAY_MS 100
 
 #endif
