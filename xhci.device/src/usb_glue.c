@@ -152,6 +152,123 @@ static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUs
 #endif
 }
 
+/* Issue an internal CLEAR_FEATURE(ENDPOINT_HALT) to endpoint (by ep_index) on udev. Fire-and-forget. */
+void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index)
+{
+    if (!udev || !udev->controller)
+        return;
+
+    /* Convert ep_index (DCI-1) to USB endpoint address (number + direction bit). */
+    UBYTE ep_addr = 0;
+    if (ep_index != 0)
+    {
+        u32 ep = EP_INDEX_TO_ENDPOINT(ep_index);
+        BOOL out = (ep_index & 0x1) != 0;
+        ep_addr = (UBYTE)(ep | (out ? 0 : USB_DIR_IN));
+    }
+
+    struct xhci_ctrl *ctrl = udev->controller;
+    struct IOUsbHWReq *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
+    if (!io)
+        return;
+
+    _memset(io, 0, sizeof(*io));
+    io->iouh_Req.io_Command = UHCMD_CONTROLXFER;
+    io->iouh_Req.io_Flags = IOF_QUICK; /* no reply port */
+    io->iouh_DriverPrivate1 = (APTR)0xDEAD0001; /* magic tag to free on completion */
+    io->iouh_DriverPrivate2 = (APTR)ctrl;
+
+    io->iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT;
+    io->iouh_SetupData.bRequest = USB_REQ_CLEAR_FEATURE;
+    io->iouh_SetupData.wValue = cpu_to_le16(USB_ENDPOINT_HALT);
+    io->iouh_SetupData.wIndex = cpu_to_le16(ep_addr);
+    io->iouh_SetupData.wLength = cpu_to_le16(0);
+
+    io->iouh_DevAddr = udev->devnum;
+    io->iouh_MaxPktSize = 8U << udev->maxpacketsize0;
+
+    /* Split/hub routing if available from udev */
+    io->iouh_SplitHubAddr = (udev->tt_slot & 0x7F);
+    io->iouh_SplitHubPort = (udev->tt_port & 0xFF);
+    if (udev->speed == USB_SPEED_LOW)
+        io->iouh_Flags |= UHFF_LOWSPEED;
+    else if (udev->speed == USB_SPEED_HIGH)
+        io->iouh_Flags |= UHFF_HIGHSPEED;
+
+    /* Queue it; on failure free immediately. */
+    if (xhci_ctrl_tx(udev, io, 1000) != UHIOERR_NO_ERROR)
+    {
+        FreeVecPooled(ctrl->memoryPool, io);
+    }
+}
+
+static void usb_glue_queue_clear_tt(struct usb_device *hub, u16 devinfo, u16 tt_port)
+{
+    if (!hub || !hub->controller)
+        return;
+
+    struct xhci_ctrl *ctrl = hub->controller;
+    struct IOUsbHWReq *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
+    if (!io)
+        return;
+
+    _memset(io, 0, sizeof(*io));
+    io->iouh_Req.io_Command = UHCMD_CONTROLXFER;
+    io->iouh_Req.io_Flags = IOF_QUICK;
+    io->iouh_DriverPrivate1 = (APTR)0xDEAD0001; /* magic tag to free on completion */
+    io->iouh_DriverPrivate2 = (APTR)ctrl;
+
+    io->iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+    io->iouh_SetupData.bRequest = HUB_CLEAR_TT_BUFFER;
+    io->iouh_SetupData.wValue = cpu_to_le16(devinfo);
+    io->iouh_SetupData.wIndex = cpu_to_le16(tt_port);
+    io->iouh_SetupData.wLength = cpu_to_le16(0);
+
+    io->iouh_DevAddr = hub->devnum;
+    io->iouh_MaxPktSize = 8U << hub->maxpacketsize0;
+
+    if (hub->speed == USB_SPEED_LOW)
+        io->iouh_Flags |= UHFF_LOWSPEED;
+    else if (hub->speed == USB_SPEED_HIGH)
+        io->iouh_Flags |= UHFF_HIGHSPEED;
+
+    if (xhci_ctrl_tx(hub, io, 1000) != UHIOERR_NO_ERROR)
+    {
+        FreeVecPooled(ctrl->memoryPool, io);
+    }
+}
+
+/* Issue an internal CLEAR_TT_BUFFER to the parent hub for control/bulk endpoints behind a TT. */
+void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, int ep_type)
+{
+    if (!udev || !udev->parent)
+        return;
+
+    /* Only applies to control or bulk endpoints behind a TT. */
+    if (ep_type != USB_ENDPOINT_XFER_CONTROL && ep_type != USB_ENDPOINT_XFER_BULK)
+        return;
+
+    if (!udev->tt_port)
+        return;
+
+    struct usb_device *hub = udev->parent;
+
+    u16 epnum = (u16)EP_INDEX_TO_ENDPOINT(ep_index);
+    BOOL out = (ep_index & 0x1) != 0;
+
+    u16 devinfo = epnum;
+    devinfo |= ((u16)udev->devnum) << 4;
+    devinfo |= ((u16)ep_type) << 11;
+    if (!out)
+        devinfo |= 1 << 15;
+
+    usb_glue_queue_clear_tt(hub, devinfo, (u16)udev->tt_port);
+
+    /* Control endpoints require clearing both directions. */
+    if (ep_type == USB_ENDPOINT_XFER_CONTROL)
+        usb_glue_queue_clear_tt(hub, devinfo ^ (1U << 15), (u16)udev->tt_port);
+}
+
 static struct usb_device *resolve_parent(struct XHCIUnit *unit, UWORD addr)
 {
     if (addr > 127)
@@ -1356,6 +1473,16 @@ void io_reply_failed(struct IOUsbHWReq *io, int err)
     {
         Kprintf("err=%ld\n", (LONG)err);
         io->iouh_Req.io_Error = err;
+
+        /* Internal, reply-less requests (IOF_QUICK + magic tag) */
+        if (io->iouh_DriverPrivate1 == (APTR)0xDEAD0001)
+        {
+            struct xhci_ctrl *ctrl = (struct xhci_ctrl *)io->iouh_DriverPrivate2;
+            if (ctrl)
+                FreeVecPooled(ctrl->memoryPool, io);
+            return;
+        }
+
         ReplyMsg((struct Message *)io);
     }
 }
@@ -1372,6 +1499,16 @@ void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULON
         parse_control_msg(udev, io);
 
     KprintfH("err=%ld actual=%ld\n", (LONG)err, (LONG)actual);
+
+    /* Internal, reply-less requests (IOF_QUICK + magic tag) */
+    if (io->iouh_DriverPrivate1 == (APTR)0xDEAD0001)
+    {
+        struct xhci_ctrl *ctrl = (struct xhci_ctrl *)io->iouh_DriverPrivate2;
+        if (ctrl)
+            FreeVecPooled(ctrl->memoryPool, io);
+        return;
+    }
+
     ReplyMsg((struct Message *)io);
 }
 

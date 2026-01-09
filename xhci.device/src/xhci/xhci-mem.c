@@ -159,6 +159,31 @@ static void xhci_free_container_ctx(struct xhci_ctrl *ctrl,
 	FreeVecPooled(ctrl->memoryPool, ctx);
 }
 
+void xhci_free_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
+{
+	int i;
+	struct xhci_virt_device *virt_dev;
+
+	virt_dev = ctrl->devs[slot_id];
+	if (!virt_dev)
+		return;
+
+	ctrl->dcbaa->dev_context_ptrs[slot_id] = 0;
+
+	for (i = 0; i < 31; ++i)
+		if (virt_dev->eps[i].ring)
+			xhci_ring_free(ctrl, virt_dev->eps[i].ring);
+
+	if (virt_dev->in_ctx)
+		xhci_free_container_ctx(ctrl, virt_dev->in_ctx);
+	if (virt_dev->out_ctx)
+		xhci_free_container_ctx(ctrl, virt_dev->out_ctx);
+
+	FreeVecPooled(ctrl->memoryPool, virt_dev);
+	/* make sure we are pointing to NULL */
+	ctrl->devs[slot_id] = NULL;
+}
+
 /**
  * frees the virtual devices for "xhci_ctrl" pointer passed
  *
@@ -167,9 +192,7 @@ static void xhci_free_container_ctx(struct xhci_ctrl *ctrl,
  */
 static void xhci_free_virt_devices(struct xhci_ctrl *ctrl)
 {
-	int i;
 	int slot_id;
-	struct xhci_virt_device *virt_dev;
 
 	/*
 	 * refactored here to loop through all virt_dev
@@ -177,24 +200,7 @@ static void xhci_free_virt_devices(struct xhci_ctrl *ctrl)
 	 */
 	for (slot_id = 0; slot_id < MAX_HC_SLOTS; slot_id++)
 	{
-		virt_dev = ctrl->devs[slot_id];
-		if (!virt_dev)
-			continue;
-
-		ctrl->dcbaa->dev_context_ptrs[slot_id] = 0;
-
-		for (i = 0; i < 31; ++i)
-			if (virt_dev->eps[i].ring)
-				xhci_ring_free(ctrl, virt_dev->eps[i].ring);
-
-		if (virt_dev->in_ctx)
-			xhci_free_container_ctx(ctrl, virt_dev->in_ctx);
-		if (virt_dev->out_ctx)
-			xhci_free_container_ctx(ctrl, virt_dev->out_ctx);
-
-		FreeVecPooled(ctrl->memoryPool, virt_dev);
-		/* make sure we are pointing to NULL */
-		ctrl->devs[slot_id] = NULL;
+		xhci_free_virt_device(ctrl, slot_id);
 	}
 }
 

@@ -473,7 +473,7 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	 */
 	if ((LE32(ep_ctx->ep_info) & EP_STATE_MASK) == EP_STATE_HALTED)
 	{
-		xhci_reset_ep(udev, ep);
+		xhci_reset_ep(udev, ep_index);
 		return UHIOERR_HOSTERROR;
 	}
 

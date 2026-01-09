@@ -81,6 +81,11 @@
 	((USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) << 8)
 
 /* class requests from the USB 2.0 hub spec, table 11-15 */
+#define HUB_CLEAR_TT_BUFFER   8
+#define HUB_RESET_TT          9
+#define HUB_GET_TT_STATE      10
+#define HUB_STOP_TT           11
+
 #define HUB_CLASS_REQ(dir, type, request) ((((dir) | (type)) << 8) | (request))
 /* GetBusState and SetHubDescriptor are optional, omitted */
 #define ClearHubFeature		HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_HUB, \

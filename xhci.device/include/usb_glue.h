@@ -33,5 +33,9 @@ void usb_glue_flush_queues(struct XHCIUnit *unit);
 void io_reply_failed(struct IOUsbHWReq *io, int err);
 void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual);
 
+/* Internal helper: async CLEAR_FEATURE(ENDPOINT_HALT) for recovery paths */
+void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index);
+void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, int ep_type);
+
 void xhci_ep_schedule_next(struct usb_device *udev, int endpoint);
 void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint);

@@ -1303,6 +1303,7 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr,
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 								  BOOL link_trbs);
 int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);
+void xhci_free_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);
 int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 				  struct xhci_hcor *hcor);
 

@@ -46,6 +46,9 @@ struct ep_context
 
     enum ep_state state;
 
+    /* Pending device-side CLEAR_FEATURE(HALT) request after recovery commands */
+    BOOL clear_halt_pending;
+
     /* RT ISO data */
     /*
      * The idea here is that if this is filled, the event handlers will use

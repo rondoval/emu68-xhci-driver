@@ -527,6 +527,7 @@ static void record_transfer_result(union xhci_trb *event, int length,
         break;
     case COMP_DB_ERR:
     case COMP_TRB_ERR:
+        // Data Buffer Error or TRB Error
         Kprintf("TRB error\n");
         *status = UHIOERR_HOSTERROR;
         break;
@@ -535,7 +536,12 @@ static void record_transfer_result(union xhci_trb *event, int length,
         *status = UHIOERR_OVERFLOW;
         break;
         //TODO more codes, e.g. underrun/overrun
+    case COMP_BUFF_OVER:
+        Kprintf("Isoc buffer overrun\n");
+        *status = UHIOERR_OVERFLOW;
+        break;
     default:
+        Kprintf("Unhandled completion code %ld\n", (LONG)comp);
         *status = UHIOERR_HOSTERROR;
     }
 
@@ -626,9 +632,11 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
         return;
     }
 
+    BOOL stalled = (status == UHIOERR_STALL);
+
     if (req)
     {
-        if (status == UHIOERR_STALL)
+        if (stalled)
         {
             io_reply_failed(req, UHIOERR_STALL);
         }
@@ -644,12 +652,22 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
     xhci_td_free(ctrl, td);
     ep_refresh_timeout(ep_ctx);
 
-    ReleaseSemaphore(&ep_ctx->active_tds_lock);
+    if (stalled)
+    {
+        /* Track endpoint address for a device-side CLEAR_FEATURE */
+        ep_ctx->clear_halt_pending = TRUE;
 
+        xhci_reset_ep(udev, xhci_ep_index_from_parts(req->iouh_Endpoint, req->iouh_Dir));
+
+        ReleaseSemaphore(&ep_ctx->active_tds_lock);
+        return;
+    }
+
+    ReleaseSemaphore(&ep_ctx->active_tds_lock);
     if (minlist_is_empty(&ep_ctx->active_tds))
-        xhci_ep_set_idle(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+        xhci_ep_set_idle(udev, req->iouh_Endpoint);
     else
-        xhci_ep_schedule_next(udev, req ? (req->iouh_Endpoint & 0xf) : 0);
+        xhci_ep_schedule_next(udev, req->iouh_Endpoint);
         //TODO TRB_TO_ENDPOINT(flags)?
 }
 
