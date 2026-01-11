@@ -31,6 +31,8 @@
 #define KprintfH(fmt, ...) PrintPistorm("[usb_glue] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
+#define RT_ISO_IN_TARGET_TDS 16
+
 static void usb_glue_flush_udev(struct usb_device *udev);
 static void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr);
 static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr);
@@ -340,22 +342,6 @@ static inline BOOL minlist_empty(const struct MinList *list)
     return list->mlh_Head == (struct MinNode *)&list->mlh_Tail;
 }
 
-static ULONG rt_iso_inflight_bytes(struct ep_context *ep_ctx)
-{
-    ULONG total = 0;
-    ObtainSemaphore(&ep_ctx->active_tds_lock);
-    const struct MinNode *n = ep_ctx->active_tds.mlh_Head;
-    while (n && n->mln_Succ)
-    {
-        const struct xhci_td *td = (const struct xhci_td *)n;
-        if (td->rt_iso)
-            total += td->length;
-        n = n->mln_Succ;
-    }
-    ReleaseSemaphore(&ep_ctx->active_tds_lock);
-    return total;
-}
-
 static void enqueue_pending_request(struct ep_context *ep_ctx, struct IOUsbHWReq *io, const char *reason)
 {
     io->iouh_DriverPrivate1 = ep_ctx;
@@ -396,13 +382,22 @@ static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
         xhci_td_release_trbs(td);
         if (td->req)
         {
-            io_reply_failed(td->req, IOERR_ABORTED);
+            if (td->req->iouh_Data)
+                xhci_dma_unmap(ctrl, (dma_addr_t)td->req->iouh_Data, td->length);
+            if (td->rt_iso && td->req->iouh_Dir == UHDIR_IN && td->req->iouh_Data)
+                FreeVecPooled(ctrl->memoryPool, td->req->iouh_Data);
             if (td->rt_iso)
                 FreeVecPooled(ctrl->memoryPool, td->req);
+            else
+                io_reply_failed(td->req, IOERR_ABORTED);
         }
         FreeVecPooled(ctrl->memoryPool, td);
     }
     ReleaseSemaphore(&ep_ctx->active_tds_lock);
+
+    /* Reset RT ISO inflight counters after teardown since all TDs are freed. */
+    ep_ctx->rt_inflight_bytes = 0;
+    ep_ctx->rt_inflight_tds = 0;
 
     if (ep_ctx->rt_template_req)
     {
@@ -889,7 +884,7 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     if (udev->devnum == ctrl->rootdev)
     {
-        Kprintf("isochronous transfer on root hub not supported\n");
+        Kprintf("isochronous transfer on root hub are not supported\n");
         io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
         return COMMAND_PROCESSED;
     }
@@ -946,6 +941,8 @@ int usb_glue_add_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     ep_ctx->rt_stop_pending = NULL;
     ep_ctx->rt_last_buffer = NULL;
     ep_ctx->rt_last_filled = 0;
+    ep_ctx->rt_inflight_bytes = 0;
+    ep_ctx->rt_inflight_tds = 0;
 
     ep_ctx->rt_template_req = AllocVecPooled(unit->xhci_ctrl->memoryPool, sizeof(struct IOUsbHWReq));
     if (!ep_ctx->rt_template_req)
@@ -1022,56 +1019,45 @@ badparams:
     return COMMAND_PROCESSED;
 }
 
-static void xhci_ep_schedule_rt_iso_run(struct usb_device *udev, int endpoint)
+static void xhci_ep_schedule_rt_iso_out(struct usb_device *udev, struct ep_context *ep_ctx)
 {
-    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
-    {
-        Kprintf("Invalid endpoint %d\n", endpoint);
-        return;
-    }
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
-    {
-        Kprintf("EP not in RT_ISO_RUNNING\n");
-        return;
-    }
-
     struct xhci_ctrl *ctrl = udev->controller;
     struct IOUsbHWReq *template = ep_ctx->rt_template_req;
-    if (!template)
-    {
-        Kprintf("No RT ISO template request\n");
-        xhci_ep_set_failed(udev, endpoint);
-        return;
-    }
-
     ULONG prefetch_bytes = ep_ctx->rt_req->urti_OutPrefetch;
-    if (prefetch_bytes == 0)
-    {
-        Kprintf("RT ISO OutPrefetch is zero, skipping schedule\n");
-        return;
-    }
 
     struct xhci_giveback_info giveback = {0};
     BOOL have_giveback = FALSE;
-    ULONG inflight = rt_iso_inflight_bytes(ep_ctx);
     BOOL first_td = TRUE;
-    while (inflight < prefetch_bytes)
-    {
-        struct IOUsbHWBufferReq rt_buffer_req;
-        ULONG frame = ep_ctx->rt_next_frame;
 
-        rt_buffer_req.ubr_Length = ep_ctx->rt_req->urti_OutPrefetch;
+    while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
+    {
+        ULONG frame = ep_ctx->rt_next_frame;
+        struct IOUsbHWReq *rt_io = AllocVecPooled(ctrl->memoryPool, sizeof(struct IOUsbHWReq));
+        if (!rt_io)
+        {
+            Kprintf("Failed to alloc RT ISO IO req\n");
+            break;
+        }
+        CopyMem(template, rt_io, sizeof(struct IOUsbHWReq));
+
+        struct IOUsbHWBufferReq rt_buffer_req;
+        rt_buffer_req.ubr_Length = prefetch_bytes;
         rt_buffer_req.ubr_Buffer = ep_ctx->rt_last_buffer;
         rt_buffer_req.ubr_Flags = 0;
         rt_buffer_req.ubr_Frame = frame; /* monotonic frame counter to avoid jumps */
-        struct Hook *hook = (template->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InReqHook : ep_ctx->rt_req->urti_OutReqHook;
-        CallHookPkt(hook, ep_ctx->rt_req, &rt_buffer_req);
+
+        KprintfH("RT ISO OUT sched frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+             (ULONG)frame,
+             (ULONG)rt_buffer_req.ubr_Length,
+             (ULONG)ep_ctx->rt_inflight_bytes,
+             (ULONG)ep_ctx->rt_inflight_tds);
+
+        CallHookPkt(ep_ctx->rt_req->urti_OutReqHook, ep_ctx->rt_req, &rt_buffer_req);
 
         if (!rt_buffer_req.ubr_Buffer || rt_buffer_req.ubr_Length == 0)
         {
             Kprintf("RT ISO hook provided no buffer/length\n");
+            FreeVecPooled(ctrl->memoryPool, rt_io);
             break;
         }
 
@@ -1091,15 +1077,9 @@ static void xhci_ep_schedule_rt_iso_run(struct usb_device *udev, int endpoint)
             Kprintf("Continuous buffer not supported yet\n");
         }
 
-        struct IOUsbHWReq *rt_io = AllocVecPooled(ctrl->memoryPool, sizeof(struct IOUsbHWReq));
-        if (!rt_io)
-        {
-            Kprintf("Failed to alloc RT ISO IO req\n");
-            break;
-        }
-        CopyMem(template, rt_io, sizeof(struct IOUsbHWReq));
         rt_io->iouh_Data = (APTR)((ULONG)rt_buffer_req.ubr_Buffer + offset);
         rt_io->iouh_Length = rt_buffer_req.ubr_Length;
+        rt_io->iouh_Frame = (UWORD)frame;
 
         struct xhci_giveback_info local_giveback = {0};
         BOOL defer = TRUE; /* RT ISO defers doorbell to per-run giveback */
@@ -1124,7 +1104,88 @@ static void xhci_ep_schedule_rt_iso_run(struct usb_device *udev, int endpoint)
         }
 
         ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
-        inflight += rt_io->iouh_Length;
+        ep_ctx->rt_inflight_bytes += rt_io->iouh_Length;
+        ep_ctx->rt_inflight_tds++;
+        KprintfH("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+                 (ULONG)frame,
+                 (ULONG)rt_io->iouh_Length,
+                 (ULONG)ep_ctx->rt_inflight_bytes,
+                 (ULONG)ep_ctx->rt_inflight_tds);
+        first_td = FALSE;
+    }
+
+    if (have_giveback)
+        xhci_ring_giveback(udev, &giveback);
+}
+
+static void xhci_ep_schedule_rt_iso_in(struct usb_device *udev, struct ep_context *ep_ctx)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+    struct IOUsbHWReq *template = ep_ctx->rt_template_req;
+
+    struct xhci_giveback_info giveback = {0};
+    BOOL have_giveback = FALSE;
+    BOOL first_td = TRUE;
+
+    while (ep_ctx->rt_inflight_tds < RT_ISO_IN_TARGET_TDS)
+    {
+        ULONG frame = ep_ctx->rt_next_frame;
+        struct IOUsbHWReq *rt_io = AllocVecPooled(ctrl->memoryPool, sizeof(struct IOUsbHWReq));
+        if (!rt_io)
+        {
+            Kprintf("Failed to alloc RT ISO IO req\n");
+            break;
+        }
+        CopyMem(template, rt_io, sizeof(struct IOUsbHWReq));
+
+        rt_io->iouh_Data = AllocVecPooled(ctrl->memoryPool, template->iouh_MaxPktSize);
+        if (!rt_io->iouh_Data)
+        {
+            Kprintf("Failed to alloc RT ISO staging buffer\n");
+            FreeVecPooled(ctrl->memoryPool, rt_io);
+            break;
+        }
+        rt_io->iouh_Length = template->iouh_MaxPktSize;
+        rt_io->iouh_Frame = (UWORD)frame;
+
+        KprintfH("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+                 (ULONG)frame,
+                 (ULONG)rt_io->iouh_Length,
+                 (ULONG)ep_ctx->rt_inflight_bytes,
+                 (ULONG)ep_ctx->rt_inflight_tds);
+
+        struct xhci_giveback_info local_giveback = {0};
+        BOOL defer = TRUE; /* RT ISO defers doorbell to per-run giveback */
+        int ret = xhci_rt_iso_tx(udev, rt_io, defer, first_td ? &local_giveback : NULL);
+        if (ret == UHIOERR_RING_BUSY)
+        {
+            FreeVecPooled(ctrl->memoryPool, rt_io->iouh_Data);
+            FreeVecPooled(ctrl->memoryPool, rt_io);
+            KprintfH("RT ISO ring busy, deferring\n");
+            break;
+        }
+        if (ret != UHIOERR_NO_ERROR)
+        {
+            FreeVecPooled(ctrl->memoryPool, rt_io->iouh_Data);
+            FreeVecPooled(ctrl->memoryPool, rt_io);
+            Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
+            break;
+        }
+
+        if (first_td && local_giveback.start_trb)
+        {
+            giveback = local_giveback;
+            have_giveback = TRUE;
+        }
+
+        ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
+        ep_ctx->rt_inflight_bytes += rt_io->iouh_Length;
+        ep_ctx->rt_inflight_tds++;
+        KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+                 (ULONG)frame,
+                 (ULONG)rt_io->iouh_Length,
+                 (ULONG)ep_ctx->rt_inflight_bytes,
+                 (ULONG)ep_ctx->rt_inflight_tds);
         first_td = FALSE;
     }
 
@@ -1134,7 +1195,31 @@ static void xhci_ep_schedule_rt_iso_run(struct usb_device *udev, int endpoint)
 
 void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint)
 {
-    xhci_ep_schedule_rt_iso_run(udev, endpoint);
+    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
+    {
+        Kprintf("Invalid endpoint %d\n", endpoint);
+        return;
+    }
+
+    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    {
+        Kprintf("EP not in RT_ISO_RUNNING\n");
+        return;
+    }
+
+    struct IOUsbHWReq *template = ep_ctx->rt_template_req;
+    if (!template)
+    {
+        Kprintf("No RT ISO template request\n");
+        xhci_ep_set_failed(udev, endpoint);
+        return;
+    }
+
+    if (template->iouh_Dir == UHDIR_IN)
+        xhci_ep_schedule_rt_iso_in(udev, ep_ctx);
+    else
+        xhci_ep_schedule_rt_iso_out(udev, ep_ctx);
 }
 
 void usb_glue_notify_rt_iso_stopped(struct usb_device *udev, int endpoint)

@@ -5,24 +5,22 @@ The driver is based on [Das U-Boot](https://source.denx.de/u-boot/u-boot) XHCI d
 
 This is currently a work in progress... you **will** get data corruption.
 It's a Poseidon v4.5 driver. Current status is:
-- it's able to enumerate the root hub, USB 2.0 hub and devices
-- bulk, interrupt and control transfers are somewhat working
-- whoa, I can type on USB keyboard and letters appear :)
-- whoa, I just transferred a file to a PC using a thumb drive... and it is actually readable :)
-- error recovery is broken. one failed request and it's down
-- no isochronous transfers
+- enumerates root hub, USB 2.0 hub and devices
+- external hubs work
+- control, bulk, interrupt and isochronous (including RT) transfers seem to be working
+- HID devices, thumb drives, audio cards are useable
+- stall recovery added, but overall error handling is still fragile
 
 It's slow; there's a lot of debug enabled. Not providing a binary build yet.
 It's, let's say, a bit unorthodox in that it ignores certain fields in Poseidon requests and uses data sniffed from the traffic instead.
 
-## Features
-
-- control, bulk and interrupt traffic
-
 ## Unimplemented / Planned Features
 
-- isochronous transfers
-- interrupts
+- the non-RT isochronous is not tested
+- error recovery needs more work
+- performance improvements, refactoring
+- sleep states
+- support for CM4
 .. likely a lot more
 
 ## Requirements
@@ -30,7 +28,7 @@ It's, let's say, a bit unorthodox in that it ignores certain fields in Poseidon 
 well, unsure yet. What I'm using:
 - AmigaOS 3.2.3 on an A1200
 - Poseidon 4.5
-- Pistorm with Raspberry Pi 4B (the USB controller here is Via VL805 XHCI on PCIe bus)
+- Pistorm with Raspberry Pi 4B (the USB controller here is Via VL805 XHCI on PCIe bus. Note that CM4 is currently not supported)
 - Emu68... needs to be patched: https://github.com/michalsc/Emu68/pull/306 This is to set up MMU mapping for a BAR window.
 
 ## Building

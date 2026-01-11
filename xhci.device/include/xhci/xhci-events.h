@@ -67,6 +67,10 @@ struct ep_context
     /* Cache the last RT ISO buffer so hooks can omit repeating it */
     APTR rt_last_buffer;
     ULONG rt_last_filled;
+
+    /* RT ISO inflight accounting */
+    ULONG rt_inflight_bytes;
+    ULONG rt_inflight_tds;
 };
 
 struct usb_device; /* forward declaration */

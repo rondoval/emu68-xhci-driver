@@ -74,6 +74,8 @@ static void td_free_all(struct usb_device *udev, struct ep_context *ep_ctx)
     while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)n;
+        if (td->req && td->req->iouh_Data)
+            xhci_dma_unmap(ctrl, (dma_addr_t)td->req->iouh_Data, td->length);
         xhci_td_release_trbs(td);
         xhci_td_free(ctrl, td);
     }
@@ -482,10 +484,30 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
                     (LONG)udev->slot_id, (LONG)ep, (LONG)expired->req, (LONG)expired->deadline_us, (LONG)now);
 
             struct IOUsbHWReq *expired_req = expired->req;
-            io_reply_failed(expired_req, UHIOERR_TIMEOUT);
+            if (expired_req && expired_req->iouh_Data)
+                xhci_dma_unmap(ctrl, (dma_addr_t)expired_req->iouh_Data, expired->length);
             td_remove(ep_ctx, expired);
+
             if (expired->rt_iso)
-                FreeVecPooled(ctrl->memoryPool, expired_req);
+            {
+                if (ep_ctx->rt_inflight_tds > 0)
+                    ep_ctx->rt_inflight_tds--;
+                if (expired_req)
+                {
+                    if (ep_ctx->rt_inflight_bytes >= expired->length)
+                        ep_ctx->rt_inflight_bytes -= expired->length;
+                    else
+                        ep_ctx->rt_inflight_bytes = 0;
+                    if (expired_req->iouh_Dir == UHDIR_IN)
+                        FreeVecPooled(ctrl->memoryPool, expired_req->iouh_Data);
+                    FreeVecPooled(ctrl->memoryPool, expired_req);
+                }
+            }
+            else
+            {
+                io_reply_failed(expired_req, UHIOERR_TIMEOUT);
+            }
+
             xhci_td_free(ctrl, expired);
             ep_refresh_timeout(ep_ctx);
 
@@ -533,12 +555,20 @@ static void record_transfer_result(union xhci_trb *event, int length,
         break;
     case COMP_BABBLE:
         Kprintf("Babble detected\n");
-        *status = UHIOERR_OVERFLOW;
+        *status = UHIOERR_BABBLE;
         break;
         //TODO more codes, e.g. underrun/overrun
     case COMP_BUFF_OVER:
         Kprintf("Isoc buffer overrun\n");
         *status = UHIOERR_OVERFLOW;
+        break;
+    case COMP_BW_OVER:
+        Kprintf("Bandwidth overrun\n");
+        *status = UHIOERR_HOSTERROR;
+        break;
+    case COMP_SPLIT_ERR:
+        Kprintf("Split transaction error\n");
+        *status = UHIOERR_HOSTERROR;
         break;
     default:
         Kprintf("Unhandled completion code %ld\n", (LONG)comp);
@@ -594,16 +624,57 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
 
     if (td->rt_iso)
     {
-        struct Hook *hook = (req && req->iouh_Dir == UHDIR_IN) ? ep_ctx->rt_req->urti_InDoneHook : ep_ctx->rt_req->urti_OutDoneHook;
-        if (hook)
+        KprintfH("RT ISO complete dir=%s len=%ld act_len=%ld inflight_bytes=%lu inflight_tds=%lu\n",
+                 req->iouh_Dir == UHDIR_IN ? "IN" : "OUT",
+                 (LONG)length,
+                 (LONG)act_len,
+                 (ULONG)ep_ctx->rt_inflight_bytes,
+                 (ULONG)ep_ctx->rt_inflight_tds);
+
+        if (req->iouh_Dir == UHDIR_IN)
         {
+            if (act_len > 0)
+            {
+                /* Pull a destination buffer from the class, copy staged DMA into it, then signal completion. */
+                struct IOUsbHWBufferReq rt_buffer_req;
+                rt_buffer_req.ubr_Frame = req->iouh_Frame;
+                rt_buffer_req.ubr_Flags = 0;
+                rt_buffer_req.ubr_Length = (ULONG)act_len;
+                rt_buffer_req.ubr_Buffer = NULL;
+
+                CallHookPkt(ep_ctx->rt_req->urti_InReqHook, ep_ctx->rt_req, &rt_buffer_req);
+
+                if (rt_buffer_req.ubr_Buffer)
+                {
+                    ULONG copy_len = min((ULONG)act_len, rt_buffer_req.ubr_Length);
+                    xhci_inval_cache((uintptr_t)req->iouh_Data, copy_len);
+                    CopyMem(req->iouh_Data, rt_buffer_req.ubr_Buffer, copy_len);
+                    rt_buffer_req.ubr_Length = copy_len;
+
+                    CallHookPkt(ep_ctx->rt_req->urti_InDoneHook, ep_ctx->rt_req, &rt_buffer_req);
+                }
+            }
+
+            FreeVecPooled(ctrl->memoryPool, req->iouh_Data);
+        }
+        else
+        {
+            /* OUT path: completion hook only. */
             struct IOUsbHWBufferReq rt_buffer_req;
             rt_buffer_req.ubr_Buffer = req->iouh_Data;
-            rt_buffer_req.ubr_Frame = 0; //TODO set frame number?
+            rt_buffer_req.ubr_Frame = req->iouh_Frame;
             rt_buffer_req.ubr_Length = act_len;
             rt_buffer_req.ubr_Flags = 0;
-            CallHookPkt(hook, ep_ctx->rt_req, &rt_buffer_req);
+            if (ep_ctx->rt_req->urti_OutDoneHook)
+                CallHookPkt(ep_ctx->rt_req->urti_OutDoneHook, ep_ctx->rt_req, &rt_buffer_req);
         }
+
+
+        td_remove(ep_ctx, td);
+        xhci_td_free(ctrl, td);
+        ep_refresh_timeout(ep_ctx);
+
+        int endpoint = req ? (req->iouh_Endpoint & 0xf) : 0;
 
         /* RT ISO TDs clone IO requests; free them after completion to avoid leaks. */
         if (req)
@@ -611,12 +682,11 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
             FreeVecPooled(ctrl->memoryPool, req);
             td->req = NULL;
         }
-
-        td_remove(ep_ctx, td);
-        xhci_td_free(ctrl, td);
-        ep_refresh_timeout(ep_ctx);
-
-        int endpoint = req ? (req->iouh_Endpoint & 0xf) : 0;
+        /* Maintain RT ISO inflight counters. */
+        if (ep_ctx->rt_inflight_tds > 0)
+            ep_ctx->rt_inflight_tds--;
+        if (ep_ctx->rt_inflight_bytes >= (ULONG)length)
+            ep_ctx->rt_inflight_bytes -= (ULONG)length;
 
         ReleaseSemaphore(&ep_ctx->active_tds_lock);
 
@@ -632,11 +702,11 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
         return;
     }
 
-    BOOL stalled = (status == UHIOERR_STALL);
+    BOOL halted = (comp == COMP_STALL || comp == COMP_BABBLE || comp == COMP_SPLIT_ERR || comp == COMP_TX_ERR);
 
     if (req)
     {
-        if (stalled)
+        if (halted)
         {
             io_reply_failed(req, UHIOERR_STALL);
         }
@@ -652,7 +722,7 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
     xhci_td_free(ctrl, td);
     ep_refresh_timeout(ep_ctx);
 
-    if (stalled)
+    if (halted)
     {
         /* Track endpoint address for a device-side CLEAR_FEATURE */
         ep_ctx->clear_halt_pending = TRUE;

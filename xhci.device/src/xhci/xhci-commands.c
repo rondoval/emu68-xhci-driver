@@ -509,8 +509,6 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
  */
 void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
 {
-    //TODO issue on any halt condition, not only stall: babble, transaction error, event lost, splt trans error etc.
-    // do this by interpreting events
     // TODO for error state, just set deq pointer to current enqueue pointer
     // ep needs be in halted state, otherwise this command will fail
 
