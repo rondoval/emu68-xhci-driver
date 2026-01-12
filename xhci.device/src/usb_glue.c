@@ -33,11 +33,12 @@
 
 #define RT_ISO_IN_TARGET_TDS 16
 
+static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io);
 static void usb_glue_flush_udev(struct usb_device *udev);
-static void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr);
 static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr);
 static UBYTE usb_glue_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum);
 static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUsbHWReq *io);
+static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, struct usb_device *hub, unsigned int port);
 
 static unsigned int route_depth(unsigned int route)
 {
@@ -271,24 +272,12 @@ void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, in
         usb_glue_queue_clear_tt(hub, devinfo ^ (1U << 15), (u16)udev->tt_port);
 }
 
-static struct usb_device *resolve_parent(struct XHCIUnit *unit, UWORD addr)
-{
-    if (addr > 127)
-        return NULL;
-
-    struct usb_device *udev = unit->xhci_ctrl->devices[addr];
-    if (!udev || !udev->used)
-        return NULL;
-
-    return udev;
-}
-
 static void update_device_topology(struct XHCIUnit *unit, struct usb_device *udev,
                                    const struct IOUsbHWReq *io)
 {
     if (io->iouh_Flags & UHFF_SPLITTRANS)
     {
-        struct usb_device *parent = resolve_parent(unit, io->iouh_SplitHubAddr & 0x7F);
+        struct usb_device *parent = unit->xhci_ctrl->devices[io->iouh_SplitHubAddr & 0x7F];
         if (parent)
         {
             unsigned int port = io->iouh_SplitHubPort & 0xFF;
@@ -691,6 +680,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
+    //TODO check if could be removed or replaced with data from our copy of device descriptor
     /* Update EP0 MPS hint from IO if provided */
     unsigned int maxpkt_hint = (unsigned int)io->iouh_MaxPktSize;
     if (maxpkt_hint == 8)
@@ -709,7 +699,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     else
         udev->speed = USB_SPEED_FULL;
 
-    update_device_topology(unit, udev, io);
+    update_device_topology(unit, udev, io); // TODO remove once discovery works OK, i.e. detects hub, port and root port correctly
 
     /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
     usb_glue_patch_endpoint_address(udev, io);
@@ -744,6 +734,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (io->iouh_DevAddr == ctrl->rootdev)
     {
         xhci_submit_root(udev, io);
+        parse_control_msg(udev, io);
         return COMMAND_PROCESSED;
     }
 
@@ -1497,6 +1488,52 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
         }
     }
 
+    /* Detect downstream port disconnects via hub GET_STATUS replies. */
+    if ((io->iouh_SetupData.bRequest == USB_REQ_GET_STATUS) &&
+        (io->iouh_SetupData.bmRequestType == (USB_DIR_IN | USB_RT_PORT)) &&
+        io->iouh_Actual >= 4)
+    {
+        struct xhci_ctrl *ctrl = udev->controller;
+        if (ctrl)
+        {
+            UWORD port = LE16(io->iouh_SetupData.wIndex);
+            UWORD status = LE16(((UWORD *)io->iouh_Data)[0]);
+            UWORD change = LE16(((UWORD *)io->iouh_Data)[1]);
+
+            Kprintf("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->devnum, (LONG)port, (ULONG)status, (ULONG)change);
+
+            /* Act only when the hub reports a connection change to avoid reacting to stale status. */
+            if (change & USB_PORT_STAT_C_CONNECTION)
+            {
+                if (status & USB_PORT_STAT_CONNECTION)
+                {
+                    /* Remember parent/port for the next default-address attach without split info. */
+                    Kprintf("hub addr=%ld port=%ld connected; remembering for pending attach\n", (LONG)udev->devnum, (LONG)port);
+                    ctrl->pending_parent = udev;
+                    ctrl->pending_parent_port = port;
+                }
+
+                if ((status & USB_PORT_STAT_CONNECTION) == 0)
+                {
+                    Kprintf("hub addr=%ld port=%ld disconnected; scanning children for match\n", (LONG)udev->devnum, (LONG)port);
+                    struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
+
+                    if (child)
+                    {
+                        Kprintf("hub addr=%ld port=%ld disconnected, removing child addr=%ld slot=%ld\n",
+                                (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
+                        usb_glue_disconnect_device(ctrl, child, TRUE);
+                    }
+                    else
+                    {
+                        Kprintf("hub addr=%ld port=%ld disconnect: no child matched parent addr=%ld\n",
+                                (LONG)udev->devnum, (LONG)port, (LONG)udev->devnum);
+                    }
+                }
+            }
+        }
+    }
+
     /* If this was a successful standard SET_ADDRESS, migrate the glue context
      * from the old devaddr to the new one so subsequent transfers reuse the
      * same slot and endpoint state.
@@ -1623,7 +1660,53 @@ static void usb_glue_flush_udev(struct usb_device *udev)
     }
 }
 
-static void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr)
+void usb_glue_disconnect_device(struct xhci_ctrl *ctrl, struct usb_device *udev, BOOL recursive)
+{
+    if (!ctrl || !udev)
+        return;
+
+    if (!udev->slot_id)
+        return;
+
+    /* Disconnect downstream devices first so hubs drain their children before vanishing. */
+    if (recursive)
+    {
+        for (int i = 0; i < MAX_HC_SLOTS; ++i)
+        {
+            struct usb_device *child = ctrl->devices[i];
+            if (!child || child == udev)
+                continue;
+
+            if (child->parent == udev && child->used)
+                usb_glue_disconnect_device(ctrl, child, TRUE);
+        }
+    }
+
+
+    Kprintf("disconnect device addr=%ld slot=%ld port=%ld\n", (LONG)udev->devnum, (LONG)udev->slot_id, (LONG)udev->parent_port);
+
+    xhci_disable_slot(udev);
+}
+
+static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, struct usb_device *hub, unsigned int port)
+{
+    if (!ctrl || !hub)
+        return NULL;
+
+    for (int i = 0; i < MAX_HC_SLOTS; ++i)
+    {
+        struct usb_device *cand = ctrl->devices[i];
+        if (!cand || cand == hub || cand->slot_id == 0)
+            continue;
+
+        if (cand->parent == hub && cand->parent_port == port)
+            return cand;
+    }
+
+    return NULL;
+}
+
+void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr)
 {
     if (!ctrl || addr > 127)
         return;

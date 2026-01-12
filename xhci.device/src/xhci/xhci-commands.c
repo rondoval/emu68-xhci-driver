@@ -369,6 +369,12 @@ static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *
 
     KprintfH("Disabled slot %ld successfully.\n", cmd->udev->slot_id);
     xhci_free_virt_device(ctrl, cmd->udev->slot_id);
+
+    if (cmd->udev)
+    {
+        cmd->udev->slot_id = 0;
+        usb_glue_free_udev_slot(ctrl, cmd->udev->devnum);
+    }
 }
 
 static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
@@ -646,21 +652,6 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     struct xhci_input_control_ctx *ctrl_ctx;
     struct xhci_virt_device *virt_dev;
     unsigned int slot_id = udev->slot_id;
-    struct xhci_hccr *hccr = ctrl->hccr;
-    struct xhci_hcor *hcor = ctrl->hcor;
-    int root_portnr = 0;
-
-    int max_ports = HCS_MAX_PORTS(xhci_readl(&hccr->cr_hcsparams1));
-    for (int p = 1; p <= max_ports; ++p)
-    {
-        u32 ps = xhci_readl(&hcor->portregs[p - 1].or_portsc);
-        if (ps & PORT_CONNECT)
-        {
-            root_portnr = p;
-            KprintfH("autodetected root_portnr=%ld speed=%ld\n", (ULONG)root_portnr, (ULONG)udev->speed);
-            break;
-        }
-    }
 
     virt_dev = ctrl->devs[slot_id];
     KprintfH("virt_dev=%lx, slot_id=%ld\n", (ULONG)virt_dev, (LONG)slot_id);
@@ -689,7 +680,7 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
      * so setting up the slot context.
      */
     KprintfH("Setting up addressable device (slot %ld)\n", (ULONG)slot_id);
-    xhci_setup_addressable_virt_dev(ctrl, udev, root_portnr);
+    xhci_setup_addressable_virt_dev(ctrl, udev);
 
     ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
     KprintfH("ctrl_ctx=%lx in_ctx=%lx out_ctx=%lx\n",

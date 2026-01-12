@@ -853,8 +853,7 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl, struct xhci_container_ctx *in_ctx,
  * @param udev pointer to the Device Data Structure
  * Return: returns negative value on failure else 0 on success
  */
-void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
-									 struct usb_device *udev, int hop_portnr)
+void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev)
 {
 	struct xhci_virt_device *virt_dev;
 	struct xhci_ep_ctx *ep0_ctx;
@@ -905,6 +904,29 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 		Kprintf("Unknown device speed %ld\n", (ULONG)speed);
 	}
 
+	udev->parent = ctrl->pending_parent;
+	udev->parent_port = ctrl->pending_parent_port;
+
+	//Find root hub port number
+	port_num = ctrl->pending_parent_port;
+	if (udev->parent)
+	{
+		struct usb_device *ancestor = udev->parent;
+
+		while (ancestor)
+		{
+			if (ancestor->parent_port)
+				port_num = ancestor->parent_port;
+
+			if (!ancestor->parent)
+				break;
+
+			ancestor = ancestor->parent;
+		}
+	}
+
+	//TODO set tt-info as well?
+
 	/* Low/full-speed devices behind a high-speed hub need TT info */
 	BOOL needs_tt = (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) &&
 					udev->parent &&
@@ -915,9 +937,8 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
 
 	slot_ctx->dev_info = LE32(dev_info);
 
-	port_num = hop_portnr;
-	KprintfH("xhci_setup_addressable_virt_dev: port_num=%ld speed=%ld route=%ld\n",
-			 port_num, (ULONG)speed, (ULONG)udev->route);
+	KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%ld port_num=%ld root port_num=%ldspeed=%ld route=%ld\n",
+			 (ULONG)udev->parent->devnum, udev->parent_port, port_num, (ULONG)speed, (ULONG)udev->route);
 
 	u32 dev_info2 = LE32(slot_ctx->dev_info2);
 	dev_info2 &= ~((ROOT_HUB_PORT_MASK) << ROOT_HUB_PORT_SHIFT);

@@ -1261,6 +1261,8 @@ struct xhci_ctrl
 	APTR memoryPool;
 	struct pci_device *pci_dev;
 	struct usb_device *devices[MAX_HC_SLOTS];
+	struct usb_device *pending_parent; /* parent hub pending for next default-address child */
+	unsigned int pending_parent_port;
 	struct MinList pending_commands; /* list of pending commands */
 };
 
@@ -1280,8 +1282,7 @@ void xhci_endpoint_copy(struct xhci_ctrl *ctrl,
 void xhci_slot_copy(struct xhci_ctrl *ctrl,
 					struct xhci_container_ctx *in_ctx,
 					struct xhci_container_ctx *out_ctx);
-void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl,
-									 struct usb_device *udev, int hop_portnr);
+void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
 void xhci_update_hub_tt(struct usb_device *udev);
 int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 int xhci_int_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);

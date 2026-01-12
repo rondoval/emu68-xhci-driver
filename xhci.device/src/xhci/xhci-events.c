@@ -547,6 +547,10 @@ static void record_transfer_result(union xhci_trb *event, int length,
         Kprintf("Device stalled\n");
         *status = UHIOERR_STALL;
         break;
+    case COMP_TX_ERR:
+        Kprintf("USB transaction error\n");
+        *status = UHIOERR_HOSTERROR;
+        break;
     case COMP_DB_ERR:
     case COMP_TRB_ERR:
         // Data Buffer Error or TRB Error

@@ -100,6 +100,7 @@ struct usb_device {
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
 	unsigned int route;           /* xHCI route string nibble-packed */
+	unsigned int parent_port;     /* Parent hub downstream port (all speeds) */
 	unsigned int tt_slot;         /* Parent hub slot ID for TT scheduling */
 	unsigned int tt_port;         /* Parent hub downstream port for TT scheduling */
 	unsigned int tt_think_time;   /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
