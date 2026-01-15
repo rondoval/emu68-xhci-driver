@@ -87,7 +87,7 @@ enum {
  */
 struct usb_device {
 	BOOL used;
-	unsigned int	devnum;			/* Device number on USB bus */
+	unsigned int	devnum;			/* Device address on USB bus */
 	unsigned int	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */
 

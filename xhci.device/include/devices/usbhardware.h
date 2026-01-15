@@ -118,7 +118,7 @@ struct IOUsbHWBufferReq
 #define UHIOERR_BADPARAMS    11   /* Illegal parameters in request */
 #define UHIOERR_OUTOFMEMORY  12   /* Out of auxiliary memory for the driver */
 #define UHIOERR_BABBLE       13   /* Babble condition */
-#define UHIOERR_RING_BUSY    14   /* Transfer ring has no free TRBs */
+#define UHIOERR_RING_BUSY    14   /* Transfer ring has no free TRBs - non-Poseidon code! TODO remove*/
 
 /* Values for iouh_Dir */
 

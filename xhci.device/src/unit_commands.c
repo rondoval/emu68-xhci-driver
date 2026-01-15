@@ -89,6 +89,7 @@ static int Do_CMD_RESET(struct IOUsbHWReq *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     Kprintf("[xhci] %s: CMD_RESET\n", __func__);
+    //TODO should reset entire controller...
     io->iouh_Req.io_Error = usb_glue_bus_reset(unit);
     return COMMAND_PROCESSED;
 }

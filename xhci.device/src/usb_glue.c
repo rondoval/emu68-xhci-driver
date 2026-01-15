@@ -34,7 +34,7 @@
 #define RT_ISO_IN_TARGET_TDS 16
 
 static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io);
-static void usb_glue_flush_udev(struct usb_device *udev);
+static void usb_glue_flush_udev(struct usb_device *udev, unsigned int reply_code);
 static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr);
 static UBYTE usb_glue_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum);
 static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUsbHWReq *io);
@@ -314,6 +314,9 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
     struct usb_device *udev = ctrl->devices[devaddr];
     if (!udev)
     {
+        // We'll be only creating contexts for newly detected devices
+        if (devaddr != 0 && devaddr != ctrl->rootdev)
+            return NULL;
         KprintfH("new device addr=%ld\n", (LONG)devaddr);
         udev = usb_glue_alloc_udev(ctrl, devaddr);
     }
@@ -353,7 +356,6 @@ static void enqueue_pending_request_front(struct ep_context *ep_ctx, struct IOUs
 
 static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
 {
-    Kprintf("tearing down EP context\n");
     struct MinNode *node;
 
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
@@ -1323,6 +1325,10 @@ void xhci_ep_schedule_next(struct usb_device *udev, int endpoint)
         return;
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
+    enum ep_state state = ep_ctx->state;
+    if(state == USB_DEV_EP_STATE_FAILED || state == USB_DEV_EP_STATE_RESETTING || state == USB_DEV_EP_STATE_ABORTING)
+        return;
+
     while (1)
     {
         struct MinNode *node = RemHeadMinList(&ep_ctx->pending_reqs);
@@ -1593,7 +1599,6 @@ void io_reply_failed(struct IOUsbHWReq *io, int err)
 {
     if (io)
     {
-        Kprintf("err=%ld\n", (LONG)err);
         io->iouh_Req.io_Error = err;
 
         /* Internal, reply-less requests (IOF_QUICK + magic tag) */
@@ -1604,7 +1609,8 @@ void io_reply_failed(struct IOUsbHWReq *io, int err)
                 FreeVecPooled(ctrl->memoryPool, io);
             return;
         }
-
+        
+        Kprintf("addr %ld EP %ld err=%ld\n", (LONG)io->iouh_DevAddr, (LONG)io->iouh_Endpoint, (LONG)err);
         ReplyMsg((struct Message *)io);
     }
 }
@@ -1634,7 +1640,7 @@ void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULON
     ReplyMsg((struct Message *)io);
 }
 
-static void usb_glue_flush_udev(struct usb_device *udev)
+static void usb_glue_flush_udev(struct usb_device *udev, unsigned int reply_code)
 {
     if (!udev)
         return;
@@ -1642,21 +1648,20 @@ static void usb_glue_flush_udev(struct usb_device *udev)
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
         return;
+    Kprintf("flushing device addr=%ld slot=%ld\n", (LONG)udev->devnum, (LONG)udev->slot_id);
 
     if (ctrl->root_int_req && ctrl->root_int_req->iouh_DevAddr == udev->devnum)
     {
         struct IOUsbHWReq *req = ctrl->root_int_req;
         ctrl->root_int_req = NULL;
-        io_reply_failed(req, IOERR_ABORTED);
+        io_reply_failed(req, reply_code);
     }
 
     for (int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
     {
         struct ep_context *ep_ctx = &udev->ep_context[ep];
+        KprintfH("tearing down addr %ld EP %ld context, state %ld\n", (LONG)udev->devnum, (LONG)ep, (LONG)ep_ctx->state);
         ep_teardown(ctrl, ep_ctx);
-
-        if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
-            xhci_ep_set_idle(udev, ep);
     }
 }
 
@@ -1683,7 +1688,12 @@ void usb_glue_disconnect_device(struct xhci_ctrl *ctrl, struct usb_device *udev,
     }
 
 
-    Kprintf("disconnect device addr=%ld slot=%ld port=%ld\n", (LONG)udev->devnum, (LONG)udev->slot_id, (LONG)udev->parent_port);
+    Kprintf("disconnect device addr=%ld slot=%ld port=%ld (devices[%ld]=%lx)\n",
+            (LONG)udev->devnum,
+            (LONG)udev->slot_id,
+            (LONG)udev->parent_port,
+            (LONG)udev->devnum,
+            (ULONG)ctrl->devices[udev->devnum]);
 
     xhci_disable_slot(udev);
 }
@@ -1715,7 +1725,7 @@ void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr)
     if (!udev)
         return;
 
-    usb_glue_flush_udev(udev);
+    usb_glue_flush_udev(udev, UHIOERR_TIMEOUT);
 
     struct MinNode *node;
     while ((node = RemHeadMinList(&udev->configurations)) != NULL)
@@ -1737,10 +1747,12 @@ void usb_glue_flush_queues(struct XHCIUnit *unit)
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     if (!ctrl)
         return;
+
+    // TODO we would need to also stop the EPs as a minimum...
     for (int addr = 0; addr <= 127; ++addr)
     {
         struct usb_device *udev = ctrl->devices[addr];
         if (udev)
-            usb_glue_flush_udev(udev);
+            usb_glue_flush_udev(udev, IOERR_ABORTED);
     }
 }

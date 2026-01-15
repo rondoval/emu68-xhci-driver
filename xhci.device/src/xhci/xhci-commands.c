@@ -189,6 +189,7 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
         xhci_ep_set_failed(cmd->udev, endpoint);
         goto error;
     }
+    cmd->udev->ep_context[endpoint].state = USB_DEV_EP_STATE_IDLE;
     KprintfH("Set DEQ for EP %ld completed successfully, status code %ld (success=1)\n", endpoint, comp);
 
     /*
@@ -372,7 +373,6 @@ static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *
 
     if (cmd->udev)
     {
-        cmd->udev->slot_id = 0;
         usb_glue_free_udev_slot(ctrl, cmd->udev->devnum);
     }
 }
@@ -522,6 +522,9 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
     u32 ep = EP_INDEX_TO_ENDPOINT(ep_index);
     struct ep_context *ep_ctx = &udev->ep_context[ep];
 
+    Kprintf("Resetting addr %ld EP %ld (index=%ld)...\n", (LONG)udev->devnum, (LONG)ep, (LONG)ep_index);
+    xhci_ep_set_resetting(udev, ep);
+
     /* Fail and free any in-flight TDs so callers get a reply before reset. */
     struct MinNode *n;
     ObtainSemaphore(&ep_ctx->active_tds_lock);
@@ -533,15 +536,13 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
             if (td->rt_iso)
                 FreeVecPooled(ctrl->memoryPool, td->req);
             else
-                io_reply_failed(td->req, IOERR_ABORTED);
+                io_reply_failed(td->req, UHIOERR_TIMEOUT);
         }
         xhci_td_release_trbs(td);
         xhci_td_free(ctrl, td);
     }
     ReleaseSemaphore(&ep_ctx->active_tds_lock);
 
-    Kprintf("Resetting EP %ld (index=%ld)...\n", (LONG)ep, (LONG)ep_index);
-    xhci_ep_set_resetting(udev, ep);
 
     // set TSP=0 - reset split transaction, flush cached TDs
     xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_RESET_EP, NULL, udev); // handle_reset_ep
@@ -641,6 +642,11 @@ void xhci_enable_slot(struct usb_device *udev, struct IOUsbHWReq *req)
 void xhci_disable_slot(struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
+    //TODO mark somehow in state?
+    for(int ep = 0; ep < USB_MAXENDPOINTS; ep++)
+    {
+        udev->ep_context[ep].state = USB_DEV_EP_STATE_ABORTING;
+    }
 
     KprintfH("queue DISABLE_SLOT for slot_id=%ld\n", (ULONG)udev->slot_id);
     xhci_queue_command(ctrl, 0, udev->slot_id, 0, TRB_DISABLE_SLOT, NULL, udev);

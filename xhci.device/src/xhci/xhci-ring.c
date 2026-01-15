@@ -266,7 +266,7 @@ int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
 		return UHIOERR_HOSTERROR;
 	case EP_STATE_HALTED:
 		Kprintf("WARN endpoint is halted\n");
-		return UHIOERR_HOSTERROR;
+		return UHIOERR_RING_BUSY;
 	case EP_STATE_STOPPED:
 	case EP_STATE_RUNNING:
 		// KprintfH("EP STATE RUNNING.\n");
@@ -438,9 +438,19 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	unsigned int ep = io->iouh_Endpoint & 0xf;
 	if (ep == 0)
 	{
-		Kprintf("stream transfer on EP0 not supported\n");
+		Kprintf("bulk/int/isoch transfer on EP0 not supported\n");
 		return UHIOERR_BADPARAMS;
 	}
+
+	enum ep_state cur_state = udev->ep_context[ep].state;
+	if (cur_state == USB_DEV_EP_STATE_ABORTING ||
+		cur_state == USB_DEV_EP_STATE_RESETTING ||
+		cur_state == USB_DEV_EP_STATE_FAILED)
+	{
+		Kprintf("Cannot submit bulk/isoc/int transfer, ep in state %d\n", cur_state);
+		return UHIOERR_RING_BUSY;
+	}	
+	
 	unsigned int ep_index = ep * 2 - ((io->iouh_Dir == UHDIR_IN) ? 0 : 1);
 	int max_packet = io->iouh_MaxPktSize ? io->iouh_MaxPktSize : 1;
 	u64 buf_64 = xhci_dma_map(ctrl, io->iouh_Data, length);
@@ -465,17 +475,6 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	xhci_dump_slot_ctx(__func__, xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
 	xhci_dump_ep_ctx(__func__, io->iouh_Endpoint, ep_ctx);
 #endif
-
-	/*
-	 * If the endpoint was halted due to a prior error, resume it before
-	 * the next transfer. It is the responsibility of the upper layer to
-	 * have dealt with whatever caused the error.
-	 */
-	if ((LE32(ep_ctx->ep_info) & EP_STATE_MASK) == EP_STATE_HALTED)
-	{
-		xhci_reset_ep(udev, ep_index);
-		return UHIOERR_HOSTERROR;
-	}
 
 	ring = virt_dev->eps[ep_index].ring;
 	if (!ring)
@@ -746,6 +745,15 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	const int length = io->iouh_Length;
 
 	ep_index = (io->iouh_Endpoint & 0xf) * 2; // ep_index is DCI-1 for control endpoints
+
+	enum ep_state state = udev->ep_context[io->iouh_Endpoint & 0xf].state;
+	if (state == USB_DEV_EP_STATE_ABORTING ||
+		state == USB_DEV_EP_STATE_RESETTING ||
+		state == USB_DEV_EP_STATE_FAILED)
+	{
+		Kprintf("Cannot submit control transfer, ep in state %d\n", state);
+		return UHIOERR_RING_BUSY;
+	}
 
 	ep_ring = virt_dev->eps[ep_index].ring;
 	if (!ep_ring)

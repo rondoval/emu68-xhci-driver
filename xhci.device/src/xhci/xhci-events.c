@@ -272,7 +272,6 @@ void xhci_ep_set_resetting(struct usb_device *udev, int endpoint)
     }
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-
     ep_ctx->state = USB_DEV_EP_STATE_RESETTING;
 }
 
@@ -549,7 +548,7 @@ static void record_transfer_result(union xhci_trb *event, int length,
         break;
     case COMP_TX_ERR:
         Kprintf("USB transaction error\n");
-        *status = UHIOERR_HOSTERROR;
+        *status = UHIOERR_TIMEOUT;
         break;
     case COMP_DB_ERR:
     case COMP_TRB_ERR:
@@ -572,7 +571,7 @@ static void record_transfer_result(union xhci_trb *event, int length,
         break;
     case COMP_SPLIT_ERR:
         Kprintf("Split transaction error\n");
-        *status = UHIOERR_HOSTERROR;
+        *status = UHIOERR_TIMEOUT;
         break;
     default:
         Kprintf("Unhandled completion code %ld\n", (LONG)comp);
@@ -599,7 +598,6 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
             (ULONG)LE32(event->generic.field[3]));
 
     xhci_acknowledge_event(udev->controller);
-    // xhci_ep_set_failed(udev, TRB_TO_ENDPOINT(LE32(event->trans_event.flags)));
 }
 
 /* Shared TD completion helper for control/bulk/int/isoc (non-RT) and RT ISO hooks. */
@@ -708,11 +706,19 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
 
     BOOL halted = (comp == COMP_STALL || comp == COMP_BABBLE || comp == COMP_SPLIT_ERR || comp == COMP_TX_ERR);
 
+    /* Flag short IN transfers as runts unless explicitly allowed or expected (control). */
+    if (req && status == UHIOERR_NO_ERROR && act_len < length &&
+        req->iouh_Dir == UHDIR_IN && !allow_control_short &&
+        (req->iouh_Flags & UHFF_ALLOWRUNTPKTS) == 0)
+    {
+        status = UHIOERR_RUNTPACKET;
+    }
+
     if (req)
     {
         if (halted)
         {
-            io_reply_failed(req, UHIOERR_STALL);
+            io_reply_failed(req, status);
         }
         else
         {

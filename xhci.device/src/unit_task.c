@@ -75,6 +75,11 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     {
         sigset = Wait(waitMask);
 
+        if(sigset & (1UL << unit->irq_signal))
+        {
+            xhci_intx_handle(unit);
+        }
+        
         // IO queue got a new message
         if (sigset & (1UL << unit->unit.unit_MsgPort.mp_SigBit))
         {
@@ -86,10 +91,6 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
             }
         }
 
-        if(sigset & (1UL << unit->irq_signal))
-        {
-            xhci_intx_handle(unit);
-        }
 
         // Timer expired, time to check timeouts
         if (sigset & (1UL << microHZTimerPort->mp_SigBit))
