@@ -122,7 +122,6 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     CloseDevice(&packetTimerReq->tr_node);
 free_ports:
     DeleteIORequest((struct IORequest *)packetTimerReq);
-    DeleteIORequest(&packetTimerReq->tr_node);
     DeleteMsgPort(microHZTimerPort);
 free_signals:
     FreeSignal(unit->irq_signal);
