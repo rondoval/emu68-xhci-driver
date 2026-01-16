@@ -560,11 +560,20 @@ void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
     KprintfH("Aborting TDs on EP %ld (index=%ld)\n", (LONG)endpoint, (LONG)ep_index);
     struct xhci_ctrl *ctrl = udev->controller;
 
-    xhci_ep_set_aborting(udev, endpoint);
-    Kprintf("Stopping EP %ld...\n", endpoint);
+    enum ep_state state = udev->ep_context[endpoint].state;
+    if(state == USB_DEV_EP_STATE_RECEIVING_BULK ||
+       state == USB_DEV_EP_STATE_RECEIVING_INT ||
+       state == USB_DEV_EP_STATE_RECEIVING_ISOC ||
+       state == USB_DEV_EP_STATE_RECEIVING_CONTROL ||
+       state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT ||
+       state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    {
+        xhci_ep_set_aborting(udev, endpoint);
+        Kprintf("Stopping EP %ld...\n", endpoint);
 
-    // TODO suspend bit support
-    xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL, udev);
+        // TODO suspend bit support
+        xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL, udev);
+    }
 }
 
 /*

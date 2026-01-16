@@ -8,6 +8,7 @@
 #include <device.h>
 #include <debug.h>
 #include <devices/usbhardware.h>
+#include <xhci/xhci-events.h>
 
 LONG abortIO(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6") __attribute__((unused)))
 {
@@ -19,9 +20,15 @@ LONG abortIO(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6") 
         Forbid();
         /* If the IO was not quick and is of type message (not handled yet or in process), abord it and remove from queue. 
          * The TX task clears ln_Pred to indicate the request is already on TX ring and can't be cancelled. */
-        if ((io->iouh_Req.io_Flags & IOF_QUICK) == 0 && io->iouh_Req.io_Message.mn_Node.ln_Type == NT_MESSAGE && io->iouh_Req.io_Message.mn_Node.ln_Pred != NULL)
+        if ((io->iouh_Req.io_Flags & IOF_QUICK) == 0 && io->iouh_Req.io_Message.mn_Node.ln_Type == NT_MESSAGE)
         {
-            Remove(&io->iouh_Req.io_Message.mn_Node);
+            if (io->iouh_Req.io_Message.mn_Node.ln_Pred != NULL)
+                Remove(&io->iouh_Req.io_Message.mn_Node);
+            else if (io->iouh_DriverPrivate1 != NULL && io->iouh_DriverPrivate1 != (APTR)0xDEAD001)
+            {
+                struct xhci_td *td = (struct xhci_td *)io->iouh_DriverPrivate1;
+                td->req = NULL; /* prevent completion */
+            }
             io->iouh_Req.io_Error = IOERR_ABORTED;
             ReplyMsg(&io->iouh_Req.io_Message);
         }

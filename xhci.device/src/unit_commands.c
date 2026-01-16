@@ -79,8 +79,6 @@ static int Do_CMD_FLUSH(struct IOUsbHWReq *io)
     /* go through all devices and endpoints and flush their queues */
     usb_glue_flush_queues(unit);
 
-    // TODO go through all devices and endpoints and abort ongoing transfers
-
     KprintfH("[xhci] %s: Flush completed\n", __func__);
     return COMMAND_PROCESSED;
 }

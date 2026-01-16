@@ -1416,7 +1416,8 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		{
 		case USB_PORT_FEAT_ENABLE:
 			KprintfH("Clear PORT_PE\n");
-			reg &= ~PORT_PE;
+			/* PED is RW1CS: write a '1' to disable/clear it. */
+			reg |= PORT_PE;
 			break;
 		case USB_PORT_FEAT_POWER:
 			KprintfH("Clear PORT_POWER\n");

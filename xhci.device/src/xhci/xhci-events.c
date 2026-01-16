@@ -234,6 +234,15 @@ void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum
     }
 
     td->req = req;
+
+    /*
+    * This is a hack for abortio()...
+    * We'll put in the TD pointer into DriverPrivate1 so that abortio can find it later.
+    */
+    req->iouh_Req.io_Message.mn_Node.ln_Pred = NULL;
+    if (req->iouh_DriverPrivate1 != (APTR)0xDEAD001)
+        req->iouh_DriverPrivate1 = (APTR)td;
+
     td->trb_addrs = trb_addrs;
     td->trb_count = trb_count;
     td->completion_trb = trb_addrs[trb_count - 1];

@@ -361,8 +361,6 @@ static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
     {
         struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-        req->iouh_DriverPrivate1 = NULL;
-        req->iouh_DriverPrivate2 = NULL;
         io_reply_failed(req, IOERR_ABORTED);
     }
 
@@ -785,7 +783,6 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    io->iouh_DriverPrivate1 = NULL;
     return COMMAND_SCHEDULED;
 }
 
@@ -815,7 +812,6 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    io->iouh_DriverPrivate1 = NULL;
     return COMMAND_SCHEDULED;
 }
 
@@ -861,7 +857,6 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    io->iouh_DriverPrivate1 = NULL;
     return COMMAND_SCHEDULED;
 }
 
@@ -901,7 +896,6 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    io->iouh_DriverPrivate1 = NULL;
     return COMMAND_SCHEDULED;
 }
 
@@ -1508,7 +1502,33 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
 
             Kprintf("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->devnum, (LONG)port, (ULONG)status, (ULONG)change);
 
-            /* Act only when the hub reports a connection change to avoid reacting to stale status. */
+            /* Drop children immediately if port power is off, regardless of change bits. */
+            if ((status & USB_PORT_STAT_POWER) == 0)
+            {
+                Kprintf("hub addr=%ld port=%ld lost power; removing child if any\n", (LONG)udev->devnum, (LONG)port);
+                struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
+                if (child)
+                {
+                    Kprintf("hub addr=%ld port=%ld power-off, removing child addr=%ld slot=%ld\n",
+                            (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
+                    usb_glue_disconnect_device(ctrl, child, TRUE);
+                }
+            }
+
+            /* If the port is disabled, tear down any attached child even if power is still on. */
+            if ((status & USB_PORT_STAT_ENABLE) == 0)
+            {
+                Kprintf("hub addr=%ld port=%ld disabled; removing child if any\n", (LONG)udev->devnum, (LONG)port);
+                struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
+                if (child)
+                {
+                    Kprintf("hub addr=%ld port=%ld disabled, removing child addr=%ld slot=%ld\n",
+                            (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
+                    usb_glue_disconnect_device(ctrl, child, TRUE);
+                }
+            }
+
+            /* Act when the hub reports a connection change to avoid reacting to stale status. */
             if (change & USB_PORT_STAT_C_CONNECTION)
             {
                 if (status & USB_PORT_STAT_CONNECTION)
@@ -1537,6 +1557,38 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
                     }
                 }
             }
+
+            /* Also remember parent/port after a reset-complete change when the link is up, even if
+             * no explicit connection-change bit was set (common on root hub resets).
+             */
+            if ((change & USB_PORT_STAT_C_RESET) && (status & USB_PORT_STAT_CONNECTION))
+            {
+                Kprintf("hub addr=%ld port=%ld reset-complete; remembering for pending attach\n", (LONG)udev->devnum, (LONG)port);
+                ctrl->pending_parent = udev;
+                ctrl->pending_parent_port = port;
+            }
+        }
+    }
+
+    /* Proactively disconnect when the host powers or enables a hub port off. */
+    if ((io->iouh_SetupData.bRequest == USB_REQ_CLEAR_FEATURE) &&
+        (io->iouh_SetupData.bmRequestType == (USB_DIR_OUT | USB_RT_PORT)) &&
+        (LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_POWER ||
+         LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_ENABLE))
+    {
+        struct xhci_ctrl *ctrl = udev->controller;
+        if (ctrl)
+        {
+            UWORD port = LE16(io->iouh_SetupData.wIndex);
+            struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
+            if (child)
+            {
+                Kprintf("hub addr=%ld port=%ld CLEAR_FEATURE(%s); removing child addr=%ld slot=%ld\n",
+                        (LONG)udev->devnum, (LONG)port,
+                        (LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_POWER) ? "PORT_POWER" : "PORT_ENABLE",
+                        (LONG)child->devnum, (LONG)child->slot_id);
+                usb_glue_disconnect_device(ctrl, child, TRUE);
+            }
         }
     }
 
@@ -1562,6 +1614,8 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             if (ctrl->devices[new_addr] && ctrl->devices[new_addr] != current)
             {
                 Kprintf("overwriting existing ctx for addr %ld\n", (LONG)new_addr);
+                /* If we are replacing an existing device (e.g., hub power-cycle), disconnect it (and children) first. */
+                usb_glue_disconnect_device(ctrl, ctrl->devices[new_addr], TRUE);
                 usb_glue_free_udev_slot(ctrl, new_addr);
             }
 
@@ -1748,11 +1802,28 @@ void usb_glue_flush_queues(struct XHCIUnit *unit)
     if (!ctrl)
         return;
 
-    // TODO we would need to also stop the EPs as a minimum...
-    for (int addr = 0; addr <= 127; ++addr)
+    for (unsigned int addr = 0; addr <= 127; ++addr)
     {
         struct usb_device *udev = ctrl->devices[addr];
-        if (udev)
-            usb_glue_flush_udev(udev, IOERR_ABORTED);
+        if (!udev || addr == ctrl->rootdev)
+            continue;
+
+        for (unsigned int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
+        {
+            struct ep_context *ep_ctx = &udev->ep_context[ep];
+            struct MinNode *node;
+
+            while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
+            {
+                struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
+                io_reply_failed(req, IOERR_ABORTED);
+            }
+
+            u32 ep_out_index = xhci_ep_index_from_parts(ep, UHDIR_OUT);
+            u32 ep_in_index = xhci_ep_index_from_parts(ep, UHDIR_IN);
+
+            xhci_stop_endpoint(udev, ep_out_index);
+            xhci_stop_endpoint(udev, ep_in_index);
+        }
     }
 }
