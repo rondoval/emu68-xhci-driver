@@ -318,6 +318,8 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
     }
 #endif
 
+    cmd->udev->slot_state = USB_DEV_SLOT_STATE_CONFIGURED;
+
     if (cmd->req)
     {
         unsigned int timeout = XHCI_TIMEOUT;
@@ -340,6 +342,7 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
     }
 
     cmd->udev->slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
+    cmd->udev->slot_state = USB_DEV_SLOT_STATE_ENABLED;
     KprintfH("assigned slot_id=%ld for addr=%lu\n", (ULONG)cmd->udev->slot_id, (ULONG)cmd->udev->poseidon_address);
 
     int ret = xhci_alloc_virt_device(ctrl, cmd->udev->slot_id);
@@ -372,6 +375,7 @@ static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *
     }
 
     KprintfH("Disabled slot %ld successfully (comp=%ld).\n", cmd->udev->slot_id, comp);
+    cmd->udev->slot_state = USB_DEV_SLOT_STATE_DISABLED;
     xhci_free_virt_device(ctrl, cmd->udev->slot_id);
 
     if (cmd->udev)
@@ -442,6 +446,7 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
                      virt_dev->out_ctx->size);
 
     cmd->udev->xhci_address = LE32(xhci_get_slot_ctx(ctrl, virt_dev->out_ctx)->dev_state) & DEV_ADDR_MASK;
+    cmd->udev->slot_state = USB_DEV_SLOT_STATE_ADDRESSED;
     KprintfH("Assigned xHCI address %ld to slot %ld (Poseidon address %ld)\n",
             (ULONG)cmd->udev->xhci_address, (ULONG)cmd->udev->slot_id, (cmd->req)?(ULONG)cmd->req->iouh_DevAddr:(ULONG)0);
 
@@ -570,16 +575,13 @@ void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
 {
     u32 endpoint = EP_INDEX_TO_ENDPOINT(ep_index);
     KprintfH("Stop EP addr=%ld ep=%ld (index=%ld)\n",
-            (LONG)udev->poseidon_address, (LONG)endpoint, (LONG)ep_index);
+             (LONG)udev->poseidon_address, (LONG)endpoint, (LONG)ep_index);
     struct xhci_ctrl *ctrl = udev->controller;
 
     enum ep_state state = udev->ep_context[endpoint].state;
-    if(state == USB_DEV_EP_STATE_RECEIVING_BULK ||
-       state == USB_DEV_EP_STATE_RECEIVING_INT ||
-       state == USB_DEV_EP_STATE_RECEIVING_ISOC ||
-       state == USB_DEV_EP_STATE_RECEIVING_CONTROL ||
-       state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT ||
-       state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
+    if (state == USB_DEV_EP_STATE_RECEIVING ||
+        state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT ||
+        state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
         xhci_ep_set_aborting(udev, endpoint);
         KprintfH("Stopping EP %ld...\n", endpoint);
@@ -676,6 +678,13 @@ void xhci_disable_slot(struct usb_device *udev)
         udev->ep_context[ep].state = USB_DEV_EP_STATE_ABORTING;
     }
 
+    if (udev->slot_state == USB_DEV_SLOT_STATE_DISABLED)
+    {
+        KprintfH("queue DISABLE_SLOT skipped; slot_id=%ld already disabled\n", (ULONG)udev->slot_id);
+        return;
+    }
+
+    udev->slot_state = USB_DEV_SLOT_STATE_DISABLED;
     KprintfH("queue DISABLE_SLOT for slot_id=%ld addr=%lu\n", (ULONG)udev->slot_id, (ULONG)udev->poseidon_address);
     xhci_queue_command(ctrl, 0, udev->slot_id, 0, TRB_DISABLE_SLOT, NULL, udev);
 }

@@ -665,7 +665,7 @@ int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 			 io->iouh_Data, io->iouh_Length);
 
 	return xhci_stream_tx(udev, io, timeout_ms,
-				  USB_DEV_EP_STATE_RECEIVING_BULK,
+				  USB_DEV_EP_STATE_RECEIVING,
 				  TRB_TYPE(TRB_NORMAL), TRUE,
 				  FALSE,
 				  NULL);
@@ -680,7 +680,7 @@ int xhci_int_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int tim
 			 io->iouh_Data, io->iouh_Length);
 
 	return xhci_stream_tx(udev, io, timeout_ms,
-				  USB_DEV_EP_STATE_RECEIVING_INT,
+				  USB_DEV_EP_STATE_RECEIVING,
 				  TRB_TYPE(TRB_NORMAL), TRUE,
 				  FALSE,
 				  NULL);
@@ -695,7 +695,7 @@ int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int tim
 			 io->iouh_Data, io->iouh_Length, (LONG)io->iouh_Interval);
 
 	return xhci_stream_tx(udev, io, timeout_ms,
-				  USB_DEV_EP_STATE_RECEIVING_ISOC,
+				  USB_DEV_EP_STATE_RECEIVING,
 				  TRB_TYPE(TRB_ISOC) | TRB_SIA, FALSE,
 				  FALSE,
 				  NULL);
@@ -764,6 +764,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	{
 		if (xhci_check_maxpacket(udev, io->iouh_MaxPktSize))
 		{
+			KprintfH("Control endpoint max packet size changed, reconfiguring endpoints, addr %ld\n", (ULONG)udev->poseidon_address);
 			xhci_configure_endpoints(udev, TRUE, io);
 			return UHIOERR_NO_ERROR;
 		}
@@ -916,7 +917,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	KprintfH("status TRB addr: %lx\n", (ULONG)event_trb);
 	td_trb_addrs[td_trb_index++] = event_trb;
 
-	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING_CONTROL, td_trb_addrs, timeout_ms, ep_ring, td_trb_count);
+	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING, td_trb_addrs, timeout_ms, ep_ring, td_trb_count);
 
 	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
 

@@ -74,6 +74,14 @@ enum {
 	PACKET_SIZE_64  = 3,
 };
 
+enum slot_state {
+	USB_DEV_SLOT_STATE_DISABLED = 0,
+	USB_DEV_SLOT_STATE_ENABLED,
+	USB_DEV_SLOT_STATE_DEFAULT,
+	USB_DEV_SLOT_STATE_ADDRESSED,
+	USB_DEV_SLOT_STATE_CONFIGURED,
+};
+
 /**
  * struct usb_device - information about a USB device
  *
@@ -93,6 +101,7 @@ struct usb_device {
 	unsigned int    xhci_address;				/* Device address as seen by xHCI */
 	unsigned int	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */
+	enum slot_state  slot_state;	/* current slot state */
 
 	/* Maximum packet size; one of: PACKET_SIZE_* */
 	int maxpacketsize0;

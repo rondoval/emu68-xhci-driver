@@ -44,26 +44,22 @@
 typedef void (*ep_state_handler)(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
 static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
-static void ep_handle_receiving_control(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
+static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
-static void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
-static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event, struct xhci_td *td, BOOL allow_control_short);
+static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event, struct xhci_td *td);
 
 static const ep_state_handler ep_state_dispatch[] = {
     [USB_DEV_EP_STATE_IDLE] = NULL, /* use default handler */
-    [USB_DEV_EP_STATE_RECEIVING_CONTROL] = ep_handle_receiving_control,
     [USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT] = ep_handle_receiving_control_short,
-    [USB_DEV_EP_STATE_RECEIVING_BULK] = ep_handle_receiving_bulk,
-    [USB_DEV_EP_STATE_RECEIVING_INT] = ep_handle_receiving_bulk,
-    [USB_DEV_EP_STATE_RECEIVING_ISOC] = ep_handle_receiving_bulk,
+    [USB_DEV_EP_STATE_RECEIVING] = ep_handle_receiving_generic,
     [USB_DEV_EP_STATE_ABORTING] = ep_handle_aborting,
     [USB_DEV_EP_STATE_RESETTING] = NULL,
     [USB_DEV_EP_STATE_FAILED] = NULL,
     [USB_DEV_EP_STATE_RT_ISO_STOPPED] = NULL,
-    [USB_DEV_EP_STATE_RT_ISO_RUNNING] = ep_handle_receiving_bulk,
-    [USB_DEV_EP_STATE_RT_ISO_STOPPING] = ep_handle_receiving_bulk};
+    [USB_DEV_EP_STATE_RT_ISO_RUNNING] = ep_handle_receiving_generic,
+    [USB_DEV_EP_STATE_RT_ISO_STOPPING] = ep_handle_receiving_generic};
 
 static void td_free_all(struct usb_device *udev, struct ep_context *ep_ctx)
 {
@@ -294,11 +290,8 @@ void xhci_ep_set_aborting(struct usb_device *udev, int endpoint)
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
 
-    if (ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_CONTROL &&
+    if (ep_ctx->state != USB_DEV_EP_STATE_RECEIVING &&
         ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT &&
-        ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_BULK &&
-        ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_INT &&
-        ep_ctx->state != USB_DEV_EP_STATE_RECEIVING_ISOC &&
         ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
         Kprintf("EP %ld not RECEIVING (state %ld)\n", (LONG)endpoint, (LONG)ep_ctx->state);
@@ -612,7 +605,7 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
 }
 
 /* Shared TD completion helper for control/bulk/int/isoc (non-RT) and RT ISO hooks. */
-static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event, struct xhci_td *td, BOOL allow_control_short)
+static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event, struct xhci_td *td)
 {
     struct xhci_ctrl *ctrl = udev->controller;
     struct IOUsbHWReq *req = td->req;
@@ -719,7 +712,7 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
 
     /* Flag short IN transfers as runts unless explicitly allowed or expected (control). */
     if (req && status == UHIOERR_NO_ERROR && act_len < length &&
-        req->iouh_Dir == UHDIR_IN && !allow_control_short &&
+        req->iouh_Dir == UHDIR_IN && req->iouh_Req.io_Command != UHCMD_CONTROLXFER  &&
         (req->iouh_Flags & UHFF_ALLOWRUNTPKTS) == 0)
     {
         status = UHIOERR_RUNTPACKET;
@@ -734,7 +727,7 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
         else
         {
             io_reply_data(udev, req, status, act_len);
-            if (allow_control_short && comp == COMP_SHORT_TX)
+            if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER && comp == COMP_SHORT_TX)
                 ep_ctx->state = USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT;
         }
     }
@@ -762,61 +755,8 @@ static void td_complete(struct usb_device *udev, struct ep_context *ep_ctx, unio
         //TODO TRB_TO_ENDPOINT(flags)?
 }
 
-static void ep_handle_receiving_control(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
+static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
-    struct xhci_ctrl *ctrl = udev->controller;
-
-    u32 flags = LE32(event->trans_event.flags);
-    int endpoint = TRB_TO_ENDPOINT(flags);
-    u64 trb_addr = LE64(event->trans_event.buffer);
-
-    KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
-             (ULONG)flags,
-             (ULONG)LE32(event->trans_event.transfer_len),
-             (ULONG)upper_32_bits(trb_addr),
-             (ULONG)lower_32_bits(trb_addr));
-
-    ObtainSemaphore(&ep_ctx->active_tds_lock);
-    struct xhci_td *td = td_find_by_trb(ep_ctx, trb_addr);
-    ReleaseSemaphore(&ep_ctx->active_tds_lock);
-    if (!td)
-    {
-        /* Late/stale event: if EP not actively receiving, just ack and continue. */
-        if (ep_ctx->state == USB_DEV_EP_STATE_RESETTING || ep_ctx->state == USB_DEV_EP_STATE_IDLE || ep_ctx->state == USB_DEV_EP_STATE_FAILED)
-        {
-            KprintfH("Stale control event for TRB %08lx%08lx on EP %ld state=%ld\n",
-                     (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (LONG)endpoint, (LONG)ep_ctx->state);
-        }
-        else
-        {
-            Kprintf("No TD found for TRB %08lx%08lx on EP %ld (state=%ld)\n",
-                    (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (LONG)endpoint, (LONG)ep_ctx->state);
-        }
-        xhci_acknowledge_event(ctrl);
-        return;
-    }
-
-    /* Reuse shared completion helper for control paths */
-    td_complete(udev, ep_ctx, event, td, TRUE);
-}
-
-void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
-{
-    (void)ep_ctx;
-
-    /* Short data stage, clear up additional status stage event */
-    KprintfH("short-tx status event flags=%08lx status=%08lx\n",
-             (ULONG)LE32(event->generic.field[3]),
-             (ULONG)LE32(event->generic.field[2]));
-
-    // no need to confirm slot and ep as this is done by event handler
-    xhci_acknowledge_event(udev->controller);
-    xhci_ep_set_idle(udev, TRB_TO_ENDPOINT(LE32(event->generic.field[3])));
-}
-
-void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
-{
-    // TODO make it common with ep_handle_receiving_control
     struct xhci_ctrl *ctrl = udev->controller;
 
     u32 flags = LE32(event->trans_event.flags);
@@ -840,12 +780,12 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     if ((comp == COMP_UNDERRUN || comp == COMP_OVERRUN) && trb_addr == 0)
     {
         Kprintf("Ring %s on addr %ld EP %ld state=%ld inflight_tds=%lu inflight_bytes=%lu\n",
-            (comp == COMP_UNDERRUN) ? "underrun" : "overrun",
-            (LONG)udev->poseidon_address,
-            (LONG)endpoint,
-            (LONG)ep_ctx->state,
-            (ULONG)ep_ctx->rt_inflight_tds,
-            (ULONG)ep_ctx->rt_inflight_bytes);
+                (comp == COMP_UNDERRUN) ? "underrun" : "overrun",
+                (LONG)udev->poseidon_address,
+                (LONG)endpoint,
+                (LONG)ep_ctx->state,
+                (ULONG)ep_ctx->rt_inflight_tds,
+                (ULONG)ep_ctx->rt_inflight_bytes);
 
         xhci_acknowledge_event(ctrl);
 
@@ -860,13 +800,35 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     ReleaseSemaphore(&ep_ctx->active_tds_lock);
     if (!td)
     {
-        Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %ld\n",
-                (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (ULONG)flags, (ULONG)LE32(event->trans_event.transfer_len), (LONG)endpoint);
+        if (ep_ctx->state == USB_DEV_EP_STATE_RESETTING || ep_ctx->state == USB_DEV_EP_STATE_IDLE || ep_ctx->state == USB_DEV_EP_STATE_FAILED)
+        {
+            KprintfH("Stale event for TRB %08lx%08lx on EP %ld state=%ld\n",
+                     (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (LONG)endpoint, (LONG)ep_ctx->state);
+        }
+        else
+        {
+            Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %ld\n",
+                    (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (ULONG)flags, (ULONG)LE32(event->trans_event.transfer_len), (LONG)endpoint);
+        }
         xhci_acknowledge_event(ctrl);
         return;
     }
 
-    td_complete(udev, ep_ctx, event, td, FALSE);
+    td_complete(udev, ep_ctx, event, td);
+}
+
+void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
+{
+    (void)ep_ctx;
+
+    /* Short data stage, clear up additional status stage event */
+    KprintfH("short-tx status event flags=%08lx status=%08lx\n",
+             (ULONG)LE32(event->generic.field[3]),
+             (ULONG)LE32(event->generic.field[2]));
+
+    // no need to confirm slot and ep as this is done by event handler
+    xhci_acknowledge_event(udev->controller);
+    xhci_ep_set_idle(udev, TRB_TO_ENDPOINT(LE32(event->generic.field[3])));
 }
 
 void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
