@@ -241,7 +241,7 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
     }
     xhci_acknowledge_event(ctrl);
 
-    Kprintf("Stopped EP %ld...\n", endpoint);
+    KprintfH("Stopped EP %ld...\n", endpoint);
 
     /* Fail all active TDs on this endpoint */
     struct ep_context *ep_ctx = &cmd->udev->ep_context[endpoint];
@@ -522,7 +522,7 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
     u32 ep = EP_INDEX_TO_ENDPOINT(ep_index);
     struct ep_context *ep_ctx = &udev->ep_context[ep];
 
-    Kprintf("Resetting addr %ld EP %ld (index=%ld)...\n", (LONG)udev->devnum, (LONG)ep, (LONG)ep_index);
+    KprintfH("Resetting addr %ld EP %ld (index=%ld)...\n", (LONG)udev->devnum, (LONG)ep, (LONG)ep_index);
     xhci_ep_set_resetting(udev, ep);
 
     /* Fail and free any in-flight TDs so callers get a reply before reset. */
@@ -569,7 +569,7 @@ void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
        state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
         xhci_ep_set_aborting(udev, endpoint);
-        Kprintf("Stopping EP %ld...\n", endpoint);
+        KprintfH("Stopping EP %ld...\n", endpoint);
 
         // TODO suspend bit support
         xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL, udev);
@@ -683,7 +683,7 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
         struct xhci_slot_ctx *sc = xhci_get_slot_ctx(ctrl, virt_dev->out_ctx);
         if ((LE32(sc->dev_state) & DEV_ADDR_MASK) != 0)
         {
-            Kprintf("slot %ld already addressed (dev_state=%08lx), skipping.\n",
+            KprintfH("slot %ld already addressed (dev_state=%08lx), skipping.\n",
                     (ULONG)slot_id, (ULONG)LE32(sc->dev_state));
             io_reply_data(udev, req, UHIOERR_NO_ERROR, 0);
             return;

@@ -34,6 +34,5 @@ LONG abortIO(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6") 
         }
         Permit();
     }
-    KprintfH("[xhci] %s: IO request %lx aborted\n", __func__, io);
     return 0;
 }

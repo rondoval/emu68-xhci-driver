@@ -269,7 +269,6 @@ int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
 		return UHIOERR_RING_BUSY;
 	case EP_STATE_STOPPED:
 	case EP_STATE_RUNNING:
-		// KprintfH("EP STATE RUNNING.\n");
 		break;
 	default:
 		Kprintf("ERROR unknown endpoint state for ep state=%ld\n", (LONG)ep_state);
@@ -438,7 +437,7 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	unsigned int ep = io->iouh_Endpoint & 0xf;
 	if (ep == 0)
 	{
-		Kprintf("bulk/int/isoch transfer on EP0 not supported\n");
+		Kprintf("bulk/int/isoch transfer on EP0 is not supported\n");
 		return UHIOERR_BADPARAMS;
 	}
 
@@ -447,7 +446,7 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		cur_state == USB_DEV_EP_STATE_RESETTING ||
 		cur_state == USB_DEV_EP_STATE_FAILED)
 	{
-		Kprintf("Cannot submit bulk/isoc/int transfer, ep in state %d\n", cur_state);
+		KprintfH("Cannot submit bulk/isoc/int transfer, ep in state %d\n", cur_state);
 		return UHIOERR_RING_BUSY;
 	}	
 	
@@ -508,7 +507,7 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	unsigned int td_trb_count = (unsigned int)num_trbs;
 	if (!ring_has_room(ring, num_trbs + 1))
 	{
-		Kprintf("Ring full ep=%ld needed=%ld queued=%ld capacity=%ld\n",
+		KprintfH("Ring full ep=%ld needed=%ld queued=%ld capacity=%ld\n",
 			   (LONG)ep,
 			   (LONG)num_trbs + 1,
 			   (LONG)ring->queued_trbs,
@@ -552,8 +551,6 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		trb_buff_len = length;
 
 	first_trb = TRUE;
-	KprintfH("maxpacketsize=%ld num_trbs=%ld\n",
-			 (LONG)io->iouh_MaxPktSize, (LONG)num_trbs);
 
 	if (length > 0)
 		/* flush the buffer before handing it to the controller */
@@ -751,7 +748,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		state == USB_DEV_EP_STATE_RESETTING ||
 		state == USB_DEV_EP_STATE_FAILED)
 	{
-		Kprintf("Cannot submit control transfer, ep in state %d\n", state);
+		KprintfH("Cannot submit control transfer, ep in state %d\n", state);
 		return UHIOERR_RING_BUSY;
 	}
 
@@ -796,7 +793,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	KprintfH("prepare_ring ep_state=%lx\n", (ULONG)(LE32(ep_ctx->ep_info) & EP_STATE_MASK));
 	if (!ring_has_room(ep_ring, num_trbs + 1))
 	{
-		Kprintf("Control ring full: needed %ld TRBs\n", (LONG)(num_trbs + 1));
+		KprintfH("Control ring full: needed %ld TRBs\n", (LONG)(num_trbs + 1));
 		io->iouh_DriverPrivate2 = XHCI_REQ_RING_BUSY;
 		return UHIOERR_RING_BUSY;
 	}
@@ -916,7 +913,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	KprintfH("status TRB fields: %08lx %08lx %08lx %08lx\n",
 			 (ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
 	dma_addr_t event_trb = queue_trb(ctrl, ep_ring, FALSE, trb_fields);
-	KprintfH("event TRB addr: %lx\n", (ULONG)event_trb);
+	KprintfH("status TRB addr: %lx\n", (ULONG)event_trb);
 	td_trb_addrs[td_trb_index++] = event_trb;
 
 	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING_CONTROL, td_trb_addrs, timeout_ms, ep_ring, td_trb_count);

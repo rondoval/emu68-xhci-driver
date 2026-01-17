@@ -66,7 +66,7 @@ static int Do_NSCMD_DEVICEQUERY(struct IOStdReq *io)
 static int Do_CMD_FLUSH(struct IOUsbHWReq *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: CMD_FLUSH\n", __func__);
+    KprintfH("[xhci] %s: CMD_FLUSH\n", __func__);
 
     struct IOUsbHWReq *req;
     /* Flush and cancel all requests */
@@ -124,7 +124,6 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
     {
         if (!tag->ti_Data)
         {
-            KprintfH("[xhci] %s: Tag 0x%lx has NULL data ptr, skipping\n", __func__, tag->ti_Tag);
             continue;
         }
         ULONG *out = (ULONG *)tag->ti_Data;
@@ -147,17 +146,13 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
             filled++;
             break;
         case UHA_Version:
-            *out = (DEVICE_VERSION << 8) | (DEVICE_REVISION & 0xFF);
+            *out = DEVICE_VERSION;
             filled++;
             break;
         case UHA_Revision:
-        {
-            UBYTE rev;
-            dm_pci_read_config8(unit->xhci_ctrl->pci_dev, PCI_REVISION_ID, &rev);
-            *out = rev;
+            *out = DEVICE_REVISION;
             filled++;
             break;
-        }
         case UHA_Description:
             *out = (ULONG)(APTR) "Generic xHCI USB Controller Driver";
             filled++;
@@ -177,7 +172,7 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
             break;
         default:
             // Unknown tag: leave untouched
-            Kprintf("[xhci] %s: Unknown tag 0x%lx, skipping\n", __func__, tag->ti_Tag);
+            KprintfH("[xhci] %s: Unknown tag 0x%lx, skipping\n", __func__, tag->ti_Tag);
             break;
         }
         KprintfH("[xhci] %s: Processed tag 0x%lx\n", __func__, tag->ti_Tag);
@@ -258,7 +253,7 @@ static inline int Do_UHCMD_CONTROLXFER(struct IOUsbHWReq *io)
 static inline int Do_UHCMD_ISOXFER(struct IOUsbHWReq *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: UHCMD_ISOXFER\n", __func__);
+    KprintfH("[xhci] %s: UHCMD_ISOXFER\n", __func__);
 
     return usb_glue_iso(unit, io);
 }

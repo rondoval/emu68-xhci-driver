@@ -178,7 +178,6 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	Kprintf("[xhci] %s: Opening unit %ld with flags %lx\n", __func__, unitNumber, flags);
 	if (unit->unit.unit_OpenCnt > 0)
 	{
-		Kprintf("[xhci] %s: Unit already running; using message to add opener\n", __func__);
 		unit->unit.unit_OpenCnt++;
 		Kprintf("[xhci] %s: Unit opened successfully, current open count: %ld\n", __func__, unit->unit.unit_OpenCnt);
 		return UHIOERR_NO_ERROR;

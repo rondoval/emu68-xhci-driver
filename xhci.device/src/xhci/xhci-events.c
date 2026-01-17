@@ -488,7 +488,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
                 continue;
             }
 
-            Kprintf("XHCI TD timeout on slot %ld ep %ld (req=%lx deadline=%ld now=%ld)\n",
+            KprintfH("XHCI TD timeout on slot %ld ep %ld (req=%lx deadline=%ld now=%ld)\n",
                     (LONG)udev->slot_id, (LONG)ep, (LONG)expired->req, (LONG)expired->deadline_us, (LONG)now);
 
             struct IOUsbHWReq *expired_req = expired->req;
@@ -544,7 +544,7 @@ static void record_transfer_result(union xhci_trb *event, int length,
     case COMP_SUCCESS:
         if (*act_len != length)
         {
-            Kprintf("Short transfer: expected %ld, got %ld\n",
+            KprintfH("Short transfer: expected %ld, got %ld\n",
                     length, *act_len);
         }
         /* fallthrough */
@@ -552,7 +552,7 @@ static void record_transfer_result(union xhci_trb *event, int length,
         *status = UHIOERR_NO_ERROR;
         break;
     case COMP_STALL:
-        Kprintf("Device stalled\n");
+        KprintfH("Device stalled\n");
         *status = UHIOERR_STALL;
         break;
     case COMP_TX_ERR:
@@ -566,20 +566,20 @@ static void record_transfer_result(union xhci_trb *event, int length,
         *status = UHIOERR_HOSTERROR;
         break;
     case COMP_BABBLE:
-        Kprintf("Babble detected\n");
+        KprintfH("Babble detected\n");
         *status = UHIOERR_BABBLE;
         break;
         //TODO more codes, e.g. underrun/overrun
     case COMP_BUFF_OVER:
-        Kprintf("Isoc buffer overrun\n");
+        KprintfH("Isoc buffer overrun\n");
         *status = UHIOERR_OVERFLOW;
         break;
     case COMP_BW_OVER:
-        Kprintf("Bandwidth overrun\n");
+        KprintfH("Bandwidth overrun\n");
         *status = UHIOERR_HOSTERROR;
         break;
     case COMP_SPLIT_ERR:
-        Kprintf("Split transaction error\n");
+        KprintfH("Split transaction error\n");
         *status = UHIOERR_TIMEOUT;
         break;
     default:
@@ -599,8 +599,10 @@ static void record_transfer_result(union xhci_trb *event, int length,
  */
 static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
-    Kprintf("No handler for endpoint state %ld\n", ep_ctx->state);
-    Kprintf("Event TRB: (%08lx %08lx %08lx %08lx)\n",
+    (void)ep_ctx;
+    (void)event;
+    KprintfH("No handler for endpoint state %ld\n", ep_ctx->state);
+    KprintfH("Event TRB: (%08lx %08lx %08lx %08lx)\n",
             (ULONG)LE32(event->generic.field[0]),
             (ULONG)LE32(event->generic.field[1]),
             (ULONG)LE32(event->generic.field[2]),

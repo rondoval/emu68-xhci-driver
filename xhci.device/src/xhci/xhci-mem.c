@@ -937,7 +937,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 
 	slot_ctx->dev_info = LE32(dev_info);
 
-	KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%ld port_num=%ld root port_num=%ldspeed=%ld route=%ld\n",
+	KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%ld port_num=%ld root port_num=%ld speed=%ld route=%ld\n",
 			 (ULONG)udev->parent->devnum, udev->parent_port, port_num, (ULONG)speed, (ULONG)udev->route);
 
 	u32 dev_info2 = LE32(slot_ctx->dev_info2);

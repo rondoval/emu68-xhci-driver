@@ -63,7 +63,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     /* Signal parent that Unit task is up and running now */
     Signal(parent, SIGBREAKF_CTRL_F);
 
-    Kprintf("[genet] %s: Entering main unit task loo\n", __func__);
+    Kprintf("[xhci] %s: Entering main unit task loop\n", __func__);
 
     ULONG sigset;
     ULONG waitMask = (1UL << unit->unit.unit_MsgPort.mp_SigBit) |

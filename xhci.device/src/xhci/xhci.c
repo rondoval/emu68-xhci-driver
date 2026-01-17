@@ -428,6 +428,7 @@ static struct usb_interface_altsetting *xhci_select_active_alt(struct usb_interf
 	return fallback;
 }
 
+#ifdef DEBUG_HIGH
 static void xhci_dump_interface(unsigned int index, const struct usb_interface *iface)
 {
 	if (!iface)
@@ -497,6 +498,7 @@ static void xhci_dump_config(const struct usb_config *cfg, LONG devnum)
 	for (unsigned int i = 0; i < cfg->no_of_if; ++i)
 		xhci_dump_interface(i, &cfg->if_desc[i]);
 }
+#endif
 
 static int xhci_init_ep_contexts_if(struct usb_device *udev,
 									struct xhci_ctrl *ctrl,
@@ -936,8 +938,10 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
 	for (unsigned int i = 0; i < cfg->no_of_if; ++i)
 		xhci_select_active_alt(&cfg->if_desc[i]);
 
-	/* Dump entire cfg using kprintf (all fields and all interfaces and endpoints) */
+#ifdef DEBUG_HIGH
+		/* Dump entire cfg using kprintf (all fields and all interfaces and endpoints) */
 	xhci_dump_config(cfg, (LONG)udev->devnum);
+#endif
 
 	struct xhci_container_ctx *out_ctx;
 	struct xhci_container_ctx *in_ctx;
@@ -1149,9 +1153,13 @@ static BOOL xhci_roothub_collect_status(struct xhci_ctrl *ctrl,
 		change = TRUE;
 	}
 
+#ifdef DEBUG_HIGH
 	if (!change && truncated)
-		Kprintf("roothub status truncated: need %ld bytes, have %ld\n",
+		KprintfH("roothub status truncated: need %ld bytes, have %ld\n",
 				(LONG)needed, (LONG)buffer_len);
+#else
+	(void)truncated;
+#endif
 
 	if (change && actual_len)
 		*actual_len = (ULONG)out_len;

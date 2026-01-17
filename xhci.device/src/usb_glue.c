@@ -149,10 +149,8 @@ static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUs
 
     setup->wIndex = cpu_to_le16(fixed);
 
-#ifdef DEBUG_HIGH
-    KprintfH("patched endpoint address wIndex from %02lx to %02lx for epnum %ld\n",
+    KprintfH("Patched endpoint address wIndex from %02lx to %02lx for epnum %ld\n",
              (ULONG)wIndex, (ULONG)fixed, (LONG)epnum);
-#endif
 }
 
 /* Issue an internal CLEAR_FEATURE(ENDPOINT_HALT) to endpoint (by ep_index) on udev. Fire-and-forget. */
@@ -320,10 +318,6 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
         KprintfH("new device addr=%ld\n", (LONG)devaddr);
         udev = usb_glue_alloc_udev(ctrl, devaddr);
     }
-    else
-    {
-        KprintfH("existing device addr=%ld\n", (LONG)devaddr);
-    }
 
     return udev;
 }
@@ -334,24 +328,22 @@ static inline BOOL minlist_empty(const struct MinList *list)
     return list->mlh_Head == (struct MinNode *)&list->mlh_Tail;
 }
 
-static void enqueue_pending_request(struct ep_context *ep_ctx, struct IOUsbHWReq *io, const char *reason)
+static void enqueue_pending_request(struct ep_context *ep_ctx, struct IOUsbHWReq *io)
 {
     io->iouh_DriverPrivate1 = ep_ctx;
     AddTailMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
-    Kprintf("queued request cmd=%ld ep=%ld (%s)\n",
+    KprintfH("queued request cmd=%ld ep=%ld\n",
              (LONG)io->iouh_Req.io_Command,
-             (LONG)(io->iouh_Endpoint & 0x0F),
-             reason);
+             (LONG)(io->iouh_Endpoint & 0x0F));
 }
 
-static void enqueue_pending_request_front(struct ep_context *ep_ctx, struct IOUsbHWReq *io, const char *reason)
+static void enqueue_pending_request_front(struct ep_context *ep_ctx, struct IOUsbHWReq *io)
 {
     io->iouh_DriverPrivate1 = ep_ctx;
     AddHeadMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
-    Kprintf("requeued request cmd=%ld ep=%ld (%s)\n",
+    KprintfH("requeued request cmd=%ld ep=%ld\n",
              (LONG)io->iouh_Req.io_Command,
-             (LONG)(io->iouh_Endpoint & 0x0F),
-             reason);
+             (LONG)(io->iouh_Endpoint & 0x0F));
 }
 
 static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
@@ -412,9 +404,9 @@ static int handle_ring_busy(struct usb_device *udev, struct IOUsbHWReq *io)
 
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
     if (io->iouh_DriverPrivate1 == ep_ctx)
-        enqueue_pending_request_front(ep_ctx, io, "ring-busy");
+        enqueue_pending_request_front(ep_ctx, io);
     else
-        enqueue_pending_request(ep_ctx, io, "ring-busy");
+        enqueue_pending_request(ep_ctx, io);
 
     return COMMAND_SCHEDULED;
 }
@@ -454,7 +446,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
 {
     if (len < 2)
     {
-        KprintfH("too short len=%ld\n", (LONG)len);
+        KprintfH("too short, len=%ld\n", (LONG)len);
         return;
     }
 
@@ -872,7 +864,7 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     if (udev->devnum == ctrl->rootdev)
     {
-        Kprintf("isochronous transfer on root hub are not supported\n");
+        Kprintf("isochronous transfers on root hub are not supported\n");
         io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
         return COMMAND_PROCESSED;
     }
@@ -941,15 +933,17 @@ int usb_glue_add_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 
     CopyMem(io, ep_ctx->rt_template_req, sizeof(struct IOUsbHWReq));
 
+#ifdef DEBUG_HIGH
     struct IOUsbHWRTIso *rt = (struct IOUsbHWRTIso *)io->iouh_Data;
     if (io->iouh_Dir == UHDIR_IN)
     {
-        Kprintf("Added ISO handler: EP %ld in req hook: %lx, in done hook: %lx, prefetch: %ld\n", endpoint, rt->urti_InReqHook, rt->urti_InDoneHook, rt->urti_OutPrefetch);
+        KprintfH("Added ISO handler: EP %ld in req hook: %lx, in done hook: %lx, prefetch: %ld\n", endpoint, rt->urti_InReqHook, rt->urti_InDoneHook, rt->urti_OutPrefetch);
     }
     else
     {
-        Kprintf("Added ISO handler: EP %ld out req hook: %lx, out done hook: %lx, prefetch: %ld\n", endpoint, rt->urti_OutReqHook, rt->urti_OutDoneHook, rt->urti_OutPrefetch);
+        KprintfH("Added ISO handler: EP %ld out req hook: %lx, out done hook: %lx, prefetch: %ld\n", endpoint, rt->urti_OutReqHook, rt->urti_OutDoneHook, rt->urti_OutPrefetch);
     }
+#endif
 
     io->iouh_Actual = 0;
     io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
@@ -995,7 +989,7 @@ int usb_glue_rem_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
             ep_ctx->rt_template_req = NULL;
         }
         xhci_ep_set_idle(udev, endpoint);
-        Kprintf("Successfully removed ISO handler (state reset to IDLE)\n");
+        KprintfH("Successfully removed ISO handler (state reset to IDLE)\n");
         io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
         return COMMAND_PROCESSED;
     }
@@ -1043,7 +1037,7 @@ static void xhci_ep_schedule_rt_iso_out(struct usb_device *udev, struct ep_conte
 
         if (!rt_buffer_req.ubr_Buffer || rt_buffer_req.ubr_Length == 0)
         {
-            Kprintf("RT ISO hook provided no buffer/length\n");
+            KprintfH("RT ISO hook provided no buffer/length\n");
             FreeVecPooled(ctrl->memoryPool, rt_io);
             break;
         }
@@ -1191,7 +1185,7 @@ void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint)
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
-        Kprintf("EP not in RT_ISO_RUNNING\n");
+        KprintfH("EP not in RT_ISO_RUNNING\n");
         return;
     }
 
@@ -1226,7 +1220,7 @@ void usb_glue_notify_rt_iso_stopped(struct usb_device *udev, int endpoint)
 
 int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
-    Kprintf("Starting RT ISO transfer\n");
+    KprintfH("Starting RT ISO transfer\n");
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
     if (!udev)
         goto badparams;
@@ -1260,7 +1254,7 @@ badparams:
 
 int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
-    Kprintf("Stopping RT ISO transfer\n");
+    KprintfH("Stopping RT ISO transfer\n");
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
     if (!udev)
         goto badparams;
@@ -1500,16 +1494,16 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             UWORD status = LE16(((UWORD *)io->iouh_Data)[0]);
             UWORD change = LE16(((UWORD *)io->iouh_Data)[1]);
 
-            Kprintf("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->devnum, (LONG)port, (ULONG)status, (ULONG)change);
+            KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->devnum, (LONG)port, (ULONG)status, (ULONG)change);
 
             /* Drop children immediately if port power is off, regardless of change bits. */
             if ((status & USB_PORT_STAT_POWER) == 0)
             {
-                Kprintf("hub addr=%ld port=%ld lost power; removing child if any\n", (LONG)udev->devnum, (LONG)port);
+                KprintfH("hub addr=%ld port=%ld lost power; removing child if any\n", (LONG)udev->devnum, (LONG)port);
                 struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
                 if (child)
                 {
-                    Kprintf("hub addr=%ld port=%ld power-off, removing child addr=%ld slot=%ld\n",
+                    KprintfH("hub addr=%ld port=%ld power-off, removing child addr=%ld slot=%ld\n",
                             (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
                     usb_glue_disconnect_device(ctrl, child, TRUE);
                 }
@@ -1518,11 +1512,11 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             /* If the port is disabled, tear down any attached child even if power is still on. */
             if ((status & USB_PORT_STAT_ENABLE) == 0)
             {
-                Kprintf("hub addr=%ld port=%ld disabled; removing child if any\n", (LONG)udev->devnum, (LONG)port);
+                KprintfH("hub addr=%ld port=%ld disabled; removing child if any\n", (LONG)udev->devnum, (LONG)port);
                 struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
                 if (child)
                 {
-                    Kprintf("hub addr=%ld port=%ld disabled, removing child addr=%ld slot=%ld\n",
+                    KprintfH("hub addr=%ld port=%ld disabled, removing child addr=%ld slot=%ld\n",
                             (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
                     usb_glue_disconnect_device(ctrl, child, TRUE);
                 }
@@ -1534,25 +1528,25 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
                 if (status & USB_PORT_STAT_CONNECTION)
                 {
                     /* Remember parent/port for the next default-address attach without split info. */
-                    Kprintf("hub addr=%ld port=%ld connected; remembering for pending attach\n", (LONG)udev->devnum, (LONG)port);
+                    KprintfH("hub addr=%ld port=%ld connected; remembering for pending attach\n", (LONG)udev->devnum, (LONG)port);
                     ctrl->pending_parent = udev;
                     ctrl->pending_parent_port = port;
                 }
 
                 if ((status & USB_PORT_STAT_CONNECTION) == 0)
                 {
-                    Kprintf("hub addr=%ld port=%ld disconnected; scanning children for match\n", (LONG)udev->devnum, (LONG)port);
+                    KprintfH("hub addr=%ld port=%ld disconnected; scanning children for match\n", (LONG)udev->devnum, (LONG)port);
                     struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
 
                     if (child)
                     {
-                        Kprintf("hub addr=%ld port=%ld disconnected, removing child addr=%ld slot=%ld\n",
+                        KprintfH("hub addr=%ld port=%ld disconnected, removing child addr=%ld slot=%ld\n",
                                 (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
                         usb_glue_disconnect_device(ctrl, child, TRUE);
                     }
                     else
                     {
-                        Kprintf("hub addr=%ld port=%ld disconnect: no child matched parent addr=%ld\n",
+                        KprintfH("hub addr=%ld port=%ld disconnect: no child matched parent addr=%ld\n",
                                 (LONG)udev->devnum, (LONG)port, (LONG)udev->devnum);
                     }
                 }
@@ -1563,7 +1557,7 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
              */
             if ((change & USB_PORT_STAT_C_RESET) && (status & USB_PORT_STAT_CONNECTION))
             {
-                Kprintf("hub addr=%ld port=%ld reset-complete; remembering for pending attach\n", (LONG)udev->devnum, (LONG)port);
+                KprintfH("hub addr=%ld port=%ld reset-complete; remembering for pending attach\n", (LONG)udev->devnum, (LONG)port);
                 ctrl->pending_parent = udev;
                 ctrl->pending_parent_port = port;
             }
@@ -1583,7 +1577,7 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
             if (child)
             {
-                Kprintf("hub addr=%ld port=%ld CLEAR_FEATURE(%s); removing child addr=%ld slot=%ld\n",
+                KprintfH("hub addr=%ld port=%ld CLEAR_FEATURE(%s); removing child addr=%ld slot=%ld\n",
                         (LONG)udev->devnum, (LONG)port,
                         (LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_POWER) ? "PORT_POWER" : "PORT_ENABLE",
                         (LONG)child->devnum, (LONG)child->slot_id);
@@ -1629,7 +1623,7 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             if (current->slot_id && ctrl->devs[current->slot_id])
                 ctrl->devs[current->slot_id]->udev = current;
 
-            Kprintf("migrated ctx from addr %ld to %ld\n", (LONG)old_addr, (LONG)new_addr);
+            KprintfH("migrated ctx from addr %ld to %ld\n", (LONG)old_addr, (LONG)new_addr);
         }
     }
 
@@ -1664,7 +1658,7 @@ void io_reply_failed(struct IOUsbHWReq *io, int err)
             return;
         }
         
-        Kprintf("addr %ld EP %ld err=%ld\n", (LONG)io->iouh_DevAddr, (LONG)io->iouh_Endpoint, (LONG)err);
+        KprintfH("addr %ld EP %ld err=%ld\n", (LONG)io->iouh_DevAddr, (LONG)io->iouh_Endpoint, (LONG)err);
         ReplyMsg((struct Message *)io);
     }
 }
@@ -1702,7 +1696,7 @@ static void usb_glue_flush_udev(struct usb_device *udev, unsigned int reply_code
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
         return;
-    Kprintf("flushing device addr=%ld slot=%ld\n", (LONG)udev->devnum, (LONG)udev->slot_id);
+    KprintfH("flushing device addr=%ld slot=%ld\n", (LONG)udev->devnum, (LONG)udev->slot_id);
 
     if (ctrl->root_int_req && ctrl->root_int_req->iouh_DevAddr == udev->devnum)
     {
@@ -1742,7 +1736,7 @@ void usb_glue_disconnect_device(struct xhci_ctrl *ctrl, struct usb_device *udev,
     }
 
 
-    Kprintf("disconnect device addr=%ld slot=%ld port=%ld (devices[%ld]=%lx)\n",
+    KprintfH("disconnect device addr=%ld slot=%ld port=%ld (devices[%ld]=%lx)\n",
             (LONG)udev->devnum,
             (LONG)udev->slot_id,
             (LONG)udev->parent_port,
