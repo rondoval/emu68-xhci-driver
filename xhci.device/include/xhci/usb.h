@@ -35,6 +35,8 @@
 #define USB_MAXENDPOINTS		16
 #define USB_MAXCHILDREN			8	/* This is arbitrary */
 
+#define USB_MAX_ADDRESS 		127
+
 #define USB_CNTL_TIMEOUT 100 /* 100ms timeout */
 
 struct usb_interface_altsetting {
@@ -87,7 +89,8 @@ enum {
  */
 struct usb_device {
 	BOOL used;
-	unsigned int	devnum;			/* Device address on USB bus */
+	unsigned int	poseidon_address;			/* Device address as seen by Poseidon */
+	unsigned int    xhci_address;				/* Device address as seen by xHCI */
 	unsigned int	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */
 

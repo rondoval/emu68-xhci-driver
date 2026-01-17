@@ -143,7 +143,7 @@ void xhci_dump_slot_ctx(const char *tag, const struct xhci_slot_ctx *slot_ctx)
             tt_port,
             tt_think_code,
             tt_think_bits);
-    Kprintf("%s  dev_state=0x%08lx address=%lu state=%s(%lu)\n",
+    Kprintf("%s  dev_state=0x%08lx xhci_address=%lu state=%s(%lu)\n",
             pfx,
             (unsigned long)dev_state,
             address,

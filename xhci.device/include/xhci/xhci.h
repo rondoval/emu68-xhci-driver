@@ -1252,7 +1252,7 @@ struct xhci_ctrl
 	struct xhci_scratchpad *scratchpad;
 	struct xhci_virt_device *devs[MAX_HC_SLOTS];
 	struct usb_hub_descriptor hub_desc;
-	unsigned int rootdev;
+	unsigned int rootdev; /* Poseidon address */
 	struct IOUsbHWReq *root_int_req;
 	u16 hci_version;
 	int page_size;
@@ -1260,7 +1260,7 @@ struct xhci_ctrl
 
 	APTR memoryPool;
 	struct pci_device *pci_dev;
-	struct usb_device *devices[MAX_HC_SLOTS];
+	struct usb_device *devices_by_poseidon_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *pending_parent; /* parent hub pending for next default-address child */
 	unsigned int pending_parent_port;
 	struct MinList pending_commands; /* list of pending commands */

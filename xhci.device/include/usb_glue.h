@@ -28,7 +28,7 @@ int usb_glue_bus_suspend(struct XHCIUnit *unit);
 int usb_glue_bus_resume(struct XHCIUnit *unit);
 int usb_glue_bus_oper(struct XHCIUnit *unit);
 
-void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr);
+void usb_glue_free_udev_slot(struct usb_device *udev);
 void usb_glue_disconnect_device(struct xhci_ctrl *ctrl, struct usb_device *udev, BOOL recursive);
 void usb_glue_flush_queues(struct XHCIUnit *unit);
 

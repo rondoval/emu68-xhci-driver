@@ -34,11 +34,11 @@
 #define RT_ISO_IN_TARGET_TDS 16
 
 static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io);
-static void usb_glue_flush_udev(struct usb_device *udev, unsigned int reply_code);
 static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr);
 static UBYTE usb_glue_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum);
 static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUsbHWReq *io);
 static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, struct usb_device *hub, unsigned int port);
+static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number);
 
 static unsigned int route_depth(unsigned int route)
 {
@@ -67,24 +67,59 @@ static unsigned int build_route_string(struct usb_device *parent, unsigned int p
     return parent->route | (nibble << (depth * 4));
 }
 
-static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr)
+static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number)
 {
-    if (!ctrl || addr > 127)
+    if (!udev || !udev->active_config)
+        return FALSE;
+
+    struct usb_config *cfg = udev->active_config;
+    for (int i = 0; i < cfg->no_of_if; ++i)
+    {
+        struct usb_interface *iface = &cfg->if_desc[i];
+        if (iface->interface_number != (UBYTE)iface_number)
+            continue;
+
+        struct usb_interface_altsetting *alt = iface->active_altsetting;
+        if (!alt)
+            return FALSE;
+
+        for (int e = 0; e < alt->no_of_ep; ++e)
+        {
+            UBYTE ep_addr = alt->ep_desc[e].bEndpointAddress;
+            unsigned int epnum = ep_addr & 0x0F;
+            if (epnum == 0 || epnum >= USB_MAXENDPOINTS)
+                continue;
+
+            enum ep_state state = udev->ep_context[epnum].state;
+            if (state == USB_DEV_EP_STATE_RT_ISO_RUNNING ||
+                state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
+                return TRUE;
+        }
+
+        return FALSE;
+    }
+
+    return FALSE;
+}
+
+static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD poseidon_address)
+{
+    if (!ctrl || poseidon_address > USB_MAX_ADDRESS)
         return NULL;
 
-    if (ctrl->devices[addr])
-        usb_glue_free_udev_slot(ctrl, addr);
+    if (ctrl->devices_by_poseidon_address[poseidon_address])
+        usb_glue_free_udev_slot(ctrl->devices_by_poseidon_address[poseidon_address]);
 
     struct usb_device *udev = AllocVecPooled(ctrl->memoryPool, sizeof(*udev));
     if (!udev)
     {
-        Kprintf("Failed to allocate usb_device for addr %ld\n", (LONG)addr);
+        Kprintf("Failed to allocate usb_device for addr %ld\n", (LONG)poseidon_address);
         return NULL;
     }
 
     _memset(udev, 0, sizeof(*udev));
     udev->used = 1;
-    udev->devnum = addr;
+    udev->poseidon_address = poseidon_address;
     udev->controller = ctrl;
     udev->maxpacketsize0 = PACKET_SIZE_8;
 
@@ -97,7 +132,7 @@ static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr
         InitSemaphore(&udev->ep_context[i].active_tds_lock);
     }
 
-    ctrl->devices[addr] = udev;
+    ctrl->devices_by_poseidon_address[poseidon_address] = udev;
     return udev;
 }
 
@@ -185,7 +220,7 @@ void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index)
     io->iouh_SetupData.wIndex = cpu_to_le16(ep_addr);
     io->iouh_SetupData.wLength = cpu_to_le16(0);
 
-    io->iouh_DevAddr = udev->devnum;
+    io->iouh_DevAddr = udev->poseidon_address;
     io->iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
     /* Split/hub routing if available from udev */
@@ -225,7 +260,7 @@ static void usb_glue_queue_clear_tt(struct usb_device *hub, u16 devinfo, u16 tt_
     io->iouh_SetupData.wIndex = cpu_to_le16(tt_port);
     io->iouh_SetupData.wLength = cpu_to_le16(0);
 
-    io->iouh_DevAddr = hub->devnum;
+    io->iouh_DevAddr = hub->poseidon_address;
     io->iouh_MaxPktSize = 8U << hub->maxpacketsize0;
 
     if (hub->speed == USB_SPEED_LOW)
@@ -258,7 +293,7 @@ void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, in
     BOOL out = (ep_index & 0x1) != 0;
 
     u16 devinfo = epnum;
-    devinfo |= ((u16)udev->devnum) << 4;
+    devinfo |= ((u16)udev->xhci_address) << 4;
     devinfo |= ((u16)ep_type) << 11;
     if (!out)
         devinfo |= 1 << 15;
@@ -273,9 +308,10 @@ void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, in
 static void update_device_topology(struct XHCIUnit *unit, struct usb_device *udev,
                                    const struct IOUsbHWReq *io)
 {
+    //TODO is this needed at all? could be done once
     if (io->iouh_Flags & UHFF_SPLITTRANS)
     {
-        struct usb_device *parent = unit->xhci_ctrl->devices[io->iouh_SplitHubAddr & 0x7F];
+        struct usb_device *parent = unit->xhci_ctrl->devices_by_poseidon_address[io->iouh_SplitHubAddr & 0x7F];
         if (parent)
         {
             unsigned int port = io->iouh_SplitHubPort & 0xFF;
@@ -303,20 +339,20 @@ static void update_device_topology(struct XHCIUnit *unit, struct usb_device *ude
     }
 }
 
-static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD devaddr)
+static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD poseidon_address)
 {
-    if (!unit || !unit->xhci_ctrl || devaddr > 127)
+    if (!unit || !unit->xhci_ctrl || poseidon_address > USB_MAX_ADDRESS)
         return NULL;
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    struct usb_device *udev = ctrl->devices[devaddr];
+    struct usb_device *udev = ctrl->devices_by_poseidon_address[poseidon_address];
     if (!udev)
     {
         // We'll be only creating contexts for newly detected devices
-        if (devaddr != 0 && devaddr != ctrl->rootdev)
+        if (poseidon_address != 0 && poseidon_address != ctrl->rootdev)
             return NULL;
-        KprintfH("new device addr=%ld\n", (LONG)devaddr);
-        udev = usb_glue_alloc_udev(ctrl, devaddr);
+        KprintfH("new device addr=%ld\n", (LONG)poseidon_address);
+        udev = usb_glue_alloc_udev(ctrl, poseidon_address);
     }
 
     return udev;
@@ -655,7 +691,6 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         }
     }
     AddHeadMinList(&udev->configurations, (struct MinNode *)conf);
-    // TODO why AddTailMinList doesn't work here?
 
     return;
 
@@ -698,7 +733,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 
     {
         KprintfH("dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx flags=%lx timeout=%ld maxPktSize=%ld\n",
-                 (ULONG)udev, (ULONG)udev->devnum,
+                 (ULONG)udev, (ULONG)udev->poseidon_address,
                  (ULONG)io->iouh_SetupData.bmRequestType,
                  (ULONG)io->iouh_SetupData.bRequest,
                  LE16(io->iouh_SetupData.wValue),
@@ -761,7 +796,8 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     /* If we don't have a slot yet, enable one and allocate Virt Dev */
     if (udev->slot_id == 0)
     {
-        //TODO ugly hack, we should create the slot...
+        //TODO ugly hack, we should create the slot, then either move to default and process the request
+        // or address device and then process the request
         io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
         return COMMAND_PROCESSED;
     }
@@ -788,7 +824,7 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     KprintfH("dev=%ld addr=%ld ep=%ld dir=%s len=%ld flags=%lx tmo=%ld\n",
-             (ULONG)udev, (ULONG)udev->devnum, io->iouh_Endpoint & 0x0F, (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+             (ULONG)udev, (ULONG)udev->poseidon_address, io->iouh_Endpoint & 0x0F, (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
              (LONG)io->iouh_Length, (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout);
 
     unsigned int timeout_ms = 0;
@@ -817,7 +853,7 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    if (udev->devnum == ctrl->rootdev)
+    if (udev->poseidon_address == ctrl->rootdev)
     {
         if (ctrl->root_int_req)
         {
@@ -832,7 +868,7 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     KprintfH("dev=%lx addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx timeout=%ld maxpkt=%ld\n",
-             (ULONG)udev, (ULONG)udev->devnum, io->iouh_Endpoint & 0x0F, (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+             (ULONG)udev, (ULONG)udev->poseidon_address, io->iouh_Endpoint & 0x0F, (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
              (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
              (ULONG)io->iouh_Flags, (LONG)io->iouh_NakTimeout, (LONG)io->iouh_MaxPktSize);
 
@@ -862,7 +898,7 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    if (udev->devnum == ctrl->rootdev)
+    if (udev->poseidon_address == ctrl->rootdev)
     {
         Kprintf("isochronous transfers on root hub are not supported\n");
         io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
@@ -870,7 +906,7 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     KprintfH("dev=%lx addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx maxpkt=%ld\n",
-             (ULONG)udev, (ULONG)udev->devnum, io->iouh_Endpoint & 0x0F,
+             (ULONG)udev, (ULONG)udev->poseidon_address, io->iouh_Endpoint & 0x0F,
              (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
              (LONG)io->iouh_Length, (LONG)io->iouh_Interval,
              (ULONG)io->iouh_Flags, (LONG)io->iouh_MaxPktSize);
@@ -1220,7 +1256,13 @@ void usb_glue_notify_rt_iso_stopped(struct usb_device *udev, int endpoint)
 
 int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
-    KprintfH("Starting RT ISO transfer\n");
+    KprintfH("RT ISO start addr=%ld ep=%ld dir=%s frame=%lu interval=%lu len=%lu\n",
+             (LONG)io->iouh_DevAddr,
+             (LONG)(io->iouh_Endpoint & 0x0F),
+             (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+             (ULONG)io->iouh_Frame,
+             (ULONG)io->iouh_Interval,
+             (ULONG)io->iouh_Length);
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
     if (!udev)
         goto badparams;
@@ -1238,6 +1280,7 @@ int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     /* microframe_index is in 125us units; for FS frames use the frame number (divide by 8). */
+    xhci_inval_cache((uintptr_t)&unit->xhci_ctrl->run_regs->microframe_index, sizeof(UWORD));
     ep_ctx->rt_next_frame = (readl(unit->xhci_ctrl->run_regs->microframe_index) >> 3) & 0xffff;
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
     xhci_ep_schedule_rt_iso(udev, endpoint);
@@ -1254,7 +1297,8 @@ badparams:
 
 int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
-    KprintfH("Stopping RT ISO transfer\n");
+    KprintfH("RT ISO stop requested addr=%ld ep=%ld\n",
+             (LONG)io->iouh_DevAddr, (LONG)(io->iouh_Endpoint & 0x0F));
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
     if (!udev)
         goto badparams;
@@ -1296,6 +1340,11 @@ int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
     else
     {
+        KprintfH("RT ISO stopping addr=%ld ep=%ld inflight_tds=%lu inflight_bytes=%lu\n",
+                 (LONG)io->iouh_DevAddr,
+                 (LONG)endpoint,
+                 (ULONG)ep_ctx->rt_inflight_tds,
+                 (ULONG)ep_ctx->rt_inflight_bytes);
         ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPING;
     }
 
@@ -1365,7 +1414,7 @@ int usb_glue_bus_reset(struct XHCIUnit *unit)
         req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_RESET);
         req.iouh_SetupData.wIndex = cpu_to_le16(p);
         req.iouh_SetupData.wLength = cpu_to_le16(0);
-        req.iouh_DevAddr = udev->devnum;
+        req.iouh_DevAddr = udev->poseidon_address;
         req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
         xhci_submit_root(udev, &req);
@@ -1375,6 +1424,7 @@ int usb_glue_bus_reset(struct XHCIUnit *unit)
 
 int usb_glue_bus_suspend(struct XHCIUnit *unit)
 {
+    // TODO check if there is a controller level suspend/resume
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
     if (!udev)
@@ -1388,7 +1438,7 @@ int usb_glue_bus_suspend(struct XHCIUnit *unit)
         req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
         req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
         req.iouh_SetupData.wIndex = cpu_to_le16(p);
-        req.iouh_DevAddr = udev->devnum;
+        req.iouh_DevAddr = udev->poseidon_address;
         req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
         xhci_submit_root(udev, &req);
@@ -1411,7 +1461,7 @@ int usb_glue_bus_resume(struct XHCIUnit *unit)
         req.iouh_SetupData.bRequest = USB_REQ_CLEAR_FEATURE;
         req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
         req.iouh_SetupData.wIndex = cpu_to_le16(p);
-        req.iouh_DevAddr = udev->devnum;
+        req.iouh_DevAddr = udev->poseidon_address;
         req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
         xhci_submit_root(udev, &req);
@@ -1421,6 +1471,7 @@ int usb_glue_bus_resume(struct XHCIUnit *unit)
 
 int usb_glue_bus_oper(struct XHCIUnit *unit)
 {
+    //TODO should likely also resume and perhaps reset the ports
     /* Ensure port power is on for all ports */
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
@@ -1435,7 +1486,7 @@ int usb_glue_bus_oper(struct XHCIUnit *unit)
         req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
         req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_POWER);
         req.iouh_SetupData.wIndex = cpu_to_le16(p);
-        req.iouh_DevAddr = udev->devnum;
+        req.iouh_DevAddr = udev->poseidon_address;
         req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
         xhci_submit_root(udev, &req);
@@ -1446,7 +1497,7 @@ int usb_glue_bus_oper(struct XHCIUnit *unit)
 static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
 {
     KprintfH("dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx actual=%ld\n",
-             (ULONG)udev, (ULONG)udev->devnum,
+             (ULONG)udev, (ULONG)udev->poseidon_address,
              (ULONG)io->iouh_SetupData.bmRequestType,
              (ULONG)io->iouh_SetupData.bRequest,
              LE16(io->iouh_SetupData.wValue),
@@ -1494,17 +1545,17 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             UWORD status = LE16(((UWORD *)io->iouh_Data)[0]);
             UWORD change = LE16(((UWORD *)io->iouh_Data)[1]);
 
-            KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->devnum, (LONG)port, (ULONG)status, (ULONG)change);
+            KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->poseidon_address, (LONG)port, (ULONG)status, (ULONG)change);
 
             /* Drop children immediately if port power is off, regardless of change bits. */
             if ((status & USB_PORT_STAT_POWER) == 0)
             {
-                KprintfH("hub addr=%ld port=%ld lost power; removing child if any\n", (LONG)udev->devnum, (LONG)port);
+                KprintfH("hub addr=%ld port=%ld lost power; removing child if any\n", (LONG)udev->poseidon_address, (LONG)port);
                 struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
                 if (child)
                 {
                     KprintfH("hub addr=%ld port=%ld power-off, removing child addr=%ld slot=%ld\n",
-                            (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
+                             (LONG)udev->poseidon_address, (LONG)port, (LONG)child->poseidon_address, (LONG)child->slot_id);
                     usb_glue_disconnect_device(ctrl, child, TRUE);
                 }
             }
@@ -1512,12 +1563,12 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             /* If the port is disabled, tear down any attached child even if power is still on. */
             if ((status & USB_PORT_STAT_ENABLE) == 0)
             {
-                KprintfH("hub addr=%ld port=%ld disabled; removing child if any\n", (LONG)udev->devnum, (LONG)port);
+                KprintfH("hub addr=%ld port=%ld disabled; removing child if any\n", (LONG)udev->poseidon_address, (LONG)port);
                 struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
                 if (child)
                 {
                     KprintfH("hub addr=%ld port=%ld disabled, removing child addr=%ld slot=%ld\n",
-                            (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
+                             (LONG)udev->poseidon_address, (LONG)port, (LONG)child->poseidon_address, (LONG)child->slot_id);
                     usb_glue_disconnect_device(ctrl, child, TRUE);
                 }
             }
@@ -1528,26 +1579,26 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
                 if (status & USB_PORT_STAT_CONNECTION)
                 {
                     /* Remember parent/port for the next default-address attach without split info. */
-                    KprintfH("hub addr=%ld port=%ld connected; remembering for pending attach\n", (LONG)udev->devnum, (LONG)port);
+                    KprintfH("hub addr=%ld port=%ld connected; remembering for pending attach\n", (LONG)udev->poseidon_address, (LONG)port);
                     ctrl->pending_parent = udev;
                     ctrl->pending_parent_port = port;
                 }
 
                 if ((status & USB_PORT_STAT_CONNECTION) == 0)
                 {
-                    KprintfH("hub addr=%ld port=%ld disconnected; scanning children for match\n", (LONG)udev->devnum, (LONG)port);
+                    KprintfH("hub addr=%ld port=%ld disconnected; scanning children for match\n", (LONG)udev->poseidon_address, (LONG)port);
                     struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
 
                     if (child)
                     {
                         KprintfH("hub addr=%ld port=%ld disconnected, removing child addr=%ld slot=%ld\n",
-                                (LONG)udev->devnum, (LONG)port, (LONG)child->devnum, (LONG)child->slot_id);
+                                 (LONG)udev->poseidon_address, (LONG)port, (LONG)child->poseidon_address, (LONG)child->slot_id);
                         usb_glue_disconnect_device(ctrl, child, TRUE);
                     }
                     else
                     {
-                        KprintfH("hub addr=%ld port=%ld disconnect: no child matched parent addr=%ld\n",
-                                (LONG)udev->devnum, (LONG)port, (LONG)udev->devnum);
+                        KprintfH("hub addr=%ld port=%ld disconnect: no child matched parent\n",
+                                 (LONG)udev->poseidon_address, (LONG)port);
                     }
                 }
             }
@@ -1557,7 +1608,7 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
              */
             if ((change & USB_PORT_STAT_C_RESET) && (status & USB_PORT_STAT_CONNECTION))
             {
-                KprintfH("hub addr=%ld port=%ld reset-complete; remembering for pending attach\n", (LONG)udev->devnum, (LONG)port);
+                KprintfH("hub addr=%ld port=%ld reset-complete; remembering for pending attach\n", (LONG)udev->poseidon_address, (LONG)port);
                 ctrl->pending_parent = udev;
                 ctrl->pending_parent_port = port;
             }
@@ -1578,9 +1629,9 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             if (child)
             {
                 KprintfH("hub addr=%ld port=%ld CLEAR_FEATURE(%s); removing child addr=%ld slot=%ld\n",
-                        (LONG)udev->devnum, (LONG)port,
-                        (LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_POWER) ? "PORT_POWER" : "PORT_ENABLE",
-                        (LONG)child->devnum, (LONG)child->slot_id);
+                         (LONG)udev->poseidon_address, (LONG)port,
+                         (LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_POWER) ? "PORT_POWER" : "PORT_ENABLE",
+                         (LONG)child->poseidon_address, (LONG)child->slot_id);
                 usb_glue_disconnect_device(ctrl, child, TRUE);
             }
         }
@@ -1589,6 +1640,9 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
     /* If this was a successful standard SET_ADDRESS, migrate the glue context
      * from the old devaddr to the new one so subsequent transfers reuse the
      * same slot and endpoint state.
+     * Note that this containt the address Poseidon _thinks_ it set on the interface.
+     * In reality, XHCI selects the address.
+     * Hence poseidon_address is what Poseidon uses; xhci_address is the real one.
      */
     if ((io->iouh_SetupData.bRequest == USB_REQ_SET_ADDRESS) &&
         ((io->iouh_SetupData.bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD))
@@ -1601,23 +1655,23 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             if (!ctrl)
                 return;
 
-            struct usb_device *current = ctrl->devices[old_addr];
+            struct usb_device *current = ctrl->devices_by_poseidon_address[old_addr];
             if (!current)
                 current = udev;
 
-            if (ctrl->devices[new_addr] && ctrl->devices[new_addr] != current)
+            if (ctrl->devices_by_poseidon_address[new_addr] && ctrl->devices_by_poseidon_address[new_addr] != current)
             {
                 Kprintf("overwriting existing ctx for addr %ld\n", (LONG)new_addr);
                 /* If we are replacing an existing device (e.g., hub power-cycle), disconnect it (and children) first. */
-                usb_glue_disconnect_device(ctrl, ctrl->devices[new_addr], TRUE);
-                usb_glue_free_udev_slot(ctrl, new_addr);
+                usb_glue_disconnect_device(ctrl, ctrl->devices_by_poseidon_address[new_addr], TRUE);
+                usb_glue_free_udev_slot(ctrl->devices_by_poseidon_address[new_addr]);
             }
 
-            ctrl->devices[new_addr] = current;
-            if (old_addr <= 127 && ctrl->devices[old_addr] == current)
-                ctrl->devices[old_addr] = NULL;
+            ctrl->devices_by_poseidon_address[new_addr] = current;
+            if (ctrl->devices_by_poseidon_address[old_addr] == current)
+                ctrl->devices_by_poseidon_address[old_addr] = NULL;
 
-            current->devnum = new_addr;
+            current->poseidon_address = new_addr;
             current->used = 1;
 
             if (current->slot_id && ctrl->devs[current->slot_id])
@@ -1633,11 +1687,25 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
     {
         unsigned int iface = (unsigned int)(LE16(io->iouh_SetupData.wIndex) & 0xFF);
         unsigned int alt = (unsigned int)(LE16(io->iouh_SetupData.wValue) & 0xFF);
-        int err = xhci_set_interface(udev, iface, alt);
-        if (err != UHIOERR_NO_ERROR)
+        /*
+         * This is a workaround for Poseidon issue.
+         * Poseidon issues SET_INTERFACE for all devices after connecting a new one.
+         * Thing is, it first sets the alternate setting to 0, then to the desired setting.
+         * This causes issues with active RT ISO endpoints, as they get disabled on alt=0.
+         */
+        if (usb_glue_iface_has_active_rt_iso(udev, iface))
         {
-            Kprintf("SET_INTERFACE iface=%ld alt=%ld failed err=%ld\n",
-                    (LONG)iface, (LONG)alt, (LONG)err);
+            KprintfH("SET_INTERFACE iface=%ld alt=%ld ignored (RT ISO active)\n",
+                     (LONG)iface, (LONG)alt);
+        }
+        else
+        {
+            int err = xhci_set_interface(udev, iface, alt);
+            if (err != UHIOERR_NO_ERROR)
+            {
+                Kprintf("SET_INTERFACE iface=%ld alt=%ld failed err=%ld\n",
+                        (LONG)iface, (LONG)alt, (LONG)err);
+            }
         }
     }
 }
@@ -1696,9 +1764,9 @@ static void usb_glue_flush_udev(struct usb_device *udev, unsigned int reply_code
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
         return;
-    KprintfH("flushing device addr=%ld slot=%ld\n", (LONG)udev->devnum, (LONG)udev->slot_id);
+    KprintfH("flushing device addr=%ld slot=%ld\n", (LONG)udev->poseidon_address, (LONG)udev->slot_id);
 
-    if (ctrl->root_int_req && ctrl->root_int_req->iouh_DevAddr == udev->devnum)
+    if (ctrl->root_int_req && ctrl->root_int_req->iouh_DevAddr == udev->poseidon_address)
     {
         struct IOUsbHWReq *req = ctrl->root_int_req;
         ctrl->root_int_req = NULL;
@@ -1708,7 +1776,7 @@ static void usb_glue_flush_udev(struct usb_device *udev, unsigned int reply_code
     for (int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
     {
         struct ep_context *ep_ctx = &udev->ep_context[ep];
-        KprintfH("tearing down addr %ld EP %ld context, state %ld\n", (LONG)udev->devnum, (LONG)ep, (LONG)ep_ctx->state);
+        KprintfH("tearing down addr %ld EP %ld context, state %ld\n", (LONG)udev->poseidon_address, (LONG)ep, (LONG)ep_ctx->state);
         ep_teardown(ctrl, ep_ctx);
     }
 }
@@ -1724,9 +1792,9 @@ void usb_glue_disconnect_device(struct xhci_ctrl *ctrl, struct usb_device *udev,
     /* Disconnect downstream devices first so hubs drain their children before vanishing. */
     if (recursive)
     {
-        for (int i = 0; i < MAX_HC_SLOTS; ++i)
+        for (int i = 0; i <= USB_MAX_ADDRESS; ++i)
         {
-            struct usb_device *child = ctrl->devices[i];
+            struct usb_device *child = ctrl->devices_by_poseidon_address[i];
             if (!child || child == udev)
                 continue;
 
@@ -1736,12 +1804,10 @@ void usb_glue_disconnect_device(struct xhci_ctrl *ctrl, struct usb_device *udev,
     }
 
 
-    KprintfH("disconnect device addr=%ld slot=%ld port=%ld (devices[%ld]=%lx)\n",
-            (LONG)udev->devnum,
+    KprintfH("disconnect device addr=%ld slot=%ld port=%ld\n",
+            (LONG)udev->poseidon_address,
             (LONG)udev->slot_id,
-            (LONG)udev->parent_port,
-            (LONG)udev->devnum,
-            (ULONG)ctrl->devices[udev->devnum]);
+            (LONG)udev->parent_port);
 
     xhci_disable_slot(udev);
 }
@@ -1751,9 +1817,9 @@ static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, st
     if (!ctrl || !hub)
         return NULL;
 
-    for (int i = 0; i < MAX_HC_SLOTS; ++i)
+    for (int i = 0; i <= USB_MAX_ADDRESS; ++i)
     {
-        struct usb_device *cand = ctrl->devices[i];
+        struct usb_device *cand = ctrl->devices_by_poseidon_address[i];
         if (!cand || cand == hub || cand->slot_id == 0)
             continue;
 
@@ -1764,13 +1830,13 @@ static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, st
     return NULL;
 }
 
-void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr)
+void usb_glue_free_udev_slot(struct usb_device *udev)
 {
-    if (!ctrl || addr > 127)
+    if (!udev)
         return;
 
-    struct usb_device *udev = ctrl->devices[addr];
-    if (!udev)
+    struct xhci_ctrl *ctrl = udev->controller;
+    if (!ctrl)
         return;
 
     usb_glue_flush_udev(udev, UHIOERR_TIMEOUT);
@@ -1785,7 +1851,7 @@ void usb_glue_free_udev_slot(struct xhci_ctrl *ctrl, UWORD addr)
     if (udev->slot_id && ctrl->devs[udev->slot_id])
         ctrl->devs[udev->slot_id]->udev = NULL;
 
-    ctrl->devices[addr] = NULL;
+    ctrl->devices_by_poseidon_address[udev->poseidon_address] = NULL;
     udev->used = 0;
     FreeVecPooled(ctrl->memoryPool, udev);
 }
@@ -1796,9 +1862,9 @@ void usb_glue_flush_queues(struct XHCIUnit *unit)
     if (!ctrl)
         return;
 
-    for (unsigned int addr = 0; addr <= 127; ++addr)
+    for (unsigned int addr = 0; addr <= USB_MAX_ADDRESS; ++addr)
     {
-        struct usb_device *udev = ctrl->devices[addr];
+        struct usb_device *udev = ctrl->devices_by_poseidon_address[addr];
         if (!udev || addr == ctrl->rootdev)
             continue;
 

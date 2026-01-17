@@ -345,7 +345,7 @@ static void dispatch_ep_event(struct usb_device *udev, union xhci_trb *event)
 
     if (ep_state_dispatch[ep_ctx->state])
     {
-        KprintfH("addr %ld EP %ld state %ld -> handling event\n", udev->devnum, (LONG)endpoint, (LONG)ep_ctx->state);
+        KprintfH("addr %ld EP %ld state %ld -> handling event\n", udev->poseidon_address, (LONG)endpoint, (LONG)ep_ctx->state);
         ep_state_handler handler = ep_state_dispatch[ep_ctx->state];
         handler(udev, ep_ctx, event);
     }
@@ -411,7 +411,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
                 Kprintf("No usb_device for slot %ld\n", slot);
                 break;
             }
-            KprintfH("USB device addr %ld on slot %ld\n", (LONG)udev->devnum, (LONG)slot);
+            KprintfH("USB device addr %ld on slot %ld\n", (LONG)udev->poseidon_address, (LONG)slot);
 
             dispatch_ep_event(udev, event);
         }
@@ -839,9 +839,13 @@ void ep_handle_receiving_bulk(struct usb_device *udev, struct ep_context *ep_ctx
     int comp = GET_COMP_CODE(LE32(event->trans_event.transfer_len));
     if ((comp == COMP_UNDERRUN || comp == COMP_OVERRUN) && trb_addr == 0)
     {
-        Kprintf("Ring %s on EP %ld state=%ld\n",
-                (comp == COMP_UNDERRUN) ? "underrun" : "overrun",
-                (LONG)endpoint, (LONG)ep_ctx->state);
+        Kprintf("Ring %s on addr %ld EP %ld state=%ld inflight_tds=%lu inflight_bytes=%lu\n",
+            (comp == COMP_UNDERRUN) ? "underrun" : "overrun",
+            (LONG)udev->poseidon_address,
+            (LONG)endpoint,
+            (LONG)ep_ctx->state,
+            (ULONG)ep_ctx->rt_inflight_tds,
+            (ULONG)ep_ctx->rt_inflight_bytes);
 
         xhci_acknowledge_event(ctrl);
 

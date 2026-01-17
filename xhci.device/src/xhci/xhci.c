@@ -541,7 +541,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
 	struct usb_config *cfg = udev->active_config;
 	if (!cfg)
 	{
-		Kprintf("xhci_set_interface: no active config for addr %ld\n", (LONG)udev->devnum);
+		Kprintf("xhci_set_interface: no active config for addr %ld\n", (LONG)udev->poseidon_address);
 		return UHIOERR_BADPARAMS;
 	}
 
@@ -617,8 +617,8 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
 	unsigned int max_ep_flag = compute_max_ep_flag(cfg);
 	xhci_update_slot_last_ctx(ctrl, virt_dev, max_ep_flag);
 
-	KprintfH("xhci_set_interface: addr=%ld iface=%ld alt=%ld drop=0x%lx add=0x%lx\n",
-			 (LONG)udev->devnum,
+	KprintfH("xhci_set_interface: updating device context for addr=%ld iface=%ld alt=%ld drop=0x%lx add=0x%lx\n",
+			 (LONG)udev->poseidon_address,
 			 (LONG)iface_number,
 			 (LONG)alt_setting,
 			 (ULONG)drop_mask,
@@ -940,7 +940,7 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
 
 #ifdef DEBUG_HIGH
 		/* Dump entire cfg using kprintf (all fields and all interfaces and endpoints) */
-	xhci_dump_config(cfg, (LONG)udev->devnum);
+	xhci_dump_config(cfg, (LONG)udev->poseidon_address);
 #endif
 
 	struct xhci_container_ctx *out_ctx;
@@ -1173,7 +1173,7 @@ void xhci_roothub_maybe_complete(struct xhci_ctrl *ctrl)
 		return;
 
 	struct IOUsbHWReq *req = ctrl->root_int_req;
-	struct usb_device *udev = ctrl->devices[req->iouh_DevAddr];
+	struct usb_device *udev = ctrl->devices_by_poseidon_address[req->iouh_DevAddr];
 	if (!udev)
 	{
 		Kprintf("missing root hub context for addr %ld\n", (LONG)req->iouh_DevAddr);
@@ -1298,19 +1298,17 @@ void xhci_submit_root(struct usb_device *udev, struct IOUsbHWReq *io)
 		KprintfH("USB_REQ_SET_ADDRESS rootdev=%ld\n", (LONG)LE16(req->wValue));
 		udev->speed = USB_SPEED_HIGH;
 		UWORD new_addr = (UWORD)(LE16(req->wValue) & 0x7F);
-		UWORD old_addr = (UWORD)(udev->devnum & 0x7F);
-		if (new_addr > 127)
-			new_addr &= 0x7F;
+		UWORD old_addr = (UWORD)(udev->poseidon_address & 0x7F);
 
-		if (ctrl->devices[new_addr] && ctrl->devices[new_addr] != udev)
+		if (ctrl->devices_by_poseidon_address[new_addr] && ctrl->devices_by_poseidon_address[new_addr] != udev)
 			Kprintf("root hub addr %ld already in use, overwriting\n", (LONG)new_addr);
 
-		ctrl->devices[new_addr] = udev;
-		if (old_addr <= 127 && ctrl->devices[old_addr] == udev)
-			ctrl->devices[old_addr] = NULL;
+		ctrl->devices_by_poseidon_address[new_addr] = udev;
+		if (ctrl->devices_by_poseidon_address[old_addr] == udev)
+			ctrl->devices_by_poseidon_address[old_addr] = NULL;
 
 		ctrl->rootdev = new_addr;
-		udev->devnum = new_addr;
+		udev->poseidon_address = new_addr;
 		break;
 	case DeviceOutRequest | USB_REQ_SET_CONFIGURATION:
 		KprintfH("USB_REQ_SET_CONFIGURATION\n");
