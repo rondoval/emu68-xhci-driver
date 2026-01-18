@@ -536,7 +536,10 @@ static unsigned int compute_max_ep_flag(const struct usb_config *cfg)
 int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsigned int alt_setting)
 {
 	if (!udev || !udev->controller)
+	{
+		Kprintf("xhci_set_interface: invalid usb_device pointer\n");
 		return UHIOERR_BADPARAMS;
+	}
 
 	struct usb_config *cfg = udev->active_config;
 	if (!cfg)
@@ -641,9 +644,11 @@ static unsigned int xhci_microframes_to_exponent(unsigned int desc_interval,
 
 	interval = fls(desc_interval) - 1;
 	interval = clamp_val(interval, min_exponent, max_exponent);
+#ifdef DEBUG_HIGH
 	if ((1U << interval) != desc_interval)
-		Kprintf("rounding interval to %ld microframes, ep desc says %ld microframes\n",
+		KprintfH("rounding interval to %ld microframes, ep desc says %ld microframes\n",
 				1U << interval, desc_interval);
+#endif
 
 	return interval;
 }

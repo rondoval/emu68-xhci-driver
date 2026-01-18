@@ -357,6 +357,9 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
         return;
     }
 
+    if (ctrl->devs[cmd->udev->slot_id])
+        ctrl->devs[cmd->udev->slot_id]->udev = cmd->udev;
+
     // Continue with Address Device command, passing cmd->req
     xhci_address_device(cmd->udev, cmd->req);
 }
@@ -458,10 +461,25 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
             (ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2), (ULONG)LE32(slot_ctx->dev_state));
 #endif
 
-    /* This is the original Poseidon request, with different address.
-     * This will be caught by upper layer and used to move the context */
+    /* Continue the original Poseidon request after the device is addressed. */
     if (cmd->req)
-        io_reply_data(cmd->udev, cmd->req, UHIOERR_NO_ERROR, 0);
+    {
+        struct UsbSetupData *setup = &cmd->req->iouh_SetupData;
+        BOOL is_set_address = (setup->bRequest == USB_REQ_SET_ADDRESS) &&
+                              ((setup->bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD);
+
+        if (is_set_address)
+        {
+            /* Upper layer will migrate the context based on Poseidon address. */
+            io_reply_data(cmd->udev, cmd->req, UHIOERR_NO_ERROR, 0);
+        }
+        else
+        {
+            int ret = usb_glue_ctrl_after_address(cmd->udev, cmd->req);
+            if (ret != UHIOERR_NO_ERROR && ret != UHIOERR_RING_BUSY)
+                io_reply_failed(cmd->req, ret);
+        }
+    }
 }
 
 static void handle_reset_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)

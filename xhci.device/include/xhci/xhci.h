@@ -1263,6 +1263,7 @@ struct xhci_ctrl
 	struct usb_device *devices_by_poseidon_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *pending_parent; /* parent hub pending for next default-address child */
 	unsigned int pending_parent_port;
+	enum usb_device_speed pending_parent_speed;
 	struct MinList pending_commands; /* list of pending commands */
 };
 

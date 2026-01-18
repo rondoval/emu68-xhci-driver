@@ -14,6 +14,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io);
 int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io);
+int usb_glue_ctrl_after_address(struct usb_device *udev, struct IOUsbHWReq *io);
 
 /* RT ISO handling */
 int usb_glue_add_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io);

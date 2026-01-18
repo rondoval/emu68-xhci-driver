@@ -39,6 +39,7 @@ static UBYTE usb_glue_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum);
 static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUsbHWReq *io);
 static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, struct usb_device *hub, unsigned int port);
 static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number);
+static enum usb_device_speed usb_glue_speed_from_port_status(UWORD status);
 
 static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number)
 {
@@ -73,6 +74,18 @@ static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned i
     }
 
     return FALSE;
+}
+
+static enum usb_device_speed usb_glue_speed_from_port_status(UWORD status)
+{
+    if (status & USB_PORT_STAT_SUPER_SPEED)
+        return USB_SPEED_HIGH;
+        // return USB_SPEED_SUPER; TODO capped speed... for now - fix context
+    if (status & USB_PORT_STAT_HIGH_SPEED)
+        return USB_SPEED_HIGH;
+    if (status & USB_PORT_STAT_LOW_SPEED)
+        return USB_SPEED_LOW;
+    return USB_SPEED_FULL;
 }
 
 static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD poseidon_address)
@@ -194,12 +207,6 @@ void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index)
 
     io->iouh_DevAddr = udev->poseidon_address;
 
-    /* Split/hub routing if available from udev */
-    if (udev->speed == USB_SPEED_LOW)
-        io->iouh_Flags |= UHFF_LOWSPEED;
-    else if (udev->speed == USB_SPEED_HIGH)
-        io->iouh_Flags |= UHFF_HIGHSPEED;
-
     /* Queue it; on failure free immediately. */
     if (xhci_ctrl_tx(udev, io, 1000) != UHIOERR_NO_ERROR)
     {
@@ -230,11 +237,6 @@ static void usb_glue_queue_clear_tt(struct usb_device *hub, u16 devinfo, u16 tt_
     io->iouh_SetupData.wLength = cpu_to_le16(0);
 
     io->iouh_DevAddr = hub->poseidon_address;
-
-    if (hub->speed == USB_SPEED_LOW)
-        io->iouh_Flags |= UHFF_LOWSPEED;
-    else if (hub->speed == USB_SPEED_HIGH)
-        io->iouh_Flags |= UHFF_HIGHSPEED;
 
     if (xhci_ctrl_tx(hub, io, 1000) != UHIOERR_NO_ERROR)
     {
@@ -284,6 +286,8 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD poseidon
             return NULL;
         KprintfH("new device addr=%ld\n", (LONG)poseidon_address);
         udev = usb_glue_alloc_udev(ctrl, poseidon_address);
+        if (udev && poseidon_address == 0 && ctrl->pending_parent_speed != USB_SPEED_UNKNOWN)
+            udev->speed = ctrl->pending_parent_speed;
     }
 
     return udev;
@@ -376,6 +380,25 @@ static int handle_ring_busy(struct usb_device *udev, struct IOUsbHWReq *io)
         enqueue_pending_request(ep_ctx, io);
 
     return COMMAND_SCHEDULED;
+}
+
+int usb_glue_ctrl_after_address(struct usb_device *udev, struct IOUsbHWReq *io)
+{
+    if (!udev || !io)
+    {
+        Kprintf("no IO request provided?\n");
+        return UHIOERR_BADPARAMS;
+    }
+
+    unsigned int timeout_ms = 0;
+    if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
+        timeout_ms = io->iouh_NakTimeout;
+
+    int ret = xhci_ctrl_tx(udev, io, timeout_ms);
+    if (ret == UHIOERR_RING_BUSY)
+        handle_ring_busy(udev, io);
+
+    return ret;
 }
 
 static void dispatch_request(struct IOUsbHWReq *req)
@@ -634,17 +657,10 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
     if (!udev)
     {
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        KprintfH("Device does not exist for addr %ld\n", (LONG)io->iouh_DevAddr);
+        io->iouh_Req.io_Error = UHIOERR_TIMEOUT;
         return COMMAND_PROCESSED;
     }
-
-    //TODO check if could be removed or replaced with data from our copy of device descriptor
-    if (io->iouh_Flags & UHFF_HIGHSPEED)
-        udev->speed = USB_SPEED_HIGH;
-    else if (io->iouh_Flags & UHFF_LOWSPEED)
-        udev->speed = USB_SPEED_LOW;
-    else
-        udev->speed = USB_SPEED_FULL;
 
     /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
     usb_glue_patch_endpoint_address(udev, io);
@@ -709,12 +725,11 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = io->iouh_NakTimeout;
     
     /* If we don't have a slot yet, enable one and allocate Virt Dev */
-    if (udev->slot_id == 0)
+    if (udev->slot_id == 0 && udev->poseidon_address == 0)
     {
-        //TODO ugly hack, we should create the slot, then either move to default and process the request
-        // or address device and then process the request
-        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
-        return COMMAND_PROCESSED;
+        // this will store the req and submit it once addressed
+        xhci_address_device(udev, io);
+        return COMMAND_SCHEDULED;
     }
 
     int ret = xhci_ctrl_tx(udev, io, timeout_ms);
@@ -734,7 +749,8 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
     if (!udev)
     {
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        KprintfH("Device does not exist for addr %ld\n", (LONG)io->iouh_DevAddr);
+        io->iouh_Req.io_Error = UHIOERR_TIMEOUT;
         return COMMAND_PROCESSED;
     }
 
@@ -763,7 +779,8 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
     if (!udev)
     {
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        KprintfH("Device does not exist for addr %ld\n", (LONG)io->iouh_DevAddr);
+        io->iouh_Req.io_Error = UHIOERR_TIMEOUT;
         return COMMAND_PROCESSED;
     }
 
@@ -808,7 +825,8 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
     if (!udev)
     {
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        KprintfH("Device does not exist for addr %ld\n", (LONG)io->iouh_DevAddr);
+        io->iouh_Req.io_Error = UHIOERR_TIMEOUT;
         return COMMAND_PROCESSED;
     }
 
@@ -1438,7 +1456,7 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             {
                 udev->tt_think_time = tt_think;
                 xhci_update_hub_tt(udev);
-                Kprintf("hub addr %ld TT think time code=%ld (bit-times=%ld)\n",
+                KprintfH("hub addr %ld TT think time code=%ld (bit-times=%ld)\n",
                          (LONG)udev->poseidon_address, (LONG)tt_think, (LONG)((tt_think + 1) * 8));
             }
         }
@@ -1493,6 +1511,7 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
                     KprintfH("hub addr=%ld port=%ld connected; remembering for pending attach\n", (LONG)udev->poseidon_address, (LONG)port);
                     ctrl->pending_parent = udev;
                     ctrl->pending_parent_port = port;
+                    ctrl->pending_parent_speed = usb_glue_speed_from_port_status(status);
                 }
 
                 if ((status & USB_PORT_STAT_CONNECTION) == 0)
@@ -1522,6 +1541,7 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
                 KprintfH("hub addr=%ld port=%ld reset-complete; remembering for pending attach\n", (LONG)udev->poseidon_address, (LONG)port);
                 ctrl->pending_parent = udev;
                 ctrl->pending_parent_port = port;
+                ctrl->pending_parent_speed = usb_glue_speed_from_port_status(status);
             }
         }
     }
