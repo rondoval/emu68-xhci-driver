@@ -103,18 +103,13 @@ struct usb_device {
 	enum usb_device_speed speed;	/* full/low/high */
 	enum slot_state  slot_state;	/* current slot state */
 
-	/* Maximum packet size; one of: PACKET_SIZE_* */
-	int maxpacketsize0;
-
 	struct MinList configurations; /* configurations captured from GET_CONFIGURATION replies */
 	struct usb_config *active_config;
 
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
-	unsigned int route;           /* xHCI route string nibble-packed */
 	unsigned int parent_port;     /* Parent hub downstream port (all speeds) */
-	unsigned int tt_slot;         /* Parent hub slot ID for TT scheduling */
-	unsigned int tt_port;         /* Parent hub downstream port for TT scheduling */
+	unsigned int route;           /* xHCI route string nibble-packed */
 	unsigned int tt_think_time;   /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
 
 	/* Requests state data */

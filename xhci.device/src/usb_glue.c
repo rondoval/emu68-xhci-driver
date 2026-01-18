@@ -40,33 +40,6 @@ static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUs
 static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, struct usb_device *hub, unsigned int port);
 static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number);
 
-static unsigned int route_depth(unsigned int route)
-{
-    unsigned int depth = 0;
-    while (route && depth < 5)
-    {
-        route >>= 4;
-        depth++;
-    }
-    return depth;
-}
-
-static unsigned int build_route_string(struct usb_device *parent, unsigned int port)
-{
-    if (!parent)
-        return 0;
-
-    unsigned int depth = route_depth(parent->route);
-    if (depth >= 5)
-        return parent->route;
-
-    unsigned int nibble = port & 0xF;
-    if (nibble == 0)
-        return parent->route;
-
-    return parent->route | (nibble << (depth * 4));
-}
-
 static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number)
 {
     if (!udev || !udev->active_config)
@@ -121,7 +94,6 @@ static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD pose
     udev->used = 1;
     udev->poseidon_address = poseidon_address;
     udev->controller = ctrl;
-    udev->maxpacketsize0 = PACKET_SIZE_8;
 
     _NewMinList(&udev->configurations);
 
@@ -221,11 +193,8 @@ void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index)
     io->iouh_SetupData.wLength = cpu_to_le16(0);
 
     io->iouh_DevAddr = udev->poseidon_address;
-    io->iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
     /* Split/hub routing if available from udev */
-    io->iouh_SplitHubAddr = (udev->tt_slot & 0x7F);
-    io->iouh_SplitHubPort = (udev->tt_port & 0xFF);
     if (udev->speed == USB_SPEED_LOW)
         io->iouh_Flags |= UHFF_LOWSPEED;
     else if (udev->speed == USB_SPEED_HIGH)
@@ -261,7 +230,6 @@ static void usb_glue_queue_clear_tt(struct usb_device *hub, u16 devinfo, u16 tt_
     io->iouh_SetupData.wLength = cpu_to_le16(0);
 
     io->iouh_DevAddr = hub->poseidon_address;
-    io->iouh_MaxPktSize = 8U << hub->maxpacketsize0;
 
     if (hub->speed == USB_SPEED_LOW)
         io->iouh_Flags |= UHFF_LOWSPEED;
@@ -284,9 +252,6 @@ void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, in
     if (ep_type != USB_ENDPOINT_XFER_CONTROL && ep_type != USB_ENDPOINT_XFER_BULK)
         return;
 
-    if (!udev->tt_port)
-        return;
-
     struct usb_device *hub = udev->parent;
 
     u16 epnum = (u16)EP_INDEX_TO_ENDPOINT(ep_index);
@@ -298,45 +263,11 @@ void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, in
     if (!out)
         devinfo |= 1 << 15;
 
-    usb_glue_queue_clear_tt(hub, devinfo, (u16)udev->tt_port);
+    usb_glue_queue_clear_tt(hub, devinfo, (u16)udev->parent_port);
 
     /* Control endpoints require clearing both directions. */
     if (ep_type == USB_ENDPOINT_XFER_CONTROL)
-        usb_glue_queue_clear_tt(hub, devinfo ^ (1U << 15), (u16)udev->tt_port);
-}
-
-static void update_device_topology(struct XHCIUnit *unit, struct usb_device *udev,
-                                   const struct IOUsbHWReq *io)
-{
-    //TODO is this needed at all? could be done once
-    if (io->iouh_Flags & UHFF_SPLITTRANS)
-    {
-        struct usb_device *parent = unit->xhci_ctrl->devices_by_poseidon_address[io->iouh_SplitHubAddr & 0x7F];
-        if (parent)
-        {
-            unsigned int port = io->iouh_SplitHubPort & 0xFF;
-            udev->parent = parent;
-            udev->route = build_route_string(parent, port);
-            udev->tt_slot = parent->slot_id;
-            udev->tt_port = port;
-            return;
-        }
-        /* Fall back to default routing if the parent isn't known yet */
-        udev->parent = NULL;
-        udev->route = 0;
-        udev->tt_slot = 0;
-        udev->tt_port = 0;
-        return;
-    }
-
-    if (io->iouh_DevAddr == 0)
-    {
-        /* Default-address transfers without split data target the root hub path */
-        udev->parent = NULL;
-        udev->route = 0;
-        udev->tt_slot = 0;
-        udev->tt_port = 0;
-    }
+        usb_glue_queue_clear_tt(hub, devinfo ^ (1U << 15), (u16)udev->parent_port);
 }
 
 static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD poseidon_address)
@@ -708,25 +639,12 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     //TODO check if could be removed or replaced with data from our copy of device descriptor
-    /* Update EP0 MPS hint from IO if provided */
-    unsigned int maxpkt_hint = (unsigned int)io->iouh_MaxPktSize;
-    if (maxpkt_hint == 8)
-        udev->maxpacketsize0 = PACKET_SIZE_8;
-    else if (maxpkt_hint == 16)
-        udev->maxpacketsize0 = PACKET_SIZE_16;
-    else if (maxpkt_hint == 32)
-        udev->maxpacketsize0 = PACKET_SIZE_32;
-    else
-        udev->maxpacketsize0 = PACKET_SIZE_64;
-
     if (io->iouh_Flags & UHFF_HIGHSPEED)
         udev->speed = USB_SPEED_HIGH;
     else if (io->iouh_Flags & UHFF_LOWSPEED)
         udev->speed = USB_SPEED_LOW;
     else
         udev->speed = USB_SPEED_FULL;
-
-    update_device_topology(unit, udev, io); // TODO remove once discovery works OK, i.e. detects hub, port and root port correctly
 
     /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
     usb_glue_patch_endpoint_address(udev, io);
@@ -747,14 +665,11 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
                  (ULONG)io->iouh_SplitHubAddr,
                  (ULONG)io->iouh_SplitHubPort);
 
-        KprintfH("parent=%lx route=%ld tt_slot=%ld tt_port=%ld\n",
+        KprintfH("parent=%lx route=%ld port=%ld\n",
                  (ULONG)udev->parent,
                  (ULONG)udev->route,
-                 (ULONG)udev->tt_slot,
-                 (ULONG)udev->tt_port);
-        KprintfH("maxpacketsize0=%lx speed=%ld\n",
-                 (ULONG)udev->maxpacketsize0,
-                 (LONG)udev->speed);
+                 (ULONG)udev->parent_port);
+        KprintfH("speed=%ld\n", (LONG)udev->speed);
     }
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
@@ -1415,7 +1330,6 @@ int usb_glue_bus_reset(struct XHCIUnit *unit)
         req.iouh_SetupData.wIndex = cpu_to_le16(p);
         req.iouh_SetupData.wLength = cpu_to_le16(0);
         req.iouh_DevAddr = udev->poseidon_address;
-        req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
         xhci_submit_root(udev, &req);
     }
@@ -1439,7 +1353,6 @@ int usb_glue_bus_suspend(struct XHCIUnit *unit)
         req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
         req.iouh_SetupData.wIndex = cpu_to_le16(p);
         req.iouh_DevAddr = udev->poseidon_address;
-        req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
         xhci_submit_root(udev, &req);
     }
@@ -1462,7 +1375,6 @@ int usb_glue_bus_resume(struct XHCIUnit *unit)
         req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
         req.iouh_SetupData.wIndex = cpu_to_le16(p);
         req.iouh_DevAddr = udev->poseidon_address;
-        req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
         xhci_submit_root(udev, &req);
     }
@@ -1487,7 +1399,6 @@ int usb_glue_bus_oper(struct XHCIUnit *unit)
         req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_POWER);
         req.iouh_SetupData.wIndex = cpu_to_le16(p);
         req.iouh_DevAddr = udev->poseidon_address;
-        req.iouh_MaxPktSize = 8U << udev->maxpacketsize0;
 
         xhci_submit_root(udev, &req);
     }
@@ -1527,8 +1438,8 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
             {
                 udev->tt_think_time = tt_think;
                 xhci_update_hub_tt(udev);
-                KprintfH("hub TT think time code=%ld (bit-times=%ld)\n",
-                         (LONG)tt_think, (LONG)((tt_think + 1) * 8));
+                Kprintf("hub addr %ld TT think time code=%ld (bit-times=%ld)\n",
+                         (LONG)udev->poseidon_address, (LONG)tt_think, (LONG)((tt_think + 1) * 8));
             }
         }
     }

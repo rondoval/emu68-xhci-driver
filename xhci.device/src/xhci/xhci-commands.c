@@ -204,7 +204,7 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
         int ep_type = xhci_ep_type_for_index(cmd->udev, ep_index);
 
         /* For control/bulk endpoints behind a TT, clear the TT buffer on the hub. */
-        if (cmd->udev->tt_slot && cmd->udev->tt_port)
+        if (cmd->udev->speed == USB_SPEED_FULL || cmd->udev->speed == USB_SPEED_LOW)
         {
             if (ep_type == USB_ENDPOINT_XFER_CONTROL || ep_type == USB_ENDPOINT_XFER_BULK)
             {

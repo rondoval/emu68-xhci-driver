@@ -847,6 +847,33 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl, struct xhci_container_ctx *in_ctx,
 	in_slot_ctx->dev_state = out_slot_ctx->dev_state;
 }
 
+static unsigned int route_depth(unsigned int route)
+{
+    unsigned int depth = 0;
+    while (route && depth < 5)
+    {
+        route >>= 4;
+        depth++;
+    }
+    return depth;
+}
+
+static unsigned int build_route_string(struct usb_device *parent, unsigned int port)
+{
+    if (!parent)
+        return 0;
+
+    unsigned int depth = route_depth(parent->route);
+    if (depth >= 5)
+        return parent->route;
+
+    unsigned int nibble = port & 0xF;
+    if (nibble == 0)
+        return parent->route;
+
+    return parent->route | (nibble << (depth * 4));
+}
+
 /**
  * Setup an xHCI virtual device for a Set Address command
  *
@@ -855,36 +882,31 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl, struct xhci_container_ctx *in_ctx,
  */
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev)
 {
-	struct xhci_virt_device *virt_dev;
-	struct xhci_ep_ctx *ep0_ctx;
-	struct xhci_slot_ctx *slot_ctx;
-	u32 port_num = 0;
-	u64 trb_64 = 0;
-	int slot_id = udev->slot_id;
-	int speed = udev->speed;
-
-	virt_dev = ctrl->devs[slot_id];
-
+	struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
 	if (!virt_dev)
 	{
 		Kprintf("Invalid virtual device\n");
 		return;
 	}
 
+	udev->parent = ctrl->pending_parent;
+	udev->parent_port = ctrl->pending_parent_port;
+	udev->route = build_route_string(udev->parent, udev->parent_port);
+
 	/* Extract the EP0 and Slot Ctrl */
-	ep0_ctx = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, 0);
-	slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
+	struct xhci_ep_ctx *ep0_ctx = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, 0);
+	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
 	KprintfH("xhci_setup_addressable_virt_dev: slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
-			 (ULONG)slot_id, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx,
+			 (ULONG)udev->slot_id, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx,
 			 (ULONG)ep0_ctx, (ULONG)slot_ctx);
 
 	/* Only the control endpoint is valid - one endpoint context */
 	u32 dev_info = LE32(slot_ctx->dev_info);
 	dev_info &= ~(ROUTE_STRING_MASK | DEV_SPEED | DEV_MTT | LAST_CTX_MASK);
-	dev_info |= LAST_CTX(1);
 	dev_info |= (udev->route & ROUTE_STRING_MASK);
+	dev_info |= LAST_CTX(1);
 
-	switch (speed)
+	switch (udev->speed)
 	{
 	case USB_SPEED_SUPER:
 	case USB_SPEED_SUPER_PLUS:
@@ -901,14 +923,11 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 		break;
 	default:
 		/* Speed was set earlier, this shouldn't happen. */
-		Kprintf("Unknown device speed %ld\n", (ULONG)speed);
+		Kprintf("Unknown device speed %ld\n", (ULONG)udev->speed);
 	}
 
-	udev->parent = ctrl->pending_parent;
-	udev->parent_port = ctrl->pending_parent_port;
-
 	//Find root hub port number
-	port_num = ctrl->pending_parent_port;
+	u32 root_port = ctrl->pending_parent_port;
 	if (udev->parent)
 	{
 		struct usb_device *ancestor = udev->parent;
@@ -916,7 +935,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 		while (ancestor)
 		{
 			if (ancestor->parent_port)
-				port_num = ancestor->parent_port;
+				root_port = ancestor->parent_port;
 
 			if (!ancestor->parent)
 				break;
@@ -925,45 +944,42 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 		}
 	}
 
-	//TODO set tt-info as well?
-
 	/* Low/full-speed devices behind a high-speed hub need TT info */
-	BOOL needs_tt = (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) &&
+	BOOL needs_tt = (udev->speed == USB_SPEED_FULL || udev->speed == USB_SPEED_LOW) &&
 					udev->parent &&
 					(udev->parent->speed == USB_SPEED_HIGH ||
 					 udev->parent->speed == USB_SPEED_SUPER ||
 					 udev->parent->speed == USB_SPEED_SUPER_PLUS);
-	BOOL have_tt_info = needs_tt && udev->tt_slot && udev->tt_port;
 
 	slot_ctx->dev_info = LE32(dev_info);
 
-	KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%ld port_num=%ld root port_num=%ld speed=%ld route=%ld\n",
-			 (ULONG)udev->parent->poseidon_address, udev->parent_port, port_num, (ULONG)speed, (ULONG)udev->route);
+	KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%ld port_num=%ld root_port_num=%ld speed=%ld route=%lx\n",
+			 (ULONG)udev->parent->poseidon_address, udev->parent_port, root_port, (ULONG)udev->speed, (ULONG)udev->route);
 
 	u32 dev_info2 = LE32(slot_ctx->dev_info2);
 	dev_info2 &= ~((ROOT_HUB_PORT_MASK) << ROOT_HUB_PORT_SHIFT);
-	dev_info2 |= ROOT_HUB_PORT(port_num);
+	dev_info2 |= ROOT_HUB_PORT(root_port);
 	slot_ctx->dev_info2 = LE32(dev_info2);
 
 	u32 tt_info = 0;
-	if (have_tt_info)
+	if (needs_tt)
 	{
-		tt_info = TT_SLOT(udev->tt_slot) |
-				  TT_PORT(udev->tt_port);
+		tt_info = TT_SLOT(udev->parent->slot_id) |
+				  TT_PORT(udev->parent_port);
 	}
 
-	KprintfH("xhci_setup_addressable_virt_dev: needs_tt=%ld have_tt_info=%ld tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
-			 (int)needs_tt, (int)have_tt_info,
-			 (int)udev->tt_slot, (int)udev->tt_port,
+	KprintfH("xhci_setup_addressable_virt_dev: needs_tt=%ld tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
+			 (int)needs_tt,
+			 (int)udev->parent->slot_id, (int)udev->parent_port,
 			 (ULONG)tt_info);
 	slot_ctx->tt_info = LE32(tt_info);
 
 	/* Step 4 - ring already allocated */
 	/* Step 5 */
 	ep0_ctx->ep_info2 = LE32(EP_TYPE(CTRL_EP));
-	KprintfH("xhci_setup_addressable_virt_dev: SPEED=%ld\n", (ULONG)speed);
+	KprintfH("xhci_setup_addressable_virt_dev: SPEED=%ld\n", (ULONG)udev->speed);
 
-	switch (speed)
+	switch (udev->speed)
 	{
 	case USB_SPEED_SUPER:
 		ep0_ctx->ep_info2 |= LE32(MAX_PACKET(512));
@@ -981,13 +997,13 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 		break;
 	default:
 		/* New speed? */
-		Kprintf("Unknown device speed %ld\n", (ULONG)speed);
+		Kprintf("Unknown device speed %ld\n", (ULONG)udev->speed);
 	}
 
 	/* EP 0 can handle "burst" sizes of 1, so Max Burst Size field is 0 */
 	ep0_ctx->ep_info2 |= LE32(MAX_BURST(0) | ERROR_COUNT(3));
 
-	trb_64 = virt_dev->eps[0].ring->first_seg->dma;
+	u64 trb_64 = virt_dev->eps[0].ring->first_seg->dma;
 	ep0_ctx->deq = LE64(trb_64 | virt_dev->eps[0].ring->cycle_state);
 
 	/*
@@ -1013,6 +1029,8 @@ void xhci_update_hub_tt(struct usb_device *udev)
 	if (udev->slot_id == 0)
 		return;
 
+	udev->route = build_route_string(udev->parent, udev->parent_port);
+
 	struct xhci_ctrl *ctrl = udev->controller;
 	struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
 	if (!virt_dev || !virt_dev->in_ctx || !virt_dev->out_ctx)
@@ -1034,8 +1052,8 @@ void xhci_update_hub_tt(struct usb_device *udev)
 	dev_info |= DEV_HUB;
 
 	tt_info &= ~(TT_SLOT(0xff) | TT_PORT(0xff) | TT_THINK_TIME(0x3));
-	tt_info = TT_SLOT(udev->tt_slot) |
-			  TT_PORT(udev->tt_port) |
+	tt_info = TT_SLOT(udev->parent->slot_id) |
+			  TT_PORT(udev->parent_port) |
 			  TT_THINK_TIME(udev->tt_think_time & 0x3);
 
 	slot_ctx->dev_info = LE32(dev_info);
@@ -1048,8 +1066,8 @@ void xhci_update_hub_tt(struct usb_device *udev)
 	xhci_flush_cache((uintptr_t)ctrl_ctx, sizeof(*ctrl_ctx));
 	/* xhci_configure_endpoints will flush the full input context */
 
-	KprintfH("xhci_update_hub_tt: slot=%ld tt_code=%ld\n",
-			 (ULONG)udev->slot_id, (LONG)udev->tt_think_time);
+	KprintfH("xhci_update_hub_tt: addr=%ld tt_code=%ld\n",
+			 (ULONG)udev->poseidon_address, (LONG)udev->tt_think_time);
 
 	xhci_configure_endpoints(udev, TRUE, NULL);
 }

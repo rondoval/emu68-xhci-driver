@@ -451,7 +451,6 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	}	
 	
 	unsigned int ep_index = ep * 2 - ((io->iouh_Dir == UHDIR_IN) ? 0 : 1);
-	int max_packet = io->iouh_MaxPktSize ? io->iouh_MaxPktSize : 1;
 	u64 buf_64 = xhci_dma_map(ctrl, io->iouh_Data, length);
 	dma_addr_t last_transfer_trb_addr;
 
@@ -594,7 +593,7 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 
 		/* Set the TRB length, TD size, and interrupter fields. */
 		remainder = xhci_td_remainder(ctrl, running_total, trb_buff_len,
-									  length, max_packet,
+									  length, (int)io->iouh_MaxPktSize,
 									  more_trbs_coming);
 
 		length_field = (TRB_LEN(trb_buff_len) |
