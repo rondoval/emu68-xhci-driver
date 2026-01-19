@@ -5,6 +5,7 @@
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>
 #include <xhci/xhci-events.h>
+#include <xhci/xhci-td.h>
 #include <devices/usbhardware.h>
 #include <usb_glue.h>
 
@@ -245,22 +246,7 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     /* Fail all active TDs on this endpoint */
     struct ep_context *ep_ctx = &cmd->udev->ep_context[endpoint];
-    struct MinNode *n;
-    ObtainSemaphore(&ep_ctx->active_tds_lock);
-    while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
-    {
-        struct xhci_td *td = (struct xhci_td *)n;
-        if (td->req)
-        {
-            if (td->rt_iso)
-                FreeVecPooled(ctrl->memoryPool, td->req);
-            else
-                io_reply_failed(td->req, IOERR_ABORTED);
-        }
-        xhci_td_release_trbs(td);
-        xhci_td_free(ctrl, td);
-    }
-    ReleaseSemaphore(&ep_ctx->active_tds_lock);
+    xhci_td_fail_all(ep_ctx->active_tds, UHIOERR_TIMEOUT);
 
     xhci_set_deq_pointer(cmd->udev, ep_index);
 }
@@ -368,7 +354,7 @@ static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *
 {
     xhci_acknowledge_event(ctrl);
     KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
-    ULONG comp = GET_COMP_CODE(LE32(event->event_cmd.status));
+    xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
 
     if (comp != COMP_SUCCESS)
     {
@@ -561,23 +547,7 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
     xhci_ep_set_resetting(udev, ep);
 
     /* Fail and free any in-flight TDs so callers get a reply before reset. */
-    struct MinNode *n;
-    ObtainSemaphore(&ep_ctx->active_tds_lock);
-    while ((n = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
-    {
-        struct xhci_td *td = (struct xhci_td *)n;
-        if (td->req)
-        {
-            if (td->rt_iso)
-                FreeVecPooled(ctrl->memoryPool, td->req);
-            else
-                io_reply_failed(td->req, UHIOERR_TIMEOUT);
-        }
-        xhci_td_release_trbs(td);
-        xhci_td_free(ctrl, td);
-    }
-    ReleaseSemaphore(&ep_ctx->active_tds_lock);
-
+    xhci_td_fail_all(ep_ctx->active_tds, UHIOERR_TIMEOUT);
 
     // set TSP=0 - reset split transaction, flush cached TDs
     xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_RESET_EP, NULL, udev); // handle_reset_ep
@@ -690,7 +660,6 @@ void xhci_enable_slot(struct usb_device *udev, struct IOUsbHWReq *req)
 void xhci_disable_slot(struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    //TODO mark somehow in state?
     for(int ep = 0; ep < USB_MAXENDPOINTS; ep++)
     {
         udev->ep_context[ep].state = USB_DEV_EP_STATE_ABORTING;

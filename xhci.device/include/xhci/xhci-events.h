@@ -6,6 +6,7 @@
 #include <compat.h>
 #include <exec/semaphores.h>
 #include <devices/usbhardware.h>
+#include <xhci/xhci-td.h>
 
 enum ep_state
 {
@@ -22,24 +23,11 @@ enum ep_state
 
 struct xhci_ring; /* forward declaration */
 
-struct xhci_td
-{
-    struct MinNode node;            /* linkage in active TD list */
-    struct IOUsbHWReq *req;         /* owning request */
-    dma_addr_t completion_trb;      /* TRB address we expect a completion for */
-    ULONG length;                   /* total length for completion accounting */
-    ULONG deadline_us;              /* absolute deadline in usec, 0 means no timeout */
-    BOOL rt_iso;                    /* true if this TD is part of RT ISO pipeline */
-    struct xhci_ring *ring;         /* ring that owns the queued TRBs */
-    unsigned int trb_count;         /* number of TRBs consumed by this TD */
-    dma_addr_t *trb_addrs;          /* DMA addresses for every TRB in this TD */
-};
 
 struct ep_context
 {
-    struct MinList pending_reqs; /* list of pending requests */
-    struct MinList active_tds;   /* list of in-flight TDs */
-    struct SignalSemaphore active_tds_lock; /* protects active_tds */
+    IOReqList pending_reqs; /* list of pending requests */
+    TransferDescriptorList *active_tds; /* list of in-flight TDs */
 
     enum ep_state state;
 
@@ -74,12 +62,10 @@ struct usb_device; /* forward declaration */
 struct xhci_ctrl;  /* forward declaration */
 void xhci_ep_set_failed(struct usb_device *udev, int endpoint);
 void xhci_ep_set_idle(struct usb_device *udev, int endpoint);
-void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t *trb_addrs, ULONG timeout_ms, struct xhci_ring *ring, unsigned int trb_count);
+void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t *trb_addrs, ULONG timeout_ms, unsigned int trb_count);
 void xhci_ep_set_resetting(struct usb_device *udev, int endpoint);
 void xhci_ep_set_aborting(struct usb_device *udev, int endpoint);
 
-void xhci_td_release_trbs(struct xhci_td *td);
-void xhci_td_free(struct xhci_ctrl *ctrl, struct xhci_td *td);
 
 BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl);
 void xhci_process_event_timeouts(struct xhci_ctrl *ctrl);

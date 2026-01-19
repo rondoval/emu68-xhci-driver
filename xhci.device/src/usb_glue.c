@@ -13,6 +13,7 @@
 #include <xhci/xhci.h>
 #include <xhci/xhci-events.h>
 #include <xhci/xhci-commands.h>
+#include <xhci/xhci-td.h>
 
 #include <device.h>
 #include <debug.h>
@@ -34,12 +35,7 @@
 #define RT_ISO_IN_TARGET_TDS 16
 
 static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io);
-static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD addr);
-static UBYTE usb_glue_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum);
-static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUsbHWReq *io);
 static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, struct usb_device *hub, unsigned int port);
-static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number);
-static enum usb_device_speed usb_glue_speed_from_port_status(UWORD status);
 
 static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number)
 {
@@ -113,8 +109,7 @@ static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD pose
     for (int i = 0; i < USB_MAXENDPOINTS; ++i)
     {
         _NewMinList(&udev->ep_context[i].pending_reqs);
-        _NewMinList(&udev->ep_context[i].active_tds);
-        InitSemaphore(&udev->ep_context[i].active_tds_lock);
+        udev->ep_context[i].active_tds = xhci_td_create_list(ctrl);
     }
 
     ctrl->devices_by_poseidon_address[poseidon_address] = udev;
@@ -208,7 +203,7 @@ void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index)
     io->iouh_DevAddr = udev->poseidon_address;
 
     /* Queue it; on failure free immediately. */
-    if (xhci_ctrl_tx(udev, io, 1000) != UHIOERR_NO_ERROR)
+    if (xhci_ctrl_tx(udev, io, XHCI_TIMEOUT) != UHIOERR_NO_ERROR)
     {
         FreeVecPooled(ctrl->memoryPool, io);
     }
@@ -238,7 +233,7 @@ static void usb_glue_queue_clear_tt(struct usb_device *hub, u16 devinfo, u16 tt_
 
     io->iouh_DevAddr = hub->poseidon_address;
 
-    if (xhci_ctrl_tx(hub, io, 1000) != UHIOERR_NO_ERROR)
+    if (xhci_ctrl_tx(hub, io, XHCI_TIMEOUT) != UHIOERR_NO_ERROR)
     {
         FreeVecPooled(ctrl->memoryPool, io);
     }
@@ -315,53 +310,6 @@ static void enqueue_pending_request_front(struct ep_context *ep_ctx, struct IOUs
     KprintfH("requeued request cmd=%ld ep=%ld\n",
              (LONG)io->iouh_Req.io_Command,
              (LONG)(io->iouh_Endpoint & 0x0F));
-}
-
-static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
-{
-    struct MinNode *node;
-
-    while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
-    {
-        struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-        io_reply_failed(req, IOERR_ABORTED);
-    }
-
-    ObtainSemaphore(&ep_ctx->active_tds_lock);
-    while ((node = RemHeadMinList(&ep_ctx->active_tds)) != NULL)
-    {
-        struct xhci_td *td = (struct xhci_td *)node;
-        xhci_td_release_trbs(td);
-        if (td->req)
-        {
-            if (td->req->iouh_Data)
-                xhci_dma_unmap(ctrl, (dma_addr_t)td->req->iouh_Data, td->length);
-            if (td->rt_iso && td->req->iouh_Dir == UHDIR_IN && td->req->iouh_Data)
-                FreeVecPooled(ctrl->memoryPool, td->req->iouh_Data);
-            if (td->rt_iso)
-                FreeVecPooled(ctrl->memoryPool, td->req);
-            else
-                io_reply_failed(td->req, IOERR_ABORTED);
-        }
-        FreeVecPooled(ctrl->memoryPool, td);
-    }
-    ReleaseSemaphore(&ep_ctx->active_tds_lock);
-
-    /* Reset RT ISO inflight counters after teardown since all TDs are freed. */
-    ep_ctx->rt_inflight_bytes = 0;
-    ep_ctx->rt_inflight_tds = 0;
-
-    if (ep_ctx->rt_template_req)
-    {
-        FreeVecPooled(ctrl->memoryPool, ep_ctx->rt_template_req);
-        ep_ctx->rt_template_req = NULL;
-    }
-    if (ep_ctx->rt_stop_pending)
-    {
-        io_reply_failed(ep_ctx->rt_stop_pending, IOERR_ABORTED);
-        ep_ctx->rt_stop_pending = NULL;
-    }
-    ep_ctx->rt_req = NULL;
 }
 
 static int handle_ring_busy(struct usb_device *udev, struct IOUsbHWReq *io)
@@ -1201,9 +1149,6 @@ int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         goto badparams;
 
     unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    if (endpoint >= USB_MAXENDPOINTS)
-        goto badparams;
-
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
     {
@@ -1237,9 +1182,6 @@ int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         goto badparams;
 
     unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    if (endpoint >= USB_MAXENDPOINTS)
-        goto badparams;
-
     struct ep_context *ep_ctx = &udev->ep_context[endpoint];
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
@@ -1261,10 +1203,7 @@ int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     ep_ctx->rt_stop_pending = io;
     io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
 
-    BOOL no_inflight;
-    ObtainSemaphore(&ep_ctx->active_tds_lock);
-    no_inflight = minlist_empty(&ep_ctx->active_tds);
-    ReleaseSemaphore(&ep_ctx->active_tds_lock);
+    BOOL no_inflight = xhci_td_is_empty(ep_ctx->active_tds);
 
     if (no_inflight)
     {
@@ -1595,7 +1534,6 @@ static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
                 Kprintf("overwriting existing ctx for addr %ld\n", (LONG)new_addr);
                 /* If we are replacing an existing device (e.g., hub power-cycle), disconnect it (and children) first. */
                 usb_glue_disconnect_device(ctrl, ctrl->devices_by_poseidon_address[new_addr], TRUE);
-                usb_glue_free_udev_slot(ctrl->devices_by_poseidon_address[new_addr]);
             }
 
             ctrl->devices_by_poseidon_address[new_addr] = current;
@@ -1687,7 +1625,38 @@ void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULON
     ReplyMsg((struct Message *)io);
 }
 
-static void usb_glue_flush_udev(struct usb_device *udev, unsigned int reply_code)
+static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx, BYTE reply_code)
+{
+    struct MinNode *node;
+    while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
+    {
+        struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
+        io_reply_failed(req, reply_code);
+    }
+
+    xhci_td_destroy_list(ep_ctx->active_tds, reply_code);
+
+    /* Reset RT ISO inflight counters after teardown since all TDs are freed. */
+    ep_ctx->rt_inflight_bytes = 0;
+    ep_ctx->rt_inflight_tds = 0;
+    ep_ctx->rt_last_buffer = 0;
+    ep_ctx->rt_last_filled = 0;
+
+    if (ep_ctx->rt_template_req)
+    {
+        FreeVecPooled(ctrl->memoryPool, ep_ctx->rt_template_req);
+        ep_ctx->rt_template_req = NULL;
+    }
+    if (ep_ctx->rt_stop_pending)
+    {
+        io_reply_failed(ep_ctx->rt_stop_pending, reply_code);
+        ep_ctx->rt_stop_pending = NULL;
+    }
+    ep_ctx->rt_req = NULL;
+    ep_ctx->state = USB_DEV_EP_STATE_IDLE;
+}
+
+static void usb_glue_flush_udev(struct usb_device *udev, UBYTE reply_code)
 {
     if (!udev)
         return;
@@ -1708,7 +1677,7 @@ static void usb_glue_flush_udev(struct usb_device *udev, unsigned int reply_code
     {
         struct ep_context *ep_ctx = &udev->ep_context[ep];
         KprintfH("tearing down addr %ld EP %ld context, state %ld\n", (LONG)udev->poseidon_address, (LONG)ep, (LONG)ep_ctx->state);
-        ep_teardown(ctrl, ep_ctx);
+        ep_teardown(ctrl, ep_ctx, reply_code);
     }
 }
 
@@ -1783,7 +1752,6 @@ void usb_glue_free_udev_slot(struct usb_device *udev)
         ctrl->devs[udev->slot_id]->udev = NULL;
 
     ctrl->devices_by_poseidon_address[udev->poseidon_address] = NULL;
-    udev->used = 0;
     FreeVecPooled(ctrl->memoryPool, udev);
 }
 

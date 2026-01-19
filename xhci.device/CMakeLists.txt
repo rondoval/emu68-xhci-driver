@@ -20,6 +20,7 @@ add_executable(xhci.device
     src/xhci/xhci-mem.c
     src/xhci/xhci-events.c
     src/xhci/xhci-commands.c
+    src/xhci/xhci-td.c
     src/device_end.c
 )
 

@@ -310,7 +310,6 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring)
 	ring->enq_seg = ring->first_seg;
 	ring->dequeue = ring->enqueue;
 	ring->deq_seg = ring->first_seg;
-	ring->queued_trbs = 0;
 
 	/*
 	 * The ring is initialized to 0. The producer must write 1 to the

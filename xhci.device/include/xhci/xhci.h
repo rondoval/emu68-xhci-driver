@@ -1042,7 +1042,6 @@ struct xhci_ring
 	 */
 	volatile u32 cycle_state;
 	unsigned int num_segs;
-	unsigned int queued_trbs;
 };
 
 struct xhci_erst_entry

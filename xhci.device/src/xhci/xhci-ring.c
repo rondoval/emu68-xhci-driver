@@ -354,12 +354,12 @@ static inline unsigned int ring_capacity(const struct xhci_ring *ring)
 	return ring->num_segs * (TRBS_PER_SEGMENT - 1);
 }
 
-static int ring_has_room(struct xhci_ring *ring, unsigned int needed)
+static int ring_has_room(struct xhci_ring *ring, struct ep_context *ep_ctx, unsigned int needed)
 {
 	unsigned int capacity = ring_capacity(ring);
 	if (capacity == 0)
 		return 0;
-	return ring->queued_trbs + needed <= capacity;
+	return xhci_td_get_queued_count(ep_ctx->active_tds) + needed <= capacity;
 }
 
 /**
@@ -504,13 +504,12 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	}
 
 	unsigned int td_trb_count = (unsigned int)num_trbs;
-	if (!ring_has_room(ring, num_trbs + 1))
+	struct ep_context *udev_ep_ctx = &udev->ep_context[ep];
+	if (!ring_has_room(ring, udev_ep_ctx, num_trbs + 1))
 	{
-		KprintfH("Ring full ep=%ld needed=%ld queued=%ld capacity=%ld\n",
+		KprintfH("Ring full ep=%ld needed=%ld\n",
 			   (LONG)ep,
-			   (LONG)num_trbs + 1,
-			   (LONG)ring->queued_trbs,
-			   (LONG)ring_capacity(ring));
+			   (LONG)num_trbs + 1);
 		io->iouh_DriverPrivate2 = XHCI_REQ_RING_BUSY;
 		return UHIOERR_RING_BUSY;
 	}
@@ -620,7 +619,7 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		trb_buff_len = min((length - running_total), TRB_MAX_BUFF_SIZE);
 	} while (running_total < length);
 
-	xhci_ep_set_receiving(udev, io, state, td_trb_addrs, timeout_ms, ring, td_trb_count);
+	xhci_ep_set_receiving(udev, io, state, td_trb_addrs, timeout_ms, td_trb_count);
 
 	/* Hand the first TRB back to the controller once the TD is ready. */
 	if (defer_doorbell)
@@ -791,7 +790,8 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	 */
 	unsigned int td_trb_count = (unsigned int)num_trbs;
 	KprintfH("prepare_ring ep_state=%lx\n", (ULONG)(LE32(ep_ctx->ep_info) & EP_STATE_MASK));
-	if (!ring_has_room(ep_ring, num_trbs + 1))
+	struct ep_context *udev_ep_ctx = &udev->ep_context[io->iouh_Endpoint & 0xf];
+	if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1))
 	{
 		KprintfH("Control ring full: needed %ld TRBs\n", (LONG)(num_trbs + 1));
 		io->iouh_DriverPrivate2 = XHCI_REQ_RING_BUSY;
@@ -916,7 +916,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	KprintfH("status TRB addr: %lx\n", (ULONG)event_trb);
 	td_trb_addrs[td_trb_index++] = event_trb;
 
-	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING, td_trb_addrs, timeout_ms, ep_ring, td_trb_count);
+	xhci_ep_set_receiving(udev, io, USB_DEV_EP_STATE_RECEIVING, td_trb_addrs, timeout_ms, td_trb_count);
 
 	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
 
