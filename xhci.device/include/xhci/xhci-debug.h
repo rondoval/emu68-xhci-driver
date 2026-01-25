@@ -10,4 +10,6 @@ void xhci_dump_ep_ctx(const char *tag,
 void xhci_dump_slot_ctx(const char *tag,
 			  const struct xhci_slot_ctx *slot_ctx);
 
+void xhci_dump_config(const char* tag, const struct usb_config *cfg, LONG addr);
+
 #endif /* XHCI_DEBUG_H */

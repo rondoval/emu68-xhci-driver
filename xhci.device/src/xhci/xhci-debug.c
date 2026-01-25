@@ -3,7 +3,6 @@
 #include <compat.h>
 #include <debug.h>
 
-#include <xhci/usb.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-debug.h>
 
@@ -83,15 +82,10 @@ static const char *ep_type_name(u32 type)
     }
 }
 
-static const char *prefix_or_empty(const char *tag)
-{
-    return tag ? tag : "";
-}
-
 void xhci_dump_slot_ctx(const char *tag, const struct xhci_slot_ctx *slot_ctx)
 {
     xhci_inval_cache((uintptr_t)slot_ctx, sizeof(struct xhci_slot_ctx));
-    const char *pfx = prefix_or_empty(tag);
+    const char *pfx = tag ? tag : "";
 
     if (!slot_ctx)
     {
@@ -156,7 +150,7 @@ void xhci_dump_ep_ctx(const char *tag,
                       const struct xhci_ep_ctx *ep_ctx)
 {
     xhci_inval_cache((uintptr_t)ep_ctx, sizeof(struct xhci_ep_ctx));
-    const char *pfx = prefix_or_empty(tag);
+    const char *pfx = tag ? tag : "";
 
     if (!ep_ctx)
     {
@@ -227,4 +221,77 @@ void xhci_dump_ep_ctx(const char *tag,
             (unsigned long)tx_info,
             avg_trb_len,
             max_esit_payload);
+}
+
+static void xhci_dump_interface(const char* tag, unsigned int index, const struct usb_interface *iface)
+{
+	if (!iface)
+		return;
+
+    const char *pfx = tag ? tag : "";
+
+	const struct usb_interface_altsetting *active_alt = iface->active_altsetting;
+	const struct usb_interface_altsetting *desc_alt = active_alt;
+	if (!desc_alt && iface->num_altsetting > 0)
+		desc_alt = &iface->altsetting[0];
+
+	Kprintf("%s  Interface %ld:\n", pfx, (ULONG)index);
+	if (desc_alt)
+	{
+		Kprintf("%s    bLength=%ld bDescriptorType=%ld bInterfaceNumber=%ld bAlternateSetting=%ld\n", pfx,
+				(ULONG)desc_alt->desc.bLength, (ULONG)desc_alt->desc.bDescriptorType,
+				(ULONG)desc_alt->desc.bInterfaceNumber, (ULONG)desc_alt->desc.bAlternateSetting);
+		Kprintf("%s    bNumEndpoints=%ld bInterfaceClass=%ld bInterfaceSubClass=%ld bInterfaceProtocol=%ld\n", pfx,
+				(ULONG)desc_alt->desc.bNumEndpoints, (ULONG)desc_alt->desc.bInterfaceClass,
+				(ULONG)desc_alt->desc.bInterfaceSubClass, (ULONG)desc_alt->desc.bInterfaceProtocol);
+		Kprintf("%s    iInterface=%ld no_of_ep=%ld\n", pfx,
+				(ULONG)desc_alt->desc.iInterface,
+				(ULONG)(active_alt ? active_alt->no_of_ep : desc_alt->no_of_ep));
+	}
+	else
+	{
+		Kprintf("%s    (no descriptors captured for this interface)\n", pfx);
+	}
+
+	if (!active_alt)
+	{
+		Kprintf("%s    (no active alternate setting)\n", pfx);
+		return;
+	}
+
+	for (unsigned int j = 0; j < active_alt->no_of_ep; ++j)
+	{
+		const struct usb_endpoint_descriptor *ep = &active_alt->ep_desc[j];
+		const struct usb_ss_ep_comp_descriptor *ss_ep = &active_alt->ss_ep_comp_desc[j];
+		Kprintf("%s    Endpoint %ld:\n", pfx, (ULONG)j);
+		Kprintf("%s      bLength=%ld bDescriptorType=%ld bEndpointAddress=0x%02lx bmAttributes=0x%02lx\n",
+				pfx, (ULONG)ep->bLength, (ULONG)ep->bDescriptorType,
+				(ULONG)ep->bEndpointAddress, (ULONG)ep->bmAttributes);
+		Kprintf("%s      wMaxPacketSize=%ld bInterval=%ld\n",
+				pfx, (ULONG)LE16(ep->wMaxPacketSize), (ULONG)ep->bInterval);
+		Kprintf("%s      SS Companion: bLength=%ld bDescriptorType=%ld bMaxBurst=%ld bmAttributes=0x%02lx\n",
+				pfx, (ULONG)ss_ep->bLength, (ULONG)ss_ep->bDescriptorType,
+				(ULONG)ss_ep->bMaxBurst, (ULONG)ss_ep->bmAttributes);
+		Kprintf("%s      SS Companion: wBytesPerInterval=%ld\n",
+				pfx, (ULONG)LE16(ss_ep->wBytesPerInterval));
+	}
+}
+
+void xhci_dump_config(const char* tag, const struct usb_config *cfg, LONG addr)
+{
+	if (!cfg)
+		return;
+
+    const char *pfx = tag ? tag : "";
+
+	Kprintf("%s Addr %ld configuration dump:\n", pfx, addr);
+	Kprintf("%s  bLength=%ld bDescriptorType=%ld wTotalLength=%ld bNumInterfaces=%ld\n",
+			pfx, (ULONG)cfg->desc.bLength, (ULONG)cfg->desc.bDescriptorType,
+			(ULONG)LE16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
+	Kprintf("%s  bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
+			pfx, (ULONG)cfg->desc.bConfigurationValue, (ULONG)cfg->desc.iConfiguration,
+			(ULONG)cfg->desc.bmAttributes, (ULONG)cfg->desc.bMaxPower);
+	Kprintf("%s  no_of_if=%ld\n", pfx, (ULONG)cfg->no_of_if);
+	for (unsigned int i = 0; i < cfg->no_of_if; ++i)
+		xhci_dump_interface(pfx, i, &cfg->if_desc[i]);
 }
