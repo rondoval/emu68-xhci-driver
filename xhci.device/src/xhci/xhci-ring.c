@@ -24,7 +24,7 @@
 #include <xhci/xhci-debug.h>
 #include <xhci/xhci-events.h>
 #include <xhci/xhci-endpoint.h>
-#include <usb_glue.h>
+#include <xhci/xhci-udev.h>
 
 #ifdef DEBUG
 #undef Kprintf

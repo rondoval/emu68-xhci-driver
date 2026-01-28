@@ -13,7 +13,6 @@ add_executable(xhci.device
     src/unit_task.c
     src/irq.c
     src/unit_commands.c
-    src/usb_glue.c
     src/xhci/xhci.c
     src/xhci/xhci-ring.c
     src/xhci/xhci-debug.c
@@ -23,6 +22,7 @@ add_executable(xhci.device
     src/xhci/xhci-td.c
     src/xhci/xhci-usb.c
     src/xhci/xhci-root-hub.c
+    src/xhci/xhci-udev.c
     src/xhci/xhci-endpoint.c
     src/device_end.c
 )

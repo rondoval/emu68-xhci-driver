@@ -4,10 +4,10 @@
 #include <proto/exec.h>
 #endif
 
+#include <xhci/xhci-udev.h>
 #include <xhci/xhci-td.h>
 #include <xhci/xhci.h>
 #include <debug.h>
-#include <usb_glue.h>
 
 #ifdef DEBUG
 #undef Kprintf

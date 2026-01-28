@@ -26,13 +26,12 @@
 #include <device.h>
 
 #include <xhci/usb.h>
-#include <usb_glue.h>
 #include <devices/usbhardware.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-debug.h>
-#include <usb_glue.h>
+#include <xhci/xhci-udev.h>
 
 #ifdef DEBUG
 #undef Kprintf

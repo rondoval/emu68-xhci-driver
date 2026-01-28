@@ -17,13 +17,12 @@
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-usb.h>
 #include <xhci/xhci-endpoint.h>
+#include <xhci/xhci-udev.h>
 
 #include <device.h>
 #include <debug.h>
 #include <compat.h>
 #include <minlist.h>
-
-#include "usb_glue.h"
 
 #ifdef DEBUG
 #undef Kprintf

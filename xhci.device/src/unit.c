@@ -25,7 +25,6 @@
 #include <pci.h>
 #include <xhci/usb.h>
 #include <xhci/xhci.h>
-#include <usb_glue.h>
 
 
 static struct pci_controller *pcie = NULL;

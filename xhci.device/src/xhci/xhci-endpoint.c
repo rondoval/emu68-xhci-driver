@@ -13,7 +13,7 @@
 
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-td.h>
-#include <usb_glue.h>
+#include <xhci/xhci-udev.h>
 #include <xhci/xhci.h>
 
 #ifdef DEBUG

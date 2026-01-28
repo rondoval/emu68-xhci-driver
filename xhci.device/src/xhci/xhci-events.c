@@ -21,7 +21,6 @@
 
 #include <compat.h>
 #include <debug.h>
-#include <usb_glue.h>
 #include <exec/semaphores.h>
 
 #include <xhci/usb.h>
@@ -34,6 +33,7 @@
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-usb.h>
 #include <xhci/xhci-endpoint.h>
+#include <xhci/xhci-udev.h>
 
 #ifdef DEBUG
 #undef Kprintf
