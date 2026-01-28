@@ -6,6 +6,8 @@
 #include <xhci/xhci-debug.h>
 #include <xhci/xhci-events.h>
 #include <xhci/xhci-td.h>
+#include <xhci/xhci-usb.h>
+#include <xhci/xhci-endpoint.h>
 #include <devices/usbhardware.h>
 #include <usb_glue.h>
 
@@ -19,41 +21,23 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-commands] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-static const command_handler command_handlers[];
+struct pending_command; /* forward declaration */
+typedef void (*command_handler)(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event);
 
-static int xhci_ep_type_for_index(struct usb_device *udev, u32 ep_index)
+struct pending_command
 {
-    if (!udev)
-        return -1;
+    struct MinNode node;
+    dma_addr_t cmd_trb_dma;  /* value from queue_trb */
+    struct usb_device *udev; /* for slot/endpoint checks */
+    u32 ep_index;            /* endpoint index encoded into the command */
+    command_handler complete;
+    struct IOUsbHWReq *req; /* to continue control transfers */
+#ifdef DEBUG
+    trb_type type; /* command type for diagnostics */
+#endif
+};
 
-    if (ep_index == 0)
-        return USB_ENDPOINT_XFER_CONTROL;
-
-    struct usb_config *cfg = udev->active_config;
-    if (!cfg)
-        return -1;
-
-    UBYTE ep_num = EP_INDEX_TO_ENDPOINT(ep_index);
-    BOOL out = (ep_index & 0x1) != 0;
-    UBYTE addr = ep_num | (out ? USB_DIR_OUT : USB_DIR_IN);
-
-    for (int i = 0; i < cfg->no_of_if; ++i)
-    {
-        struct usb_interface *iface = &cfg->if_desc[i];
-        struct usb_interface_altsetting *alt = iface->active_altsetting;
-        if (!alt)
-            continue;
-
-        for (int e = 0; e < alt->no_of_ep; ++e)
-        {
-            struct usb_endpoint_descriptor *desc = &alt->ep_desc[e];
-            if (desc->bEndpointAddress == addr)
-                return desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK;
-        }
-    }
-
-    return -1;
-}
+static const command_handler command_handlers[];
 
 #ifdef DEBUG_HIGH
 static const char *xhci_command_type_name(trb_type type)
@@ -161,25 +145,24 @@ static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd,
     if (TRB_TO_SLOT_ID(flags) != slot_id)
     {
         Kprintf("Expected a TRB for slot %ld, got %ld\n", slot_id, TRB_TO_SLOT_ID(flags));
-        xhci_ep_set_failed(cmd->udev, endpoint);
-
-        goto error;
+        struct ep_context *ep_ctx = xhci_ep_get_context(cmd->udev, endpoint);
+        xhci_ep_set_failed(ep_ctx);
+        return;
     }
 
     KprintfH("Reset EP %ld completed successfully\n", endpoint);
     xhci_set_deq_pointer(cmd->udev, ep_index);
-
-error:
-    xhci_acknowledge_event(cmd->udev->controller);
 }
 
 static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
+    (void)ctrl;
     u32 flags = LE32(event->event_cmd.flags);
     ULONG slot_id = cmd->udev->slot_id;
     ULONG ep_index = cmd->ep_index;
     ULONG endpoint = EP_INDEX_TO_ENDPOINT(ep_index);
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
+    struct ep_context *ep_ctx = xhci_ep_get_context(cmd->udev, endpoint);
 
     if (TRB_TO_SLOT_ID(flags) != slot_id || comp != COMP_SUCCESS)
     {
@@ -187,22 +170,27 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
                 slot_id,
                 TRB_TO_SLOT_ID(flags),
                 comp);
-        xhci_ep_set_failed(cmd->udev, endpoint);
-        goto error;
+        xhci_ep_set_failed(ep_ctx);
+        return;
     }
-    cmd->udev->ep_context[endpoint].state = USB_DEV_EP_STATE_IDLE;
     KprintfH("Set DEQ for EP %ld completed successfully, status code %ld (success=1)\n", endpoint, comp);
 
-    /*
-     * If this is due to e.g. STALL recovery, we need to sort out the device itself...:
-     * issue ClearFeature(CLEAR_TT_BUFFER) to the hub if its control or bulk ep and dev is behind a TT
-     * if not control ep,  issue ClearFeature(ENDPOINT_HALT) to the device
-    */
-    
-    struct ep_context *ep_ctx = &cmd->udev->ep_context[endpoint];
-    if (ep_ctx->clear_halt_pending)
+    if (xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_RESETTING)
     {
+        KprintfH("EP %ld was resetting, completing reset\n", endpoint);
+        /*
+         * If this is due to e.g. STALL recovery, we need to sort out the device itself...:
+         * issue ClearFeature(CLEAR_TT_BUFFER) to the hub if its control or bulk ep and dev is behind a TT
+         * if not control ep,  issue ClearFeature(ENDPOINT_HALT) to the device.
+         * We'll do that by pushing these to fron of the pending queue.
+         */
         int ep_type = xhci_ep_type_for_index(cmd->udev, ep_index);
+
+        if (endpoint != 0 && ep_type != USB_ENDPOINT_XFER_CONTROL)
+        {
+            /* Dispatch deferred device-side CLEAR_FEATURE after host recovery. */
+            usb_glue_clear_feature_halt_internal(cmd->udev, ep_index);
+        }
 
         /* For control/bulk endpoints behind a TT, clear the TT buffer on the hub. */
         if (cmd->udev->speed == USB_SPEED_FULL || cmd->udev->speed == USB_SPEED_LOW)
@@ -212,22 +200,14 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
                 usb_glue_clear_tt_buffer_internal(cmd->udev, ep_index, ep_type);
             }
         }
-
-        if (endpoint != 0 && ep_type != USB_ENDPOINT_XFER_CONTROL)
-        {
-            /* Dispatch deferred device-side CLEAR_FEATURE after host recovery. */
-            usb_glue_clear_feature_halt_internal(cmd->udev, ep_index);
-        }
-        ep_ctx->clear_halt_pending = FALSE;
     }
-    xhci_ep_set_idle(cmd->udev, endpoint);
 
-error:
-    xhci_acknowledge_event(ctrl);
+    xhci_ep_set_idle(ep_ctx);
 }
 
 static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
+    (void)ctrl;
     u32 flags = LE32(event->event_cmd.flags);
     trb_type type = TRB_FIELD_TO_TYPE(flags);
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
@@ -240,13 +220,12 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
         Kprintf("Expected a TRB for slot %ld with SUCCESS, got %ld with %ld\n", slot_id, TRB_TO_SLOT_ID(flags), comp);
         return;
     }
-    xhci_acknowledge_event(ctrl);
 
     KprintfH("Stopped EP %ld...\n", endpoint);
 
     /* Fail all active TDs on this endpoint */
-    struct ep_context *ep_ctx = &cmd->udev->ep_context[endpoint];
-    xhci_td_fail_all(ep_ctx->active_tds, UHIOERR_TIMEOUT);
+    struct ep_context *ep_ctx = xhci_ep_get_context(cmd->udev, endpoint);
+    xhci_ep_set_failed(ep_ctx);
 
     xhci_set_deq_pointer(cmd->udev, ep_index);
 }
@@ -258,13 +237,12 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
  */
 static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
+    (void)ctrl;
 #ifdef DEBUG_HIGH
     trb_type type = cmd->type;
     const char *type_name = xhci_command_type_name(type);
 #endif
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
-
-    xhci_acknowledge_event(ctrl);
 
     if (comp != COMP_SUCCESS)
     {
@@ -279,9 +257,9 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
             if (virt_dev)
             {
                 xhci_inval_cache((uintptr_t)virt_dev->in_ctx->bytes, virt_dev->in_ctx->size);
-                xhci_dump_slot_ctx("input slot ctx (failure)", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
+                xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
                 xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
-                xhci_dump_slot_ctx("output slot ctx (failure)", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
+                xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
             }
         }
 #endif
@@ -297,9 +275,9 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
         if (virt_dev)
         {
             xhci_inval_cache((uintptr_t)virt_dev->in_ctx->bytes, virt_dev->in_ctx->size);
-            xhci_dump_slot_ctx("input slot ctx (success)", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
+            xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
             xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
-            xhci_dump_slot_ctx("output slot ctx (success)", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
+            xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
         }
     }
 #endif
@@ -318,7 +296,6 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
 static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
-    xhci_acknowledge_event(ctrl);
     KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
     if (GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
     {
@@ -352,7 +329,6 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
 
 static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
-    xhci_acknowledge_event(ctrl);
     KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
 
@@ -403,8 +379,6 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
         break;
     }
 
-    xhci_acknowledge_event(ctrl);
-
     if (err)
     {
         if (cmd->udev)
@@ -414,9 +388,9 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
             {
                 Kprintf("Address Device failure for slot %ld (code %ld)\n", (ULONG)cmd->udev->slot_id, (ULONG)err);
                 xhci_inval_cache((uintptr_t)virt_dev->in_ctx->bytes, virt_dev->in_ctx->size);
-                xhci_dump_slot_ctx("address input slot ctx", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
+                xhci_dump_slot_ctx("[xhci-commands] handle_address_device:", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
                 xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
-                xhci_dump_slot_ctx("address output slot ctx", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
+                xhci_dump_slot_ctx("[xhci-commands] handle_address_device:", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
             }
         }
         /*
@@ -437,14 +411,14 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
     cmd->udev->xhci_address = LE32(xhci_get_slot_ctx(ctrl, virt_dev->out_ctx)->dev_state) & DEV_ADDR_MASK;
     cmd->udev->slot_state = USB_DEV_SLOT_STATE_ADDRESSED;
     KprintfH("Assigned xHCI address %ld to slot %ld (Poseidon address %ld)\n",
-            (ULONG)cmd->udev->xhci_address, (ULONG)cmd->udev->slot_id, (cmd->req)?(ULONG)cmd->req->iouh_DevAddr:(ULONG)0);
+             (ULONG)cmd->udev->xhci_address, (ULONG)cmd->udev->slot_id, (cmd->req) ? (ULONG)cmd->req->iouh_DevAddr : (ULONG)0);
 
 #ifdef DEBUG_HIGH
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->out_ctx);
 
     KprintfH("xHC internal address is: %ld dev_info=%08lx dev_info2=%08lx dev_state=%08lx\n",
-            (ULONG)(LE32(slot_ctx->dev_state) & DEV_ADDR_MASK),
-            (ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2), (ULONG)LE32(slot_ctx->dev_state));
+             (ULONG)(LE32(slot_ctx->dev_state) & DEV_ADDR_MASK),
+             (ULONG)LE32(slot_ctx->dev_info), (ULONG)LE32(slot_ctx->dev_info2), (ULONG)LE32(slot_ctx->dev_state));
 #endif
 
     /* Continue the original Poseidon request after the device is addressed. */
@@ -462,7 +436,7 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
         else
         {
             int ret = usb_glue_ctrl_after_address(cmd->udev, cmd->req);
-            if (ret != UHIOERR_NO_ERROR && ret != UHIOERR_RING_BUSY)
+            if (ret != UHIOERR_NO_ERROR)
                 io_reply_failed(cmd->req, ret);
         }
     }
@@ -470,7 +444,7 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
 
 static void handle_reset_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
-    xhci_acknowledge_event(ctrl);
+    (void)ctrl;
     KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
     if (GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
     {
@@ -485,15 +459,16 @@ static void handle_reset_device(struct xhci_ctrl *ctrl, struct pending_command *
  * Mapping of commands to their handlers
  */
 static const command_handler command_handlers[] = {
-    [TRB_ENABLE_SLOT] = handle_enable_slot,   /* Enable Slot Command */
-    [TRB_DISABLE_SLOT] = handle_disable_slot, /* Disable Slot Command */ // TODO should do DISABLE_SLOT when device is disconnected
-    [TRB_ADDR_DEV] = handle_address_device,   /* Address Device Command */
-    [TRB_CONFIG_EP] = handle_config_ep,       /* Configure Endpoint Command */
-    [TRB_EVAL_CONTEXT] = handle_config_ep,    /* Evaluate Context Command */
-    [TRB_RESET_EP] = handle_reset_ep,         /* Reset Endpoint Command */
-    [TRB_STOP_RING] = handle_stop_ring,       /* Stop Transfer Ring Command */
-    [TRB_SET_DEQ] = handle_set_deq,           /* Set Transfer Ring Dequeue Pointer Command */
-    [TRB_RESET_DEV] = handle_reset_device,    /* Reset Device Command */
+    [TRB_ENABLE_SLOT] = handle_enable_slot, /* Enable Slot Command */
+    [TRB_DISABLE_SLOT] = handle_disable_slot,
+    /* Disable Slot Command */              // TODO should do DISABLE_SLOT when device is disconnected
+    [TRB_ADDR_DEV] = handle_address_device, /* Address Device Command */
+    [TRB_CONFIG_EP] = handle_config_ep,     /* Configure Endpoint Command */
+    [TRB_EVAL_CONTEXT] = handle_config_ep,  /* Evaluate Context Command */
+    [TRB_RESET_EP] = handle_reset_ep,       /* Reset Endpoint Command */
+    [TRB_STOP_RING] = handle_stop_ring,     /* Stop Transfer Ring Command */
+    [TRB_SET_DEQ] = handle_set_deq,         /* Set Transfer Ring Dequeue Pointer Command */
+    [TRB_RESET_DEV] = handle_reset_device,  /* Reset Device Command */
 };
 
 /* Command event dispatcher
@@ -526,7 +501,6 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
             (ULONG)LE32(event->generic.field[1]),
             (ULONG)LE32(event->generic.field[2]),
             (ULONG)LE32(event->generic.field[3]));
-    xhci_acknowledge_event(ctrl);
 }
 
 /*
@@ -540,14 +514,11 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
 
     struct xhci_ctrl *ctrl = udev->controller;
     u32 ep = EP_INDEX_TO_ENDPOINT(ep_index);
-    struct ep_context *ep_ctx = &udev->ep_context[ep];
+    struct ep_context *ep_ctx = xhci_ep_get_context(udev, ep);
 
     KprintfH("Resetting addr %ld slot=%ld EP %ld (index=%ld)...\n",
              (LONG)udev->poseidon_address, (LONG)udev->slot_id, (LONG)ep, (LONG)ep_index);
-    xhci_ep_set_resetting(udev, ep);
-
-    /* Fail and free any in-flight TDs so callers get a reply before reset. */
-    xhci_td_fail_all(ep_ctx->active_tds, UHIOERR_TIMEOUT);
+    xhci_ep_set_resetting(ep_ctx);
 
     // set TSP=0 - reset split transaction, flush cached TDs
     xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_RESET_EP, NULL, udev); // handle_reset_ep
@@ -566,12 +537,13 @@ void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
              (LONG)udev->poseidon_address, (LONG)endpoint, (LONG)ep_index);
     struct xhci_ctrl *ctrl = udev->controller;
 
-    enum ep_state state = udev->ep_context[endpoint].state;
+    enum ep_state state = xhci_ep_get_state(xhci_ep_get_context(udev, endpoint));
     if (state == USB_DEV_EP_STATE_RECEIVING ||
         state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT ||
         state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
-        xhci_ep_set_aborting(udev, endpoint);
+        struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+        xhci_ep_set_aborting(ep_ctx);
         KprintfH("Stopping EP %ld...\n", endpoint);
 
         // TODO suspend bit support
@@ -633,7 +605,7 @@ void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct I
              (ULONG)udev->poseidon_address,
              (ULONG)udev->slot_id);
     xhci_flush_cache((uintptr_t)in_ctx->bytes, in_ctx->size);
-    //TODO support deconfigure - DC flag?
+    // TODO support deconfigure - DC flag?
     xhci_queue_command(ctrl, in_ctx->dma, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
 }
 
@@ -660,9 +632,9 @@ void xhci_enable_slot(struct usb_device *udev, struct IOUsbHWReq *req)
 void xhci_disable_slot(struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    for(int ep = 0; ep < USB_MAXENDPOINTS; ep++)
+    for (int ep = 0; ep < USB_MAXENDPOINTS; ep++)
     {
-        udev->ep_context[ep].state = USB_DEV_EP_STATE_ABORTING;
+        xhci_ep_set_aborting(xhci_ep_get_context(udev, ep));
     }
 
     if (udev->slot_state == USB_DEV_SLOT_STATE_DISABLED)
@@ -700,7 +672,7 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
         if ((LE32(sc->dev_state) & DEV_ADDR_MASK) != 0)
         {
             KprintfH("slot %ld already addressed (dev_state=%08lx), skipping.\n",
-                    (ULONG)slot_id, (ULONG)LE32(sc->dev_state));
+                     (ULONG)slot_id, (ULONG)LE32(sc->dev_state));
             if (req)
                 io_reply_data(udev, req, UHIOERR_NO_ERROR, 0);
             return;

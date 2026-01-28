@@ -28,7 +28,7 @@ struct xhci_td
     BOOL deadline_active;      /* true if deadline_us is valid */
     ULONG deadline_us;         /* absolute deadline in usec, 0 means no timeout */
     BOOL is_rt_iso;            /* true if this TD is part of RT ISO pipeline */
-    unsigned int trb_count;    /* number of TRBs consumed by this TD */
+    UWORD trb_count;    /* number of TRBs consumed by this TD */
     dma_addr_t *trb_addrs;     /* DMA addresses for every TRB in this TD */
 };
 

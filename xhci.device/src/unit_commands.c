@@ -20,6 +20,10 @@
 #include <compat.h>
 #include <pci.h>
 #include <xhci/xhci.h>
+#include <xhci/xhci-root-hub.h>
+#include <xhci/xhci-endpoint.h>
+#include <xhci/xhci-commands.h>
+#include <xhci/xhci-usb.h>
 
 #include <usb_glue.h>
 
@@ -77,18 +81,29 @@ static int Do_CMD_FLUSH(struct IOUsbHWReq *io)
     }
 
     /* go through all devices and endpoints and flush their queues */
-    usb_glue_flush_queues(unit);
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+
+    for (unsigned int addr = 0; addr <= USB_MAX_ADDRESS; ++addr)
+    {
+        struct usb_device *udev = ctrl->devices_by_poseidon_address[addr];
+        if (!udev || addr == xhci_roothub_get_address(ctrl->root_hub))
+            continue;
+
+        for (unsigned int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
+        {
+            struct ep_context *ep_ctx = xhci_ep_get_context(udev, ep);
+            xhci_ep_flush(ep_ctx, IOERR_ABORTED);
+
+            u32 ep_out_index = xhci_ep_index_from_parts(ep, UHDIR_OUT);
+            u32 ep_in_index = xhci_ep_index_from_parts(ep, UHDIR_IN);
+            // TODO which one really exists?
+
+            xhci_stop_endpoint(udev, ep_out_index);
+            xhci_stop_endpoint(udev, ep_in_index);
+        }
+    }
 
     KprintfH("[xhci] %s: Flush completed\n", __func__);
-    return COMMAND_PROCESSED;
-}
-
-static int Do_CMD_RESET(struct IOUsbHWReq *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: CMD_RESET\n", __func__);
-    //TODO should reset entire controller...
-    io->iouh_Req.io_Error = usb_glue_bus_reset(unit);
     return COMMAND_PROCESSED;
 }
 
@@ -137,12 +152,12 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
             break;
         case UHA_Manufacturer:
             uword_to_hex(unit->xhci_ctrl->pci_dev->vendor, (UBYTE *)vendor_str);
-            *out = (ULONG)(APTR) vendor_str;
+            *out = (ULONG)(APTR)vendor_str;
             filled++;
             break;
         case UHA_ProductName:
             uword_to_hex(unit->xhci_ctrl->pci_dev->device, (UBYTE *)device_str);
-            *out = (ULONG)(APTR) device_str;
+            *out = (ULONG)(APTR)device_str;
             filled++;
             break;
         case UHA_Version:
@@ -167,7 +182,7 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
             filled++;
             break;
         case UHA_Capabilities:
-            *out = UHCF_USB20 | UHCF_ISO | UHCF_RT_ISO | UHCF_USB30;// | UHCF_QUICKIO;
+            *out = UHCF_USB20 | UHCF_ISO | UHCF_RT_ISO | UHCF_USB30; // | UHCF_QUICKIO;
             filled++;
             break;
         default:
@@ -191,10 +206,36 @@ static inline int Do_UHCMD_USBRESET(struct IOUsbHWReq *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     Kprintf("[xhci] %s: UHCMD_USBRESET\n", __func__);
-    io->iouh_Req.io_Error = usb_glue_bus_reset(unit);
+
+    /* Issue SET_FEATURE(RESET) on all root hub ports */
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    int maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
+    for (int p = 1; p <= maxp; ++p)
+    {
+        struct IOUsbHWReq req;
+        _memset(&req, 0, sizeof(req));
+        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
+        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
+        req.iouh_SetupData.wValue = LE16(USB_PORT_FEAT_RESET);
+        req.iouh_SetupData.wIndex = LE16(p);
+        req.iouh_SetupData.wLength = LE16(0);
+        req.iouh_DevAddr = xhci_roothub_get_address(ctrl->root_hub);
+
+        xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
+    }
+
+    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
     io->iouh_State = (io->iouh_Req.io_Error == UHIOERR_NO_ERROR) ? UHSF_RESET : 0;
 
     return COMMAND_PROCESSED;
+}
+
+static int Do_CMD_RESET(struct IOUsbHWReq *io)
+{
+    // struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
+    Kprintf("[xhci] %s: CMD_RESET\n", __func__);
+    // TODO should reset entire controller...
+    return Do_UHCMD_USBRESET(io);
 }
 
 /*
@@ -205,8 +246,23 @@ static inline int Do_UHCMD_USBRESUME(struct IOUsbHWReq *io)
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     Kprintf("[xhci] %s: UHCMD_USBRESUME\n", __func__);
 
-    io->iouh_Req.io_Error = usb_glue_bus_resume(unit);
-    io->iouh_State = (io->iouh_Req.io_Error == UHIOERR_NO_ERROR) ? UHSF_OPERATIONAL : 0;
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    int maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
+    for (int p = 1; p <= maxp; ++p)
+    {
+        struct IOUsbHWReq req;
+        _memset(&req, 0, sizeof(req));
+        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.iouh_SetupData.bRequest = USB_REQ_CLEAR_FEATURE;
+        req.iouh_SetupData.wValue = LE16(USB_PORT_FEAT_SUSPEND);
+        req.iouh_SetupData.wIndex = LE16(p);
+        req.iouh_DevAddr = xhci_roothub_get_address(ctrl->root_hub);
+
+        xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
+    }
+
+    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+    io->iouh_State = UHSF_OPERATIONAL;
     return COMMAND_PROCESSED;
 }
 
@@ -218,8 +274,24 @@ static inline int Do_UHCMD_USBSUSPEND(struct IOUsbHWReq *io)
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     Kprintf("[xhci] %s: UHCMD_USBSUSPEND\n", __func__);
 
-    io->iouh_Req.io_Error = usb_glue_bus_suspend(unit);
-    io->iouh_State = (io->iouh_Req.io_Error == UHIOERR_NO_ERROR) ? UHSF_SUSPENDED : 0;
+    // TODO check if there is a controller level suspend/resume
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    int maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
+    for (int p = 1; p <= maxp; ++p)
+    {
+        struct IOUsbHWReq req;
+        _memset(&req, 0, sizeof(req));
+        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
+        req.iouh_SetupData.wValue = LE16(USB_PORT_FEAT_SUSPEND);
+        req.iouh_SetupData.wIndex = LE16(p);
+        req.iouh_DevAddr = xhci_roothub_get_address(ctrl->root_hub);
+
+        xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
+    }
+
+    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+    io->iouh_State = UHSF_SUSPENDED;
     return COMMAND_PROCESSED;
 }
 
@@ -231,8 +303,25 @@ static inline int Do_UHCMD_USBOPER(struct IOUsbHWReq *io)
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     Kprintf("[xhci] %s: UHCMD_USBOPER\n", __func__);
 
-    io->iouh_Req.io_Error = usb_glue_bus_oper(unit);
-    io->iouh_State = (io->iouh_Req.io_Error == UHIOERR_NO_ERROR) ? UHSF_OPERATIONAL : 0;
+    // TODO should likely also resume and perhaps reset the ports
+    /* Ensure port power is on for all ports */
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    int maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
+    for (int p = 1; p <= maxp; ++p)
+    {
+        struct IOUsbHWReq req;
+        _memset(&req, 0, sizeof(req));
+        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
+        req.iouh_SetupData.wValue = LE16(USB_PORT_FEAT_POWER);
+        req.iouh_SetupData.wIndex = LE16(p);
+        req.iouh_DevAddr = xhci_roothub_get_address(ctrl->root_hub);
+
+        xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
+    }
+
+    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+    io->iouh_State = UHSF_OPERATIONAL;
     return COMMAND_PROCESSED;
 }
 
@@ -282,33 +371,116 @@ static inline int Do_UHCMD_BULKXFER(struct IOUsbHWReq *io)
 
 static inline int Do_UHCMD_ADDISOHANDLER(struct IOUsbHWReq *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *) io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_ADDISOHANDLER\n", __func__);   
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
+    KprintfH("[xhci] %s: UHCMD_ADDISOHANDLER\n", __func__);
 
-    return usb_glue_add_iso_handler(unit, io);
+    // TODO check if UHSF_OPERATIONAL
+    if (!io->iouh_Data)
+        goto badparams;
+
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+        goto badparams;
+
+    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
+    if (endpoint >= USB_MAXENDPOINTS)
+        goto badparams;
+
+    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    BYTE result = xhci_ep_rt_iso_add_handler(ep_ctx, io);
+
+    io->iouh_Actual = 0;
+    io->iouh_Req.io_Error = result;
+    return COMMAND_PROCESSED;
+
+badparams:
+    Kprintf("Bad params\n");
+    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    return COMMAND_PROCESSED;
 }
 
 static inline int Do_UHCMD_REMISOHANDLER(struct IOUsbHWReq *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *) io->iouh_Req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     KprintfH("[xhci] %s: UHCMD_REMISOHANDLER\n", __func__);
 
-    return usb_glue_rem_iso_handler(unit, io);
+    if (!io->iouh_Data)
+        goto badparams;
+
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+        goto badparams;
+
+    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
+    if (endpoint >= USB_MAXENDPOINTS)
+        goto badparams;
+
+    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    BYTE result = xhci_ep_rt_iso_rem_handler(ep_ctx, io);
+    io->iouh_Req.io_Error = result;
+    return COMMAND_PROCESSED;
+
+badparams:
+    Kprintf("Bad parameters while removing ISO handler\n");
+    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    return COMMAND_PROCESSED;
 }
 
 static inline int Do_UHCMD_STARTRTISO(struct IOUsbHWReq *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *) io->iouh_Req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     KprintfH("[xhci] %s: UHCMD_STARTRTISO\n", __func__);
 
-    return usb_glue_start_rt_iso(unit, io);
+    KprintfH("RT ISO start addr=%ld ep=%ld dir=%s frame=%lu interval=%lu len=%lu\n",
+             (LONG)io->iouh_DevAddr,
+             (LONG)(io->iouh_Endpoint & 0x0F),
+             (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+             (ULONG)io->iouh_Frame,
+             (ULONG)io->iouh_Interval,
+             (ULONG)io->iouh_Length);
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+    {
+        Kprintf("bad params\n");
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return COMMAND_PROCESSED;
+    }
+
+    int endpoint = io->iouh_Endpoint & 0x0F;
+    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    BYTE result = xhci_ep_rt_iso_start(ep_ctx);
+
+    io->iouh_Actual = 0;
+    io->iouh_Req.io_Error = result;
+    return COMMAND_PROCESSED;
 }
 
 static inline int Do_UHCMD_STOPRTISO(struct IOUsbHWReq *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *) io->iouh_Req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
     KprintfH("[xhci] %s: UHCMD_STOPRTISO\n", __func__);
-    return usb_glue_stop_rt_iso(unit, io);
+
+    KprintfH("RT ISO stop requested addr=%ld ep=%ld\n",
+             (LONG)io->iouh_DevAddr, (LONG)(io->iouh_Endpoint & 0x0F));
+    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    if (!udev)
+    {
+        Kprintf("bad params\n");
+        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        return COMMAND_PROCESSED;
+    }
+
+    int endpoint = io->iouh_Endpoint & 0x0F;
+    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    BYTE result = xhci_ep_rt_iso_stop(ep_ctx, io);
+    io->iouh_Req.io_Error = result;
+    if (result != UHIOERR_NO_ERROR)
+    {
+        io->iouh_Actual = 0;
+        return COMMAND_PROCESSED;
+    }
+
+    return COMMAND_SCHEDULED;
 }
 
 void ProcessCommand(struct IOUsbHWReq *io)

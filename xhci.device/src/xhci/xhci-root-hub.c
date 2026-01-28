@@ -186,6 +186,14 @@ unsigned int xhci_roothub_get_address(struct xhci_root_hub *rh)
 	return rh->udev->poseidon_address;
 }
 
+UBYTE xhci_roothub_get_num_ports(struct xhci_root_hub *rh)
+{
+	if (!rh)
+		return 0;
+
+	return rh->descriptor.hub.bNbrPorts;
+}
+
 BOOL xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
 {
 	if (rh->int_req)

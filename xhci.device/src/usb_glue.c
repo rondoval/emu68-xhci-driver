@@ -14,6 +14,9 @@
 #include <xhci/xhci-events.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-td.h>
+#include <xhci/xhci-root-hub.h>
+#include <xhci/xhci-usb.h>
+#include <xhci/xhci-endpoint.h>
 
 #include <device.h>
 #include <debug.h>
@@ -32,59 +35,7 @@
 #define KprintfH(fmt, ...) PrintPistorm("[usb_glue] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#define RT_ISO_IN_TARGET_TDS 16
-
-static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io);
-static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, struct usb_device *hub, unsigned int port);
-
-static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number)
-{
-    if (!udev || !udev->active_config)
-        return FALSE;
-
-    struct usb_config *cfg = udev->active_config;
-    for (int i = 0; i < cfg->no_of_if; ++i)
-    {
-        struct usb_interface *iface = &cfg->if_desc[i];
-        if (iface->interface_number != (UBYTE)iface_number)
-            continue;
-
-        struct usb_interface_altsetting *alt = iface->active_altsetting;
-        if (!alt)
-            return FALSE;
-
-        for (int e = 0; e < alt->no_of_ep; ++e)
-        {
-            UBYTE ep_addr = alt->ep_desc[e].bEndpointAddress;
-            unsigned int epnum = ep_addr & 0x0F;
-            if (epnum == 0 || epnum >= USB_MAXENDPOINTS)
-                continue;
-
-            enum ep_state state = udev->ep_context[epnum].state;
-            if (state == USB_DEV_EP_STATE_RT_ISO_RUNNING ||
-                state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
-                return TRUE;
-        }
-
-        return FALSE;
-    }
-
-    return FALSE;
-}
-
-static enum usb_device_speed usb_glue_speed_from_port_status(UWORD status)
-{
-    if (status & USB_PORT_STAT_SUPER_SPEED)
-        return USB_SPEED_HIGH;
-        // return USB_SPEED_SUPER; TODO capped speed... for now - fix context
-    if (status & USB_PORT_STAT_HIGH_SPEED)
-        return USB_SPEED_HIGH;
-    if (status & USB_PORT_STAT_LOW_SPEED)
-        return USB_SPEED_LOW;
-    return USB_SPEED_FULL;
-}
-
-static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD poseidon_address)
+struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD poseidon_address)
 {
     if (!ctrl || poseidon_address > USB_MAX_ADDRESS)
         return NULL;
@@ -103,14 +54,10 @@ static struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD pose
     udev->used = 1;
     udev->poseidon_address = poseidon_address;
     udev->controller = ctrl;
+    udev->speed = ctrl->pending_parent_speed;
 
     _NewMinList(&udev->configurations);
-
-    for (int i = 0; i < USB_MAXENDPOINTS; ++i)
-    {
-        _NewMinList(&udev->ep_context[i].pending_reqs);
-        udev->ep_context[i].active_tds = xhci_td_create_list(ctrl);
-    }
+    xhci_ep_create_contexts(udev, ctrl->memoryPool);
 
     ctrl->devices_by_poseidon_address[poseidon_address] = udev;
     return udev;
@@ -168,20 +115,12 @@ static void usb_glue_patch_endpoint_address(struct usb_device *udev, struct IOUs
              (ULONG)wIndex, (ULONG)fixed, (LONG)epnum);
 }
 
-/* Issue an internal CLEAR_FEATURE(ENDPOINT_HALT) to endpoint (by ep_index) on udev. Fire-and-forget. */
-void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index)
+static inline void usb_glue_send_control_request(struct usb_device *udev, int endpoint,
+                                                 UBYTE bmRequestType, UBYTE bRequest, 
+                                                 UWORD wValue, UWORD wIndex, UWORD wLength)
 {
     if (!udev || !udev->controller)
         return;
-
-    /* Convert ep_index (DCI-1) to USB endpoint address (number + direction bit). */
-    UBYTE ep_addr = 0;
-    if (ep_index != 0)
-    {
-        u32 ep = EP_INDEX_TO_ENDPOINT(ep_index);
-        BOOL out = (ep_index & 0x1) != 0;
-        ep_addr = (UBYTE)(ep | (out ? 0 : USB_DIR_IN));
-    }
 
     struct xhci_ctrl *ctrl = udev->controller;
     struct IOUsbHWReq *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
@@ -190,53 +129,40 @@ void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index)
 
     _memset(io, 0, sizeof(*io));
     io->iouh_Req.io_Command = UHCMD_CONTROLXFER;
-    io->iouh_Req.io_Flags = IOF_QUICK; /* no reply port */
+    io->iouh_Req.io_Flags = IOF_QUICK;          /* no reply port */
     io->iouh_DriverPrivate1 = (APTR)0xDEAD0001; /* magic tag to free on completion */
     io->iouh_DriverPrivate2 = (APTR)ctrl;
 
-    io->iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT;
-    io->iouh_SetupData.bRequest = USB_REQ_CLEAR_FEATURE;
-    io->iouh_SetupData.wValue = cpu_to_le16(USB_ENDPOINT_HALT);
-    io->iouh_SetupData.wIndex = cpu_to_le16(ep_addr);
-    io->iouh_SetupData.wLength = cpu_to_le16(0);
+    io->iouh_SetupData.bmRequestType = bmRequestType;
+    io->iouh_SetupData.bRequest = bRequest;
+    io->iouh_SetupData.wValue = cpu_to_le16(wValue);
+    io->iouh_SetupData.wIndex = cpu_to_le16(wIndex);
+    io->iouh_SetupData.wLength = cpu_to_le16(wLength);
 
     io->iouh_DevAddr = udev->poseidon_address;
 
-    /* Queue it; on failure free immediately. */
-    if (xhci_ctrl_tx(udev, io, XHCI_TIMEOUT) != UHIOERR_NO_ERROR)
-    {
-        FreeVecPooled(ctrl->memoryPool, io);
-    }
+    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    io->iouh_DriverPrivate1 = ep_ctx; // TODO hack to get us to front of the queue
+    xhci_ep_enqueue(ep_ctx, io);
 }
 
-static void usb_glue_queue_clear_tt(struct usb_device *hub, u16 devinfo, u16 tt_port)
+/* Issue an internal CLEAR_FEATURE(ENDPOINT_HALT) to endpoint (by ep_index) on udev. Fire-and-forget. */
+void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index)
 {
-    if (!hub || !hub->controller)
+    int endpoint = EP_INDEX_TO_ENDPOINT(ep_index);
+    if (!udev || !udev->controller || endpoint == 0)
         return;
 
-    struct xhci_ctrl *ctrl = hub->controller;
-    struct IOUsbHWReq *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
-    if (!io)
-        return;
+    /* Convert ep_index (DCI-1) to USB endpoint address (number + direction bit). */
+    BOOL out = (ep_index & 0x1) != 0;
+    UBYTE ep_addr = (UBYTE)(endpoint | (out ? 0 : USB_DIR_IN));
 
-    _memset(io, 0, sizeof(*io));
-    io->iouh_Req.io_Command = UHCMD_CONTROLXFER;
-    io->iouh_Req.io_Flags = IOF_QUICK;
-    io->iouh_DriverPrivate1 = (APTR)0xDEAD0001; /* magic tag to free on completion */
-    io->iouh_DriverPrivate2 = (APTR)ctrl;
-
-    io->iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-    io->iouh_SetupData.bRequest = HUB_CLEAR_TT_BUFFER;
-    io->iouh_SetupData.wValue = cpu_to_le16(devinfo);
-    io->iouh_SetupData.wIndex = cpu_to_le16(tt_port);
-    io->iouh_SetupData.wLength = cpu_to_le16(0);
-
-    io->iouh_DevAddr = hub->poseidon_address;
-
-    if (xhci_ctrl_tx(hub, io, XHCI_TIMEOUT) != UHIOERR_NO_ERROR)
-    {
-        FreeVecPooled(ctrl->memoryPool, io);
-    }
+    usb_glue_send_control_request(udev, endpoint,
+                                 USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
+                                 USB_REQ_CLEAR_FEATURE,
+                                 USB_ENDPOINT_HALT,
+                                 ep_addr,
+                                 0);
 }
 
 /* Issue an internal CLEAR_TT_BUFFER to the parent hub for control/bulk endpoints behind a TT. */
@@ -260,14 +186,26 @@ void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, in
     if (!out)
         devinfo |= 1 << 15;
 
-    usb_glue_queue_clear_tt(hub, devinfo, (u16)udev->parent_port);
+    usb_glue_send_control_request(hub,
+                                 0, /* endpoint 0 */
+                                 USB_DIR_OUT | USB_RT_PORT,
+                                 HUB_CLEAR_TT_BUFFER,
+                                 devinfo,
+                                 (u16)udev->parent_port,
+                                 0);
 
     /* Control endpoints require clearing both directions. */
     if (ep_type == USB_ENDPOINT_XFER_CONTROL)
-        usb_glue_queue_clear_tt(hub, devinfo ^ (1U << 15), (u16)udev->parent_port);
+        usb_glue_send_control_request(hub,
+                                     0, /* endpoint 0 */
+                                     USB_DIR_OUT | USB_RT_PORT,
+                                     HUB_CLEAR_TT_BUFFER,
+                                     devinfo ^ (1 << 15), /* toggle direction bit */
+                                     (u16)udev->parent_port,
+                                     0);
 }
 
-static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD poseidon_address)
+struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD poseidon_address)
 {
     if (!unit || !unit->xhci_ctrl || poseidon_address > USB_MAX_ADDRESS)
         return NULL;
@@ -277,57 +215,13 @@ static struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD poseidon
     if (!udev)
     {
         // We'll be only creating contexts for newly detected devices
-        if (poseidon_address != 0 && poseidon_address != ctrl->rootdev)
+        if (poseidon_address != 0 && poseidon_address != xhci_roothub_get_address(ctrl->root_hub))
             return NULL;
         KprintfH("new device addr=%ld\n", (LONG)poseidon_address);
         udev = usb_glue_alloc_udev(ctrl, poseidon_address);
-        if (udev && poseidon_address == 0 && ctrl->pending_parent_speed != USB_SPEED_UNKNOWN)
-            udev->speed = ctrl->pending_parent_speed;
     }
 
     return udev;
-}
-
-/* Sum bytes of in-flight RT ISO TDs to honor Poseidon OutPrefetch budget. */
-static inline BOOL minlist_empty(const struct MinList *list)
-{
-    return list->mlh_Head == (struct MinNode *)&list->mlh_Tail;
-}
-
-static void enqueue_pending_request(struct ep_context *ep_ctx, struct IOUsbHWReq *io)
-{
-    io->iouh_DriverPrivate1 = ep_ctx;
-    AddTailMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
-    KprintfH("queued request cmd=%ld ep=%ld\n",
-             (LONG)io->iouh_Req.io_Command,
-             (LONG)(io->iouh_Endpoint & 0x0F));
-}
-
-static void enqueue_pending_request_front(struct ep_context *ep_ctx, struct IOUsbHWReq *io)
-{
-    io->iouh_DriverPrivate1 = ep_ctx;
-    AddHeadMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
-    KprintfH("requeued request cmd=%ld ep=%ld\n",
-             (LONG)io->iouh_Req.io_Command,
-             (LONG)(io->iouh_Endpoint & 0x0F));
-}
-
-static int handle_ring_busy(struct usb_device *udev, struct IOUsbHWReq *io)
-{
-    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    if (endpoint >= USB_MAXENDPOINTS)
-    {
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-        return COMMAND_PROCESSED;
-    }
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    if (io->iouh_DriverPrivate1 == ep_ctx)
-        enqueue_pending_request_front(ep_ctx, io);
-    else
-        enqueue_pending_request(ep_ctx, io);
-
-    return COMMAND_SCHEDULED;
 }
 
 int usb_glue_ctrl_after_address(struct usb_device *udev, struct IOUsbHWReq *io)
@@ -343,13 +237,11 @@ int usb_glue_ctrl_after_address(struct usb_device *udev, struct IOUsbHWReq *io)
         timeout_ms = io->iouh_NakTimeout;
 
     int ret = xhci_ctrl_tx(udev, io, timeout_ms);
-    if (ret == UHIOERR_RING_BUSY)
-        handle_ring_busy(udev, io);
 
     return ret;
 }
 
-static void dispatch_request(struct IOUsbHWReq *req)
+void dispatch_request(struct IOUsbHWReq *req)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)req->iouh_Req.io_Unit;
     if (!unit)
@@ -380,226 +272,6 @@ static void dispatch_request(struct IOUsbHWReq *req)
     }
 }
 
-static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD len)
-{
-    if (len < 2)
-    {
-        KprintfH("too short, len=%ld\n", (LONG)len);
-        return;
-    }
-
-    struct usb_config *conf = AllocVecPooled(udev->controller->memoryPool, sizeof(*conf));
-    if (!conf)
-    {
-        Kprintf("AllocVecPooled failed\n");
-        return;
-    }
-    _memset(conf, 0, sizeof(*conf));
-
-    struct usb_config_descriptor *desc = (struct usb_config_descriptor *)data;
-    if (desc->bDescriptorType != USB_DT_CONFIG)
-    {
-        Kprintf("bad desc type %ld\n", (LONG)desc->bDescriptorType);
-        goto error;
-    }
-
-    UWORD total_len = LE16(desc->wTotalLength);
-    if ((UWORD)len < total_len)
-    {
-        KprintfH("short buffer len=%ld total_len=%ld\n", (LONG)len, (LONG)total_len);
-        return;
-    }
-
-    UBYTE *cursor = data;
-    UBYTE *end = data + total_len;
-    if (cursor + desc->bLength > end)
-    {
-        Kprintf("bad desc length %ld\n", (LONG)desc->bLength);
-        goto error;
-    }
-
-    CopyMem(desc, &conf->desc, sizeof(struct usb_config_descriptor));
-    cursor += desc->bLength;
-
-    KprintfH("wTotalLength=%ld bNumInterfaces=%ld bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
-             (LONG)LE16(desc->wTotalLength),
-             (LONG)desc->bNumInterfaces,
-             (LONG)desc->bConfigurationValue,
-             (LONG)desc->iConfiguration,
-             (LONG)desc->bmAttributes,
-             (LONG)desc->bMaxPower);
-
-    // in 3.x there are association descriptors here
-
-    int interface_map[USB_MAXINTERFACES];
-    for (int i = 0; i < USB_MAXINTERFACES; ++i)
-        interface_map[i] = -1;
-
-    conf->no_of_if = 0;
-    int if_index = 0;
-    int current_alt_index = -1;
-    struct usb_interface *current_if = NULL;
-    struct usb_interface_altsetting *current_alt = NULL;
-
-    while (cursor + 2 <= end)
-    {
-        UBYTE dlen = cursor[0];
-        UBYTE dtype = cursor[1];
-        if (dlen == 0)
-        {
-            Kprintf("zero length descriptor, aborting\n");
-            break;
-        }
-        if (cursor + dlen > end)
-        {
-            Kprintf("descriptor overruns buffer (type=%ld len=%ld)\n", (LONG)dtype, (LONG)dlen);
-            break;
-        }
-
-        switch (dtype)
-        {
-        case USB_DT_INTERFACE:
-        {
-            struct usb_interface_descriptor *ifd = (struct usb_interface_descriptor *)cursor;
-            unsigned int iface_number = ifd->bInterfaceNumber;
-            if (iface_number >= USB_MAXINTERFACES)
-            {
-                Kprintf("interface number %ld exceeds max %ld\n", (LONG)iface_number, (LONG)USB_MAXINTERFACES);
-                current_if = NULL;
-                current_alt = NULL;
-                current_alt_index = -1;
-                break;
-            }
-
-            if_index = interface_map[iface_number];
-            if (if_index < 0)
-            {
-                if_index = conf->no_of_if;
-                if (if_index >= USB_MAXINTERFACES)
-                {
-                    Kprintf("too many unique interfaces (%ld)\n", (LONG)if_index);
-                    goto error;
-                }
-                interface_map[iface_number] = if_index;
-                current_if = &conf->if_desc[if_index];
-                _memset(current_if, 0, sizeof(struct usb_interface));
-                current_if->interface_number = (u8)iface_number;
-                current_if->num_altsetting = 0;
-                current_if->active_altsetting = NULL;
-                conf->no_of_if++;
-            }
-            else
-            {
-                current_if = &conf->if_desc[if_index];
-            }
-
-            current_if->interface_number = (u8)iface_number;
-
-            if (current_if->num_altsetting >= USB_ALTSETTINGALLOC)
-            {
-                Kprintf("too many alternate settings (%ld) for interface %ld\n",
-                        (LONG)current_if->num_altsetting, (LONG)iface_number);
-                current_alt = NULL;
-                current_alt_index = -1;
-                break;
-            }
-
-            current_alt_index = current_if->num_altsetting++;
-            current_alt = &current_if->altsetting[current_alt_index];
-            _memset(current_alt, 0, sizeof(struct usb_interface_altsetting));
-
-            CopyMem(ifd, &current_alt->desc, sizeof(struct usb_interface_descriptor));
-            current_alt->no_of_ep = 0;
-
-            KprintfH("interface %ld alt %ld: bInterfaceNumber=%ld bAlternateSetting=%ld bNumEndpoints=%ld bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%ld\n",
-                     (LONG)if_index,
-                     (LONG)current_alt_index,
-                     (LONG)ifd->bInterfaceNumber,
-                     (LONG)ifd->bAlternateSetting,
-                     (LONG)ifd->bNumEndpoints,
-                     (LONG)ifd->bInterfaceClass,
-                     (LONG)ifd->bInterfaceSubClass,
-                     (LONG)ifd->bInterfaceProtocol,
-                     (LONG)ifd->iInterface);
-
-            if (current_if->active_altsetting == NULL || current_alt->desc.bAlternateSetting == 0)
-                current_if->active_altsetting = current_alt;
-            break;
-        }
-        case USB_DT_ENDPOINT:
-        {
-            if (!current_if || !current_alt)
-            {
-                Kprintf("endpoint without interface or altsetting\n");
-                break;
-            }
-            if (current_alt->no_of_ep >= USB_MAXENDPOINTS)
-            {
-                Kprintf("too many endpoints for interface %ld alt %ld\n",
-                        (LONG)if_index, (LONG)current_alt_index);
-                break;
-            }
-
-            struct usb_endpoint_descriptor *epd = (struct usb_endpoint_descriptor *)cursor;
-            unsigned int ep_idx = current_alt->no_of_ep;
-            CopyMem(epd, &current_alt->ep_desc[ep_idx], sizeof(struct usb_endpoint_descriptor));
-            KprintfH("  endpoint %ld: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%ld bInterval=%ld\n",
-                     (LONG)ep_idx,
-                     (LONG)epd->bEndpointAddress,
-                     (LONG)epd->bmAttributes,
-                     (LONG)LE16(epd->wMaxPacketSize),
-                     (LONG)epd->bInterval);
-
-            current_alt->no_of_ep++;
-            break;
-        }
-        case USB_DT_SS_ENDPOINT_COMP:
-        {
-            KprintfH("found SS EP COMP descriptor\n");
-            if (current_if && current_alt && current_alt->no_of_ep > 0)
-            {
-                struct usb_ss_ep_comp_descriptor *comp = (struct usb_ss_ep_comp_descriptor *)cursor;
-                unsigned int ep_slot = current_alt->no_of_ep - 1;
-                CopyMem(comp, &current_alt->ss_ep_comp_desc[ep_slot], sizeof(struct usb_ss_ep_comp_descriptor));
-            }
-            break;
-        }
-        default:
-            // Skip class- or vendor-specific descriptors gracefully.
-            KprintfH("found class/vendor-specific descriptor 0x%lx, len=%ld\n", (ULONG)dtype, (LONG)dlen);
-            break;
-        }
-
-        cursor += dlen;
-    }
-    KprintfH("parsed config with %ld interfaces\n", (LONG)conf->no_of_if);
-
-    if (conf->no_of_if != desc->bNumInterfaces)
-    {
-        Kprintf("interface count mismatch %ld != %ld\n",
-                (LONG)conf->no_of_if, (LONG)desc->bNumInterfaces);
-        goto error;
-    }
-
-    for (struct MinNode *n = udev->configurations.mlh_Head; n->mln_Succ; n = n->mln_Succ)
-    {
-        struct usb_config *oldconf = (struct usb_config *)n;
-        if (oldconf->desc.bConfigurationValue == conf->desc.bConfigurationValue)
-        {
-            KprintfH("removing old config with value %ld\n", (LONG)oldconf->desc.bConfigurationValue);
-            RemoveMinNode(n);
-            FreeVecPooled(udev->controller->memoryPool, oldconf);
-            break;
-        }
-    }
-    AddHeadMinList(&udev->configurations, (struct MinNode *)conf);
-
-    return;
-
-error:
-    FreeVecPooled(udev->controller->memoryPool, conf);
-}
-
 int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
 {
     struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
@@ -613,34 +285,22 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
     usb_glue_patch_endpoint_address(udev, io);
 
-    {
-        KprintfH("dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx flags=%lx timeout=%ld maxPktSize=%ld\n",
-                 (ULONG)udev, (ULONG)udev->poseidon_address,
-                 (ULONG)io->iouh_SetupData.bmRequestType,
-                 (ULONG)io->iouh_SetupData.bRequest,
-                 LE16(io->iouh_SetupData.wValue),
-                 LE16(io->iouh_SetupData.wIndex),
-                 LE16(io->iouh_SetupData.wLength),
-                 (ULONG)io->iouh_Flags,
-                 (ULONG)io->iouh_NakTimeout,
-                 (ULONG)io->iouh_MaxPktSize);
-
-        KprintfH("split_hub_addr=%lx split_hub_port=%ld\n",
-                 (ULONG)io->iouh_SplitHubAddr,
-                 (ULONG)io->iouh_SplitHubPort);
-
-        KprintfH("parent=%lx route=%ld port=%ld\n",
-                 (ULONG)udev->parent,
-                 (ULONG)udev->route,
-                 (ULONG)udev->parent_port);
-        KprintfH("speed=%ld\n", (LONG)udev->speed);
-    }
+    KprintfH("dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx flags=%lx timeout=%ld maxPktSize=%ld\n",
+             (ULONG)udev, (ULONG)udev->poseidon_address,
+             (ULONG)io->iouh_SetupData.bmRequestType,
+             (ULONG)io->iouh_SetupData.bRequest,
+             LE16(io->iouh_SetupData.wValue),
+             LE16(io->iouh_SetupData.wIndex),
+             LE16(io->iouh_SetupData.wLength),
+             (ULONG)io->iouh_Flags,
+             (ULONG)io->iouh_NakTimeout,
+             (ULONG)io->iouh_MaxPktSize);
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    if (io->iouh_DevAddr == ctrl->rootdev)
+    if (io->iouh_DevAddr == xhci_roothub_get_address(ctrl->root_hub))
     {
-        xhci_submit_root(udev, io);
-        parse_control_msg(udev, io);
+        xhci_roothub_submit_ctrl_request(ctrl->root_hub, io);
+        xhci_usb_parse_control_message(udev, io);
         return COMMAND_PROCESSED;
     }
 
@@ -671,7 +331,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     unsigned int timeout_ms = 0;
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = io->iouh_NakTimeout;
-    
+
     /* If we don't have a slot yet, enable one and allocate Virt Dev */
     if (udev->slot_id == 0 && udev->poseidon_address == 0)
     {
@@ -681,8 +341,6 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     int ret = xhci_ctrl_tx(udev, io, timeout_ms);
-    if (ret == UHIOERR_RING_BUSY)
-        return handle_ring_busy(udev, io);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;
@@ -711,8 +369,6 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_bulk_tx(udev, io, timeout_ms);
-    if (ret == UHIOERR_RING_BUSY)
-        return handle_ring_busy(udev, io);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;
@@ -733,18 +389,10 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    if (udev->poseidon_address == ctrl->rootdev)
+    if (udev->poseidon_address == xhci_roothub_get_address(ctrl->root_hub))
     {
-        if (ctrl->root_int_req)
-        {
-            KprintfH("root hub interrupt request already pending\n");
-            io_reply_failed(io, UHIOERR_HOSTERROR);
-            return COMMAND_PROCESSED;
-        }
-
-        ctrl->root_int_req = io;
-        xhci_roothub_maybe_complete(ctrl);
-        return COMMAND_SCHEDULED;
+        BOOL result = xhci_roothub_submit_int_request(ctrl->root_hub, io);
+        return result ? COMMAND_SCHEDULED : COMMAND_PROCESSED;
     }
 
     KprintfH("dev=%lx addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx timeout=%ld maxpkt=%ld\n",
@@ -757,8 +405,6 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_int_tx(udev, io, timeout_ms);
-    if (ret == UHIOERR_RING_BUSY)
-        return handle_ring_busy(udev, io);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;
@@ -779,7 +425,7 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     }
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    if (udev->poseidon_address == ctrl->rootdev)
+    if (udev->poseidon_address == xhci_roothub_get_address(ctrl->root_hub))
     {
         Kprintf("isochronous transfers on root hub are not supported\n");
         io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
@@ -797,8 +443,6 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_iso_tx(udev, io, timeout_ms);
-    if (ret == UHIOERR_RING_BUSY)
-        return handle_ring_busy(udev, io);
     if (ret != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = ret;
@@ -808,776 +452,6 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     return COMMAND_SCHEDULED;
 }
 
-int usb_glue_add_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
-{
-    // TODO check if UHSF_OPERATIONAL
-    // TODO cleanup, move to EP state machine
-    if (!io->iouh_Data)
-        goto badparams;
-
-    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
-    if (!udev)
-        goto badparams;
-
-    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    if (endpoint >= USB_MAXENDPOINTS)
-        goto badparams;
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
-    {
-        /* can only enable RT ISO if EP is idle */
-        Kprintf("EP not idle. Current state: %ld\n", ep_ctx->state);
-        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
-        return COMMAND_PROCESSED;
-    }
-
-    ep_ctx->rt_req = (struct IOUsbHWRTIso *)io->iouh_Data;
-    ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
-    ep_ctx->rt_stop_pending = NULL;
-    ep_ctx->rt_last_buffer = NULL;
-    ep_ctx->rt_last_filled = 0;
-    ep_ctx->rt_inflight_bytes = 0;
-    ep_ctx->rt_inflight_tds = 0;
-
-    ep_ctx->rt_template_req = AllocVecPooled(unit->xhci_ctrl->memoryPool, sizeof(struct IOUsbHWReq));
-    if (!ep_ctx->rt_template_req)
-    {
-        Kprintf("Failed to allocate memory\n");
-        io->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
-        return COMMAND_PROCESSED;
-    }
-
-    CopyMem(io, ep_ctx->rt_template_req, sizeof(struct IOUsbHWReq));
-
-#ifdef DEBUG_HIGH
-    struct IOUsbHWRTIso *rt = (struct IOUsbHWRTIso *)io->iouh_Data;
-    if (io->iouh_Dir == UHDIR_IN)
-    {
-        KprintfH("Added ISO handler: EP %ld in req hook: %lx, in done hook: %lx, prefetch: %ld\n", endpoint, rt->urti_InReqHook, rt->urti_InDoneHook, rt->urti_OutPrefetch);
-    }
-    else
-    {
-        KprintfH("Added ISO handler: EP %ld out req hook: %lx, out done hook: %lx, prefetch: %ld\n", endpoint, rt->urti_OutReqHook, rt->urti_OutDoneHook, rt->urti_OutPrefetch);
-    }
-#endif
-
-    io->iouh_Actual = 0;
-    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-    return COMMAND_PROCESSED;
-
-badparams:
-    Kprintf("Bad params\n");
-    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-    return COMMAND_PROCESSED;
-}
-
-int usb_glue_rem_iso_handler(struct XHCIUnit *unit, struct IOUsbHWReq *io)
-{
-    // TODO cleanup, move to EP state machine
-    if (!io->iouh_Data)
-        goto badparams;
-
-    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
-    if (!udev)
-        goto badparams;
-
-    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    if (endpoint >= USB_MAXENDPOINTS)
-        goto badparams;
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
-    {
-        Kprintf("EP not in RT_ISO_STOPPED/IDLE state. Current state: %ld\n", ep_ctx->state);
-        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
-        return COMMAND_PROCESSED;
-    }
-
-    if (io->iouh_Data == ep_ctx->rt_req)
-    {
-        ep_ctx->rt_req = NULL;
-        ep_ctx->rt_last_buffer = NULL;
-        ep_ctx->rt_last_filled = 0;
-        if (ep_ctx->rt_template_req)
-        {
-            FreeVecPooled(unit->xhci_ctrl->memoryPool, ep_ctx->rt_template_req);
-            ep_ctx->rt_template_req = NULL;
-        }
-        xhci_ep_set_idle(udev, endpoint);
-        KprintfH("Successfully removed ISO handler (state reset to IDLE)\n");
-        io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-        return COMMAND_PROCESSED;
-    }
-
-badparams:
-    Kprintf("Bad parameters while removing ISO handler\n");
-    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-    return COMMAND_PROCESSED;
-}
-
-static void xhci_ep_schedule_rt_iso_out(struct usb_device *udev, struct ep_context *ep_ctx)
-{
-    struct xhci_ctrl *ctrl = udev->controller;
-    struct IOUsbHWReq *template = ep_ctx->rt_template_req;
-    ULONG prefetch_bytes = ep_ctx->rt_req->urti_OutPrefetch;
-
-    struct xhci_giveback_info giveback = {0};
-    BOOL have_giveback = FALSE;
-    BOOL first_td = TRUE;
-
-    while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
-    {
-        ULONG frame = ep_ctx->rt_next_frame;
-        struct IOUsbHWReq *rt_io = AllocVecPooled(ctrl->memoryPool, sizeof(struct IOUsbHWReq));
-        if (!rt_io)
-        {
-            Kprintf("Failed to alloc RT ISO IO req\n");
-            break;
-        }
-        CopyMem(template, rt_io, sizeof(struct IOUsbHWReq));
-
-        struct IOUsbHWBufferReq rt_buffer_req;
-        rt_buffer_req.ubr_Length = prefetch_bytes;
-        rt_buffer_req.ubr_Buffer = ep_ctx->rt_last_buffer;
-        rt_buffer_req.ubr_Flags = 0;
-        rt_buffer_req.ubr_Frame = frame; /* monotonic frame counter to avoid jumps */
-
-        KprintfH("RT ISO OUT sched frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
-             (ULONG)frame,
-             (ULONG)rt_buffer_req.ubr_Length,
-             (ULONG)ep_ctx->rt_inflight_bytes,
-             (ULONG)ep_ctx->rt_inflight_tds);
-
-        CallHookPkt(ep_ctx->rt_req->urti_OutReqHook, ep_ctx->rt_req, &rt_buffer_req);
-
-        if (!rt_buffer_req.ubr_Buffer || rt_buffer_req.ubr_Length == 0)
-        {
-            KprintfH("RT ISO hook provided no buffer/length\n");
-            FreeVecPooled(ctrl->memoryPool, rt_io);
-            break;
-        }
-
-        ULONG offset = 0;
-        if (rt_buffer_req.ubr_Buffer == ep_ctx->rt_last_buffer)
-        {
-            offset = ep_ctx->rt_last_filled;
-        }
-        else
-        {
-            ep_ctx->rt_last_buffer = rt_buffer_req.ubr_Buffer;
-        }
-        ep_ctx->rt_last_filled = offset + rt_buffer_req.ubr_Length;
-
-        if (rt_buffer_req.ubr_Flags & UBFF_CONTBUFFER)
-        {
-            Kprintf("Continuous buffer not supported yet\n");
-        }
-
-        rt_io->iouh_Data = (APTR)((ULONG)rt_buffer_req.ubr_Buffer + offset);
-        rt_io->iouh_Length = rt_buffer_req.ubr_Length;
-        rt_io->iouh_Frame = (UWORD)frame;
-
-        struct xhci_giveback_info local_giveback = {0};
-        BOOL defer = TRUE; /* RT ISO defers doorbell to per-run giveback */
-        int ret = xhci_rt_iso_tx(udev, rt_io, defer, first_td ? &local_giveback : NULL);
-        if (ret == UHIOERR_RING_BUSY)
-        {
-            FreeVecPooled(ctrl->memoryPool, rt_io);
-            KprintfH("RT ISO ring busy, deferring\n");
-            break;
-        }
-        if (ret != UHIOERR_NO_ERROR)
-        {
-            FreeVecPooled(ctrl->memoryPool, rt_io);
-            Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
-            break;
-        }
-
-        if (first_td && local_giveback.start_trb)
-        {
-            giveback = local_giveback;
-            have_giveback = TRUE;
-        }
-
-        ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
-        ep_ctx->rt_inflight_bytes += rt_io->iouh_Length;
-        ep_ctx->rt_inflight_tds++;
-        KprintfH("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
-                 (ULONG)frame,
-                 (ULONG)rt_io->iouh_Length,
-                 (ULONG)ep_ctx->rt_inflight_bytes,
-                 (ULONG)ep_ctx->rt_inflight_tds);
-        first_td = FALSE;
-    }
-
-    if (have_giveback)
-        xhci_ring_giveback(udev, &giveback);
-}
-
-static void xhci_ep_schedule_rt_iso_in(struct usb_device *udev, struct ep_context *ep_ctx)
-{
-    struct xhci_ctrl *ctrl = udev->controller;
-    struct IOUsbHWReq *template = ep_ctx->rt_template_req;
-
-    struct xhci_giveback_info giveback = {0};
-    BOOL have_giveback = FALSE;
-    BOOL first_td = TRUE;
-
-    while (ep_ctx->rt_inflight_tds < RT_ISO_IN_TARGET_TDS)
-    {
-        ULONG frame = ep_ctx->rt_next_frame;
-        struct IOUsbHWReq *rt_io = AllocVecPooled(ctrl->memoryPool, sizeof(struct IOUsbHWReq));
-        if (!rt_io)
-        {
-            Kprintf("Failed to alloc RT ISO IO req\n");
-            break;
-        }
-        CopyMem(template, rt_io, sizeof(struct IOUsbHWReq));
-
-        rt_io->iouh_Data = AllocVecPooled(ctrl->memoryPool, template->iouh_MaxPktSize);
-        if (!rt_io->iouh_Data)
-        {
-            Kprintf("Failed to alloc RT ISO staging buffer\n");
-            FreeVecPooled(ctrl->memoryPool, rt_io);
-            break;
-        }
-        rt_io->iouh_Length = template->iouh_MaxPktSize;
-        rt_io->iouh_Frame = (UWORD)frame;
-
-        KprintfH("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
-                 (ULONG)frame,
-                 (ULONG)rt_io->iouh_Length,
-                 (ULONG)ep_ctx->rt_inflight_bytes,
-                 (ULONG)ep_ctx->rt_inflight_tds);
-
-        struct xhci_giveback_info local_giveback = {0};
-        BOOL defer = TRUE; /* RT ISO defers doorbell to per-run giveback */
-        int ret = xhci_rt_iso_tx(udev, rt_io, defer, first_td ? &local_giveback : NULL);
-        if (ret == UHIOERR_RING_BUSY)
-        {
-            FreeVecPooled(ctrl->memoryPool, rt_io->iouh_Data);
-            FreeVecPooled(ctrl->memoryPool, rt_io);
-            KprintfH("RT ISO ring busy, deferring\n");
-            break;
-        }
-        if (ret != UHIOERR_NO_ERROR)
-        {
-            FreeVecPooled(ctrl->memoryPool, rt_io->iouh_Data);
-            FreeVecPooled(ctrl->memoryPool, rt_io);
-            Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
-            break;
-        }
-
-        if (first_td && local_giveback.start_trb)
-        {
-            giveback = local_giveback;
-            have_giveback = TRUE;
-        }
-
-        ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
-        ep_ctx->rt_inflight_bytes += rt_io->iouh_Length;
-        ep_ctx->rt_inflight_tds++;
-        KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
-                 (ULONG)frame,
-                 (ULONG)rt_io->iouh_Length,
-                 (ULONG)ep_ctx->rt_inflight_bytes,
-                 (ULONG)ep_ctx->rt_inflight_tds);
-        first_td = FALSE;
-    }
-
-    if (have_giveback)
-        xhci_ring_giveback(udev, &giveback);
-}
-
-void xhci_ep_schedule_rt_iso(struct usb_device *udev, int endpoint)
-{
-    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
-    {
-        Kprintf("Invalid endpoint %d\n", endpoint);
-        return;
-    }
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
-    {
-        KprintfH("EP not in RT_ISO_RUNNING\n");
-        return;
-    }
-
-    struct IOUsbHWReq *template = ep_ctx->rt_template_req;
-    if (!template)
-    {
-        Kprintf("No RT ISO template request\n");
-        xhci_ep_set_failed(udev, endpoint);
-        return;
-    }
-
-    if (template->iouh_Dir == UHDIR_IN)
-        xhci_ep_schedule_rt_iso_in(udev, ep_ctx);
-    else
-        xhci_ep_schedule_rt_iso_out(udev, ep_ctx);
-}
-
-void usb_glue_notify_rt_iso_stopped(struct usb_device *udev, int endpoint)
-{
-    if (!udev || endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
-        return;
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    struct IOUsbHWReq *stop_req = ep_ctx->rt_stop_pending;
-
-    if (!stop_req)
-        return;
-
-    ep_ctx->rt_stop_pending = NULL;
-    io_reply_data(udev, stop_req, UHIOERR_NO_ERROR, 0);
-}
-
-int usb_glue_start_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
-{
-    KprintfH("RT ISO start addr=%ld ep=%ld dir=%s frame=%lu interval=%lu len=%lu\n",
-             (LONG)io->iouh_DevAddr,
-             (LONG)(io->iouh_Endpoint & 0x0F),
-             (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-             (ULONG)io->iouh_Frame,
-             (ULONG)io->iouh_Interval,
-             (ULONG)io->iouh_Length);
-    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
-    if (!udev)
-        goto badparams;
-
-    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
-    {
-        Kprintf("EP not in RT_ISO_STOPPED\n");
-        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
-        return COMMAND_PROCESSED;
-    }
-
-    /* microframe_index is in 125us units; for FS frames use the frame number (divide by 8). */
-    xhci_inval_cache((uintptr_t)&unit->xhci_ctrl->run_regs->microframe_index, sizeof(UWORD));
-    ep_ctx->rt_next_frame = (readl(unit->xhci_ctrl->run_regs->microframe_index) >> 3) & 0xffff;
-    ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
-    xhci_ep_schedule_rt_iso(udev, endpoint);
-
-    io->iouh_Actual = 0;
-    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-    return COMMAND_PROCESSED;
-
-badparams:
-    Kprintf("bad params\n");
-    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-    return COMMAND_PROCESSED;
-}
-
-int usb_glue_stop_rt_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
-{
-    KprintfH("RT ISO stop requested addr=%ld ep=%ld\n",
-             (LONG)io->iouh_DevAddr, (LONG)(io->iouh_Endpoint & 0x0F));
-    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
-    if (!udev)
-        goto badparams;
-
-    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
-    {
-        Kprintf("EP not in RT_ISO_RUNNING\n");
-        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
-        return COMMAND_PROCESSED;
-    }
-
-    if (ep_ctx->rt_req != io->iouh_Data)
-        goto badparams;
-
-    if (ep_ctx->rt_stop_pending)
-    {
-        Kprintf("STOPRTISO already pending\n");
-        io->iouh_Req.io_Error = UHIOERR_HOSTERROR;
-        return COMMAND_PROCESSED;
-    }
-
-    ep_ctx->rt_stop_pending = io;
-    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-
-    BOOL no_inflight = xhci_td_is_empty(ep_ctx->active_tds);
-
-    if (no_inflight)
-    {
-        ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
-        usb_glue_notify_rt_iso_stopped(udev, endpoint);
-    }
-    else
-    {
-        KprintfH("RT ISO stopping addr=%ld ep=%ld inflight_tds=%lu inflight_bytes=%lu\n",
-                 (LONG)io->iouh_DevAddr,
-                 (LONG)endpoint,
-                 (ULONG)ep_ctx->rt_inflight_tds,
-                 (ULONG)ep_ctx->rt_inflight_bytes);
-        ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPING;
-    }
-
-    return COMMAND_SCHEDULED;
-
-badparams:
-    Kprintf("bad params\n");
-    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-    return COMMAND_PROCESSED;
-}
-
-void xhci_ep_schedule_next(struct usb_device *udev, int endpoint)
-{
-    if (endpoint < 0 || endpoint >= USB_MAXENDPOINTS)
-        return;
-
-    struct ep_context *ep_ctx = &udev->ep_context[endpoint];
-    enum ep_state state = ep_ctx->state;
-    if(state == USB_DEV_EP_STATE_FAILED || state == USB_DEV_EP_STATE_RESETTING || state == USB_DEV_EP_STATE_ABORTING)
-        return;
-
-    while (1)
-    {
-        struct MinNode *node = RemHeadMinList(&ep_ctx->pending_reqs);
-        if (!node)
-            return;
-
-        struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-        req->iouh_DriverPrivate2 = NULL;
-
-        KprintfH("starting queued request cmd=%ld ep=%ld\n",
-             (LONG)req->iouh_Req.io_Command,
-             (LONG)(req->iouh_Endpoint & 0x0F));
-        dispatch_request(req);
-
-        /* If the endpoint went idle immediately (e.g. zero-length or error), keep draining */
-        if (ep_ctx->state == USB_DEV_EP_STATE_FAILED)
-            return;
-
-        if (req->iouh_DriverPrivate2 == XHCI_REQ_RING_BUSY)
-            return;
-
-        if (minlist_empty(&ep_ctx->pending_reqs))
-            return;
-    }
-}
-
-static inline int root_hub_max_ports(struct xhci_ctrl *ctrl)
-{
-    return HCS_MAX_PORTS(xhci_readl(&ctrl->hccr->cr_hcsparams1));
-}
-
-int usb_glue_bus_reset(struct XHCIUnit *unit)
-{
-    /* Issue SET_FEATURE(RESET) on all root hub ports */
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
-    if (!udev)
-        return UHIOERR_HOSTERROR;
-    int maxp = root_hub_max_ports(ctrl);
-    for (int p = 1; p <= maxp; ++p)
-    {
-        struct IOUsbHWReq req;
-        _memset(&req, 0, sizeof(req));
-        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
-        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
-        req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_RESET);
-        req.iouh_SetupData.wIndex = cpu_to_le16(p);
-        req.iouh_SetupData.wLength = cpu_to_le16(0);
-        req.iouh_DevAddr = udev->poseidon_address;
-
-        xhci_submit_root(udev, &req);
-    }
-    return UHIOERR_NO_ERROR;
-}
-
-int usb_glue_bus_suspend(struct XHCIUnit *unit)
-{
-    // TODO check if there is a controller level suspend/resume
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
-    if (!udev)
-        return UHIOERR_HOSTERROR;
-    int maxp = root_hub_max_ports(ctrl);
-    for (int p = 1; p <= maxp; ++p)
-    {
-        struct IOUsbHWReq req;
-        _memset(&req, 0, sizeof(req));
-        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
-        req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
-        req.iouh_SetupData.wIndex = cpu_to_le16(p);
-        req.iouh_DevAddr = udev->poseidon_address;
-
-        xhci_submit_root(udev, &req);
-    }
-    return UHIOERR_NO_ERROR;
-}
-
-int usb_glue_bus_resume(struct XHCIUnit *unit)
-{
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
-    if (!udev)
-        return UHIOERR_HOSTERROR;
-    int maxp = root_hub_max_ports(ctrl);
-    for (int p = 1; p <= maxp; ++p)
-    {
-        struct IOUsbHWReq req;
-        _memset(&req, 0, sizeof(req));
-        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.iouh_SetupData.bRequest = USB_REQ_CLEAR_FEATURE;
-        req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_SUSPEND);
-        req.iouh_SetupData.wIndex = cpu_to_le16(p);
-        req.iouh_DevAddr = udev->poseidon_address;
-
-        xhci_submit_root(udev, &req);
-    }
-    return UHIOERR_NO_ERROR;
-}
-
-int usb_glue_bus_oper(struct XHCIUnit *unit)
-{
-    //TODO should likely also resume and perhaps reset the ports
-    /* Ensure port power is on for all ports */
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    struct usb_device *udev = get_or_init_udev(unit, ctrl->rootdev);
-    if (!udev)
-        return UHIOERR_HOSTERROR;
-    int maxp = root_hub_max_ports(ctrl);
-    for (int p = 1; p <= maxp; ++p)
-    {
-        struct IOUsbHWReq req;
-        _memset(&req, 0, sizeof(req));
-        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
-        req.iouh_SetupData.wValue = cpu_to_le16(USB_PORT_FEAT_POWER);
-        req.iouh_SetupData.wIndex = cpu_to_le16(p);
-        req.iouh_DevAddr = udev->poseidon_address;
-
-        xhci_submit_root(udev, &req);
-    }
-    return UHIOERR_NO_ERROR;
-}
-
-static void parse_control_msg(struct usb_device *udev, struct IOUsbHWReq *io)
-{
-    KprintfH("dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx actual=%ld\n",
-             (ULONG)udev, (ULONG)udev->poseidon_address,
-             (ULONG)io->iouh_SetupData.bmRequestType,
-             (ULONG)io->iouh_SetupData.bRequest,
-             LE16(io->iouh_SetupData.wValue),
-             LE16(io->iouh_SetupData.wIndex),
-             LE16(io->iouh_SetupData.wLength),
-             (LONG)io->iouh_Actual);
-
-    /* If this was a successful GET_DESCRIPTOR(CONFIGURATION),
-     * cache the configuration descriptor for later use.
-     */
-    if ((io->iouh_SetupData.bRequest == USB_REQ_GET_DESCRIPTOR) && (io->iouh_SetupData.bmRequestType & USB_DIR_IN) && (((LE16(io->iouh_SetupData.wValue)) >> 8) == USB_DT_CONFIG))
-    {
-        parse_config_descriptor(udev, (UBYTE *)io->iouh_Data, (UWORD)io->iouh_Actual);
-    }
-
-    /* Record TT think time from hub descriptors so child devices can be programmed correctly. */
-    if ((io->iouh_SetupData.bRequest == USB_REQ_GET_DESCRIPTOR) &&
-        (io->iouh_SetupData.bmRequestType == (USB_DIR_IN | USB_RT_HUB)))
-    {
-        UWORD dtype = (UWORD)((LE16(io->iouh_SetupData.wValue)) >> 8);
-        if ((dtype == USB_DT_HUB || dtype == USB_DT_SS_HUB) && io->iouh_Actual >= 5)
-        {
-            struct usb_hub_descriptor *hub = (struct usb_hub_descriptor *)io->iouh_Data;
-            UWORD characteristics = LE16(hub->wHubCharacteristics);
-            u8 tt_think = (u8)((characteristics >> 5) & 0x3);
-            if (udev->tt_think_time != tt_think)
-            {
-                udev->tt_think_time = tt_think;
-                xhci_update_hub_tt(udev);
-                KprintfH("hub addr %ld TT think time code=%ld (bit-times=%ld)\n",
-                         (LONG)udev->poseidon_address, (LONG)tt_think, (LONG)((tt_think + 1) * 8));
-            }
-        }
-    }
-
-    /* Detect downstream port disconnects via hub GET_STATUS replies. */
-    if ((io->iouh_SetupData.bRequest == USB_REQ_GET_STATUS) &&
-        (io->iouh_SetupData.bmRequestType == (USB_DIR_IN | USB_RT_PORT)) &&
-        io->iouh_Actual >= 4)
-    {
-        struct xhci_ctrl *ctrl = udev->controller;
-        if (ctrl)
-        {
-            UWORD port = LE16(io->iouh_SetupData.wIndex);
-            UWORD status = LE16(((UWORD *)io->iouh_Data)[0]);
-            UWORD change = LE16(((UWORD *)io->iouh_Data)[1]);
-
-            KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->poseidon_address, (LONG)port, (ULONG)status, (ULONG)change);
-
-            /* Drop children immediately if port power is off, regardless of change bits. */
-            if ((status & USB_PORT_STAT_POWER) == 0)
-            {
-                KprintfH("hub addr=%ld port=%ld lost power; removing child if any\n", (LONG)udev->poseidon_address, (LONG)port);
-                struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
-                if (child)
-                {
-                    KprintfH("hub addr=%ld port=%ld power-off, removing child addr=%ld slot=%ld\n",
-                             (LONG)udev->poseidon_address, (LONG)port, (LONG)child->poseidon_address, (LONG)child->slot_id);
-                    usb_glue_disconnect_device(ctrl, child, TRUE);
-                }
-            }
-
-            /* If the port is disabled, tear down any attached child even if power is still on. */
-            if ((status & USB_PORT_STAT_ENABLE) == 0)
-            {
-                KprintfH("hub addr=%ld port=%ld disabled; removing child if any\n", (LONG)udev->poseidon_address, (LONG)port);
-                struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
-                if (child)
-                {
-                    KprintfH("hub addr=%ld port=%ld disabled, removing child addr=%ld slot=%ld\n",
-                             (LONG)udev->poseidon_address, (LONG)port, (LONG)child->poseidon_address, (LONG)child->slot_id);
-                    usb_glue_disconnect_device(ctrl, child, TRUE);
-                }
-            }
-
-            /* Act when the hub reports a connection change to avoid reacting to stale status. */
-            if (change & USB_PORT_STAT_C_CONNECTION)
-            {
-                if (status & USB_PORT_STAT_CONNECTION)
-                {
-                    /* Remember parent/port for the next default-address attach without split info. */
-                    KprintfH("hub addr=%ld port=%ld connected; remembering for pending attach\n", (LONG)udev->poseidon_address, (LONG)port);
-                    ctrl->pending_parent = udev;
-                    ctrl->pending_parent_port = port;
-                    ctrl->pending_parent_speed = usb_glue_speed_from_port_status(status);
-                }
-
-                if ((status & USB_PORT_STAT_CONNECTION) == 0)
-                {
-                    KprintfH("hub addr=%ld port=%ld disconnected; scanning children for match\n", (LONG)udev->poseidon_address, (LONG)port);
-                    struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
-
-                    if (child)
-                    {
-                        KprintfH("hub addr=%ld port=%ld disconnected, removing child addr=%ld slot=%ld\n",
-                                 (LONG)udev->poseidon_address, (LONG)port, (LONG)child->poseidon_address, (LONG)child->slot_id);
-                        usb_glue_disconnect_device(ctrl, child, TRUE);
-                    }
-                    else
-                    {
-                        KprintfH("hub addr=%ld port=%ld disconnect: no child matched parent\n",
-                                 (LONG)udev->poseidon_address, (LONG)port);
-                    }
-                }
-            }
-
-            /* Also remember parent/port after a reset-complete change when the link is up, even if
-             * no explicit connection-change bit was set (common on root hub resets).
-             */
-            if ((change & USB_PORT_STAT_C_RESET) && (status & USB_PORT_STAT_CONNECTION))
-            {
-                KprintfH("hub addr=%ld port=%ld reset-complete; remembering for pending attach\n", (LONG)udev->poseidon_address, (LONG)port);
-                ctrl->pending_parent = udev;
-                ctrl->pending_parent_port = port;
-                ctrl->pending_parent_speed = usb_glue_speed_from_port_status(status);
-            }
-        }
-    }
-
-    /* Proactively disconnect when the host powers or enables a hub port off. */
-    if ((io->iouh_SetupData.bRequest == USB_REQ_CLEAR_FEATURE) &&
-        (io->iouh_SetupData.bmRequestType == (USB_DIR_OUT | USB_RT_PORT)) &&
-        (LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_POWER ||
-         LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_ENABLE))
-    {
-        struct xhci_ctrl *ctrl = udev->controller;
-        if (ctrl)
-        {
-            UWORD port = LE16(io->iouh_SetupData.wIndex);
-            struct usb_device *child = usb_glue_find_child_on_port(ctrl, udev, port);
-            if (child)
-            {
-                KprintfH("hub addr=%ld port=%ld CLEAR_FEATURE(%s); removing child addr=%ld slot=%ld\n",
-                         (LONG)udev->poseidon_address, (LONG)port,
-                         (LE16(io->iouh_SetupData.wValue) == USB_PORT_FEAT_POWER) ? "PORT_POWER" : "PORT_ENABLE",
-                         (LONG)child->poseidon_address, (LONG)child->slot_id);
-                usb_glue_disconnect_device(ctrl, child, TRUE);
-            }
-        }
-    }
-
-    /* If this was a successful standard SET_ADDRESS, migrate the glue context
-     * from the old devaddr to the new one so subsequent transfers reuse the
-     * same slot and endpoint state.
-     * Note that this containt the address Poseidon _thinks_ it set on the interface.
-     * In reality, XHCI selects the address.
-     * Hence poseidon_address is what Poseidon uses; xhci_address is the real one.
-     */
-    if ((io->iouh_SetupData.bRequest == USB_REQ_SET_ADDRESS) &&
-        ((io->iouh_SetupData.bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD))
-    {
-        UWORD old_addr = io->iouh_DevAddr & 0x7F;
-        UWORD new_addr = (UWORD)(LE16(io->iouh_SetupData.wValue) & 0x7F);
-        if (new_addr != old_addr)
-        {
-            struct xhci_ctrl *ctrl = udev->controller;
-            if (!ctrl)
-                return;
-
-            struct usb_device *current = ctrl->devices_by_poseidon_address[old_addr];
-            if (!current)
-                current = udev;
-
-            if (ctrl->devices_by_poseidon_address[new_addr] && ctrl->devices_by_poseidon_address[new_addr] != current)
-            {
-                Kprintf("overwriting existing ctx for addr %ld\n", (LONG)new_addr);
-                /* If we are replacing an existing device (e.g., hub power-cycle), disconnect it (and children) first. */
-                usb_glue_disconnect_device(ctrl, ctrl->devices_by_poseidon_address[new_addr], TRUE);
-            }
-
-            ctrl->devices_by_poseidon_address[new_addr] = current;
-            if (ctrl->devices_by_poseidon_address[old_addr] == current)
-                ctrl->devices_by_poseidon_address[old_addr] = NULL;
-
-            current->poseidon_address = new_addr;
-            current->used = 1;
-
-            if (current->slot_id && ctrl->devs[current->slot_id])
-                ctrl->devs[current->slot_id]->udev = current;
-
-            KprintfH("migrated ctx from addr %ld to %ld\n", (LONG)old_addr, (LONG)new_addr);
-        }
-    }
-
-    if ((io->iouh_SetupData.bRequest == USB_REQ_SET_INTERFACE) &&
-        ((io->iouh_SetupData.bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD) &&
-        ((io->iouh_SetupData.bmRequestType & 0x1F) == USB_RECIP_INTERFACE))
-    {
-        unsigned int iface = (unsigned int)(LE16(io->iouh_SetupData.wIndex) & 0xFF);
-        unsigned int alt = (unsigned int)(LE16(io->iouh_SetupData.wValue) & 0xFF);
-        /*
-         * This is a workaround for Poseidon issue.
-         * Poseidon issues SET_INTERFACE for all devices after connecting a new one.
-         * Thing is, it first sets the alternate setting to 0, then to the desired setting.
-         * This causes issues with active RT ISO endpoints, as they get disabled on alt=0.
-         */
-        if (usb_glue_iface_has_active_rt_iso(udev, iface))
-        {
-            KprintfH("SET_INTERFACE iface=%ld alt=%ld ignored (RT ISO active)\n",
-                     (LONG)iface, (LONG)alt);
-        }
-        else
-        {
-            int err = xhci_set_interface(udev, iface, alt);
-            if (err != UHIOERR_NO_ERROR)
-            {
-                Kprintf("SET_INTERFACE iface=%ld alt=%ld failed err=%ld\n",
-                        (LONG)iface, (LONG)alt, (LONG)err);
-            }
-        }
-    }
-}
 
 /* Hooks for responding to requests for lower layer */
 void io_reply_failed(struct IOUsbHWReq *io, int err)
@@ -1594,7 +468,7 @@ void io_reply_failed(struct IOUsbHWReq *io, int err)
                 FreeVecPooled(ctrl->memoryPool, io);
             return;
         }
-        
+
         KprintfH("addr %ld EP %ld err=%ld\n", (LONG)io->iouh_DevAddr, (LONG)io->iouh_Endpoint, (LONG)err);
         ReplyMsg((struct Message *)io);
     }
@@ -1602,14 +476,16 @@ void io_reply_failed(struct IOUsbHWReq *io, int err)
 
 void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual)
 {
-    if (!io)
+    if (!io || !udev)
         return;
 
     io->iouh_Actual = actual;
     io->iouh_Req.io_Error = err;
 
     if (io->iouh_Req.io_Command == UHCMD_CONTROLXFER && err == UHIOERR_NO_ERROR)
-        parse_control_msg(udev, io);
+    {
+        xhci_usb_parse_control_message(udev, io);
+    }
 
     KprintfH("err=%ld actual=%ld\n", (LONG)err, (LONG)actual);
 
@@ -1623,37 +499,6 @@ void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULON
     }
 
     ReplyMsg((struct Message *)io);
-}
-
-static void ep_teardown(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx, BYTE reply_code)
-{
-    struct MinNode *node;
-    while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
-    {
-        struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-        io_reply_failed(req, reply_code);
-    }
-
-    xhci_td_destroy_list(ep_ctx->active_tds, reply_code);
-
-    /* Reset RT ISO inflight counters after teardown since all TDs are freed. */
-    ep_ctx->rt_inflight_bytes = 0;
-    ep_ctx->rt_inflight_tds = 0;
-    ep_ctx->rt_last_buffer = 0;
-    ep_ctx->rt_last_filled = 0;
-
-    if (ep_ctx->rt_template_req)
-    {
-        FreeVecPooled(ctrl->memoryPool, ep_ctx->rt_template_req);
-        ep_ctx->rt_template_req = NULL;
-    }
-    if (ep_ctx->rt_stop_pending)
-    {
-        io_reply_failed(ep_ctx->rt_stop_pending, reply_code);
-        ep_ctx->rt_stop_pending = NULL;
-    }
-    ep_ctx->rt_req = NULL;
-    ep_ctx->state = USB_DEV_EP_STATE_IDLE;
 }
 
 static void usb_glue_flush_udev(struct usb_device *udev, UBYTE reply_code)
@@ -1673,61 +518,7 @@ static void usb_glue_flush_udev(struct usb_device *udev, UBYTE reply_code)
         io_reply_failed(req, reply_code);
     }
 
-    for (int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
-    {
-        struct ep_context *ep_ctx = &udev->ep_context[ep];
-        KprintfH("tearing down addr %ld EP %ld context, state %ld\n", (LONG)udev->poseidon_address, (LONG)ep, (LONG)ep_ctx->state);
-        ep_teardown(ctrl, ep_ctx, reply_code);
-    }
-}
-
-void usb_glue_disconnect_device(struct xhci_ctrl *ctrl, struct usb_device *udev, BOOL recursive)
-{
-    if (!ctrl || !udev)
-        return;
-
-    if (!udev->slot_id)
-        return;
-
-    /* Disconnect downstream devices first so hubs drain their children before vanishing. */
-    if (recursive)
-    {
-        for (int i = 0; i <= USB_MAX_ADDRESS; ++i)
-        {
-            struct usb_device *child = ctrl->devices_by_poseidon_address[i];
-            if (!child || child == udev)
-                continue;
-
-            if (child->parent == udev && child->used)
-                usb_glue_disconnect_device(ctrl, child, TRUE);
-        }
-    }
-
-
-    KprintfH("disconnect device addr=%ld slot=%ld port=%ld\n",
-            (LONG)udev->poseidon_address,
-            (LONG)udev->slot_id,
-            (LONG)udev->parent_port);
-
-    xhci_disable_slot(udev);
-}
-
-static struct usb_device *usb_glue_find_child_on_port(struct xhci_ctrl *ctrl, struct usb_device *hub, unsigned int port)
-{
-    if (!ctrl || !hub)
-        return NULL;
-
-    for (int i = 0; i <= USB_MAX_ADDRESS; ++i)
-    {
-        struct usb_device *cand = ctrl->devices_by_poseidon_address[i];
-        if (!cand || cand == hub || cand->slot_id == 0)
-            continue;
-
-        if (cand->parent == hub && cand->parent_port == port)
-            return cand;
-    }
-
-    return NULL;
+    xhci_ep_destroy_contexts(udev, reply_code);
 }
 
 void usb_glue_free_udev_slot(struct usb_device *udev)
@@ -1753,36 +544,4 @@ void usb_glue_free_udev_slot(struct usb_device *udev)
 
     ctrl->devices_by_poseidon_address[udev->poseidon_address] = NULL;
     FreeVecPooled(ctrl->memoryPool, udev);
-}
-
-void usb_glue_flush_queues(struct XHCIUnit *unit)
-{
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    if (!ctrl)
-        return;
-
-    for (unsigned int addr = 0; addr <= USB_MAX_ADDRESS; ++addr)
-    {
-        struct usb_device *udev = ctrl->devices_by_poseidon_address[addr];
-        if (!udev || addr == ctrl->rootdev)
-            continue;
-
-        for (unsigned int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
-        {
-            struct ep_context *ep_ctx = &udev->ep_context[ep];
-            struct MinNode *node;
-
-            while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
-            {
-                struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-                io_reply_failed(req, IOERR_ABORTED);
-            }
-
-            u32 ep_out_index = xhci_ep_index_from_parts(ep, UHDIR_OUT);
-            u32 ep_in_index = xhci_ep_index_from_parts(ep, UHDIR_IN);
-
-            xhci_stop_endpoint(udev, ep_out_index);
-            xhci_stop_endpoint(udev, ep_in_index);
-        }
-    }
 }

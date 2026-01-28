@@ -895,7 +895,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 	/* Extract the EP0 and Slot Ctrl */
 	struct xhci_ep_ctx *ep0_ctx = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, 0);
 	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
-	KprintfH("xhci_setup_addressable_virt_dev: slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
+	KprintfH("slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
 			 (ULONG)udev->slot_id, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx,
 			 (ULONG)ep0_ctx, (ULONG)slot_ctx);
 

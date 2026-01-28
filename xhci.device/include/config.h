@@ -21,4 +21,6 @@
 #define UNIT_TASK_PRIORITY 30
 #define UNIT_TASK_POLL_DELAY_MS 100
 
+#define RT_ISO_IN_TARGET_TDS 16
+
 #endif

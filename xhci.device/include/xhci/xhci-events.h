@@ -8,67 +8,12 @@
 #include <devices/usbhardware.h>
 #include <xhci/xhci-td.h>
 
-enum ep_state
-{
-    USB_DEV_EP_STATE_IDLE = 0,
-    USB_DEV_EP_STATE_RECEIVING,
-    USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT,
-    USB_DEV_EP_STATE_ABORTING,
-    USB_DEV_EP_STATE_RESETTING,
-    USB_DEV_EP_STATE_FAILED,
-    USB_DEV_EP_STATE_RT_ISO_STOPPED,
-    USB_DEV_EP_STATE_RT_ISO_RUNNING,
-    USB_DEV_EP_STATE_RT_ISO_STOPPING
-};
 
 struct xhci_ring; /* forward declaration */
-
-
-struct ep_context
-{
-    IOReqList pending_reqs; /* list of pending requests */
-    TransferDescriptorList *active_tds; /* list of in-flight TDs */
-
-    enum ep_state state;
-
-    /* Pending device-side CLEAR_FEATURE(HALT) request after recovery commands */
-    BOOL clear_halt_pending;
-
-    /* RT ISO data */
-    /*
-     * The idea here is that if this is filled, the event handlers will use
-     * hooks to get more data.
-     * As such, we will fail an attempt to enter RT ISO mode if there are requests ongoing.
-     */
-    struct IOUsbHWRTIso * rt_req;
-    struct IOUsbHWReq *rt_template_req; /* template for cloning per TD */
-    //TODO remove?
-
-    /* Pending STOPRTISO command to reply once the pipe is fully stopped */
-    struct IOUsbHWReq *rt_stop_pending;
-
-    /* RT ISO frame tracking (monotonic frame number modulo 2^16) */
-    ULONG rt_next_frame;
-    /* Cache the last RT ISO buffer so hooks can omit repeating it */
-    APTR rt_last_buffer;
-    ULONG rt_last_filled;
-
-    /* RT ISO inflight accounting */
-    ULONG rt_inflight_bytes;
-    ULONG rt_inflight_tds;
-};
-
 struct usb_device; /* forward declaration */
 struct xhci_ctrl;  /* forward declaration */
-void xhci_ep_set_failed(struct usb_device *udev, int endpoint);
-void xhci_ep_set_idle(struct usb_device *udev, int endpoint);
-void xhci_ep_set_receiving(struct usb_device *udev, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t *trb_addrs, ULONG timeout_ms, unsigned int trb_count);
-void xhci_ep_set_resetting(struct usb_device *udev, int endpoint);
-void xhci_ep_set_aborting(struct usb_device *udev, int endpoint);
-
 
 BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl);
 void xhci_process_event_timeouts(struct xhci_ctrl *ctrl);
-void xhci_acknowledge_event(struct xhci_ctrl *ctrl);
 
 #endif /* _XHCI_EVENTS_H_ */

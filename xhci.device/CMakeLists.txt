@@ -21,6 +21,9 @@ add_executable(xhci.device
     src/xhci/xhci-events.c
     src/xhci/xhci-commands.c
     src/xhci/xhci-td.c
+    src/xhci/xhci-usb.c
+    src/xhci/xhci-root-hub.c
+    src/xhci/xhci-endpoint.c
     src/device_end.c
 )
 

@@ -113,7 +113,7 @@ struct usb_device {
 	unsigned int tt_think_time;   /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
 
 	/* Requests state data */
-	struct ep_context ep_context[USB_MAXENDPOINTS];
+	struct ep_context *ep_context[USB_MAXENDPOINTS];
 	
 	struct xhci_ctrl *controller; /* xHCI controller */
 };
