@@ -325,47 +325,17 @@ static inline int Do_UHCMD_USBOPER(struct IOUsbHWReq *io)
 }
 
 /*
- * start a control transfer
+ * start a generic transfer
  */
-static inline int Do_UHCMD_CONTROLXFER(struct IOUsbHWReq *io)
+static inline int Do_UHCMD_XFER(struct IOUsbHWReq *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_CONTROLXFER\n", __func__);
-
-    return usb_glue_ctrl(unit, io);
-}
-
-/*
- * start an isochronous transfer
- */
-static inline int Do_UHCMD_ISOXFER(struct IOUsbHWReq *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_ISOXFER\n", __func__);
-
-    return usb_glue_iso(unit, io);
-}
-
-/*
- * start an interrupt transfer
- */
-static inline int Do_UHCMD_INTXFER(struct IOUsbHWReq *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_INTXFER\n", __func__);
-
-    return usb_glue_int(unit, io);
-}
-
-/*
- * start a bulk transfer
- */
-static inline int Do_UHCMD_BULKXFER(struct IOUsbHWReq *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_BULKXFER\n", __func__);
-
-    return usb_glue_bulk(unit, io);
+    int result = dispatch_request(io);
+    if (result != UHIOERR_NO_ERROR)
+    {
+        io->iouh_Req.io_Error = result;
+        return COMMAND_PROCESSED;
+    }
+    return COMMAND_SCHEDULED;
 }
 
 static inline int Do_UHCMD_ADDISOHANDLER(struct IOUsbHWReq *io)
@@ -531,19 +501,10 @@ void ProcessCommand(struct IOUsbHWReq *io)
             break;
 
         case UHCMD_CONTROLXFER:
-            complete = Do_UHCMD_CONTROLXFER(io);
-            break;
-
         case UHCMD_ISOXFER:
-            complete = Do_UHCMD_ISOXFER(io);
-            break;
-
         case UHCMD_INTXFER:
-            complete = Do_UHCMD_INTXFER(io);
-            break;
-
         case UHCMD_BULKXFER:
-            complete = Do_UHCMD_BULKXFER(io);
+            complete = Do_UHCMD_XFER(io);
             break;
 
         case NSCMD_DEVICEQUERY:

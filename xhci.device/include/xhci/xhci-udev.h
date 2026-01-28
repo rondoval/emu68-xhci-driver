@@ -28,4 +28,4 @@ void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, in
 struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD poseidon_address);
 struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD poseidon_address);
 
-void dispatch_request(struct IOUsbHWReq *req);
+int dispatch_request(struct IOUsbHWReq *req);

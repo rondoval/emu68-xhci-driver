@@ -1289,8 +1289,6 @@ int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int tim
 int xhci_rt_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, BOOL defer_doorbell, struct xhci_giveback_info *giveback);
 void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info *giveback);
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
-int xhci_check_maxpacket(struct usb_device *udev, unsigned int maxpacket);
-int xhci_set_interface(struct usb_device *udev, unsigned int interface_number, unsigned int alt_setting);
 
 
 void xhci_flush_cache(uintptr_t addr, u32 type_len);
@@ -1333,5 +1331,4 @@ int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
 				 u32 ep_state);
 dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
 					 BOOL more_trbs_coming, unsigned int *trb_fields);
-int xhci_set_configuration(struct usb_device *udev, int config_value);
 #endif /* HOST_XHCI_H_ */

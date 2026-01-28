@@ -194,18 +194,17 @@ UBYTE xhci_roothub_get_num_ports(struct xhci_root_hub *rh)
 	return rh->descriptor.hub.bNbrPorts;
 }
 
-BOOL xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+int xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
 {
 	if (rh->int_req)
 	{
 		Kprintf("root hub interrupt request already pending\n");
-		req->iouh_Req.io_Error = UHIOERR_HOSTERROR;
-		return FALSE;
+		return UHIOERR_HOSTERROR;
 	}
 
 	rh->int_req = req;
 	xhci_roothub_complete_int_request(rh);
-	return TRUE;
+	return UHIOERR_NO_ERROR;
 }
 
 /**
@@ -580,12 +579,10 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 
 	io->iouh_Actual = len;
 	io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-
 	return;
 
 unknown:
 	io->iouh_Actual = 0;
 	io->iouh_Req.io_Error = UHIOERR_STALL;
-
 	return;
 }

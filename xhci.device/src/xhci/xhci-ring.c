@@ -25,6 +25,7 @@
 #include <xhci/xhci-events.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-udev.h>
+#include <xhci/xhci-usb.h>
 
 #ifdef DEBUG
 #undef Kprintf

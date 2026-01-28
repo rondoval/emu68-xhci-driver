@@ -182,7 +182,14 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
         KprintfH("starting queued request cmd=%ld ep=%ld\n",
                  (LONG)req->iouh_Req.io_Command,
                  (LONG)(req->iouh_Endpoint & 0x0F));
-        dispatch_request(req);
+                 
+        int err = dispatch_request(req);
+        if (err != UHIOERR_NO_ERROR)
+        {
+            req->iouh_Req.io_Error = err;
+            io_reply_failed(req, err);
+            continue;
+        }
 
         /* If the endpoint went idle immediately (e.g. zero-length or error), keep draining */
         if (xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_FAILED)

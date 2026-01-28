@@ -26,12 +26,12 @@
 
 #ifdef DEBUG
 #undef Kprintf
-#define Kprintf(fmt, ...) PrintPistorm("[usb_glue] %s: " fmt, __func__, ##__VA_ARGS__)
+#define Kprintf(fmt, ...) PrintPistorm("[xhci-udev] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 #ifdef DEBUG_HIGH
 #undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[usb_glue] %s: " fmt, __func__, ##__VA_ARGS__)
+#define KprintfH(fmt, ...) PrintPistorm("[xhci-udev] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD poseidon_address)
@@ -240,34 +240,34 @@ int usb_glue_ctrl_after_address(struct usb_device *udev, struct IOUsbHWReq *io)
     return ret;
 }
 
-void dispatch_request(struct IOUsbHWReq *req)
+int dispatch_request(struct IOUsbHWReq *req)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)req->iouh_Req.io_Unit;
     if (!unit)
     {
-        Kprintf("missing unit pointer for cmd=%ld\n", (LONG)req->iouh_Req.io_Command);
-        io_reply_failed(req, UHIOERR_HOSTERROR);
-        return;
+        Kprintf("missing unit pointer (cmd=%ld, req=%lx, devaddr=%ld)\n",
+            (LONG)req->iouh_Req.io_Command, (ULONG)req, (LONG)req->iouh_DevAddr);
+        return UHIOERR_BADPARAMS;
     }
 
     switch (req->iouh_Req.io_Command)
     {
     case UHCMD_CONTROLXFER:
-        usb_glue_ctrl(unit, req);
-        break;
+        return usb_glue_ctrl(unit, req);
     case UHCMD_ISOXFER:
-        usb_glue_iso(unit, req);
-        break;
+        return usb_glue_iso(unit, req);
     case UHCMD_BULKXFER:
-        usb_glue_bulk(unit, req);
-        break;
+        return usb_glue_bulk(unit, req);
     case UHCMD_INTXFER:
-        usb_glue_int(unit, req);
-        break;
+        return usb_glue_int(unit, req);
     default:
-        Kprintf("unsupported command %ld\n", (LONG)req->iouh_Req.io_Command);
-        io_reply_failed(req, UHIOERR_BADPARAMS);
-        return;
+        Kprintf("unsupported command %ld (req=%lx, devaddr=%ld, endpoint=%ld, flags=0x%lx)\n",
+            (LONG)req->iouh_Req.io_Command,
+            (ULONG)req,
+            (LONG)req->iouh_DevAddr,
+            (LONG)req->iouh_Endpoint,
+            (ULONG)req->iouh_Flags);
+        return UHIOERR_BADPARAMS;
     }
 }
 
@@ -277,8 +277,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (!udev)
     {
         KprintfH("Device does not exist for addr %ld\n", (LONG)io->iouh_DevAddr);
-        io->iouh_Req.io_Error = UHIOERR_TIMEOUT;
-        return COMMAND_PROCESSED;
+        return UHIOERR_TIMEOUT;
     }
 
     /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
@@ -300,7 +299,11 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     {
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, io);
         xhci_usb_parse_control_message(udev, io);
-        return COMMAND_PROCESSED;
+        if (io->iouh_Req.io_Error != UHIOERR_NO_ERROR)
+            return io->iouh_Req.io_Error;
+        if (!(io->iouh_Flags & IOF_QUICK))
+            ReplyMsg((struct Message *) io);
+        return UHIOERR_NO_ERROR;
     }
 
     struct UsbSetupData *setup = &io->iouh_SetupData;
@@ -308,7 +311,7 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (setup->bRequest == USB_REQ_SET_ADDRESS && (setup->bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD)
     {
         xhci_address_device(udev, io);
-        return COMMAND_SCHEDULED;
+        return UHIOERR_NO_ERROR;
     }
 
     if (setup->bRequest == USB_REQ_SET_CONFIGURATION &&
@@ -318,13 +321,12 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         if (ret != UHIOERR_NO_ERROR)
         {
             Kprintf("Failed to configure xHCI endpoint\n");
-            io->iouh_Req.io_Error = ret;
-            return COMMAND_PROCESSED;
+            return ret;
         }
 
         // this will trigger a chain of commands and control xfer
         xhci_configure_endpoints(udev, FALSE, io);
-        return COMMAND_SCHEDULED;
+        return UHIOERR_NO_ERROR;
     }
 
     unsigned int timeout_ms = 0;
@@ -336,17 +338,11 @@ int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     {
         // this will store the req and submit it once addressed
         xhci_address_device(udev, io);
-        return COMMAND_SCHEDULED;
+        return UHIOERR_NO_ERROR;
     }
 
     int ret = xhci_ctrl_tx(udev, io, timeout_ms);
-    if (ret != UHIOERR_NO_ERROR)
-    {
-        io->iouh_Req.io_Error = ret;
-        return COMMAND_PROCESSED;
-    }
-
-    return COMMAND_SCHEDULED;
+    return ret;
 }
 
 int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
@@ -355,8 +351,7 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (!udev)
     {
         KprintfH("Device does not exist for addr %ld\n", (LONG)io->iouh_DevAddr);
-        io->iouh_Req.io_Error = UHIOERR_TIMEOUT;
-        return COMMAND_PROCESSED;
+        return UHIOERR_TIMEOUT;
     }
 
     KprintfH("dev=%ld addr=%ld ep=%ld dir=%s len=%ld flags=%lx tmo=%ld\n",
@@ -368,13 +363,7 @@ int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_bulk_tx(udev, io, timeout_ms);
-    if (ret != UHIOERR_NO_ERROR)
-    {
-        io->iouh_Req.io_Error = ret;
-        return COMMAND_PROCESSED;
-    }
-
-    return COMMAND_SCHEDULED;
+    return ret;
 }
 
 int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
@@ -383,15 +372,14 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (!udev)
     {
         KprintfH("Device does not exist for addr %ld\n", (LONG)io->iouh_DevAddr);
-        io->iouh_Req.io_Error = UHIOERR_TIMEOUT;
-        return COMMAND_PROCESSED;
+        return UHIOERR_TIMEOUT;
     }
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     if (udev->poseidon_address == xhci_roothub_get_address(ctrl->root_hub))
     {
-        BOOL result = xhci_roothub_submit_int_request(ctrl->root_hub, io);
-        return result ? COMMAND_SCHEDULED : COMMAND_PROCESSED;
+        int result = xhci_roothub_submit_int_request(ctrl->root_hub, io);
+        return result;
     }
 
     KprintfH("dev=%lx addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx timeout=%ld maxpkt=%ld\n",
@@ -404,13 +392,7 @@ int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_int_tx(udev, io, timeout_ms);
-    if (ret != UHIOERR_NO_ERROR)
-    {
-        io->iouh_Req.io_Error = ret;
-        return COMMAND_PROCESSED;
-    }
-
-    return COMMAND_SCHEDULED;
+    return ret;
 }
 
 int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
@@ -419,16 +401,14 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
     if (!udev)
     {
         KprintfH("Device does not exist for addr %ld\n", (LONG)io->iouh_DevAddr);
-        io->iouh_Req.io_Error = UHIOERR_TIMEOUT;
-        return COMMAND_PROCESSED;
+        return UHIOERR_TIMEOUT;
     }
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     if (udev->poseidon_address == xhci_roothub_get_address(ctrl->root_hub))
     {
         Kprintf("isochronous transfers on root hub are not supported\n");
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-        return COMMAND_PROCESSED;
+        return UHIOERR_BADPARAMS;
     }
 
     KprintfH("dev=%lx addr=%ld ep=%ld dir=%s len=%ld interval=%ld flags=%lx maxpkt=%ld\n",
@@ -442,15 +422,8 @@ int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io)
         timeout_ms = (unsigned int)io->iouh_NakTimeout;
 
     int ret = xhci_iso_tx(udev, io, timeout_ms);
-    if (ret != UHIOERR_NO_ERROR)
-    {
-        io->iouh_Req.io_Error = ret;
-        return COMMAND_PROCESSED;
-    }
-
-    return COMMAND_SCHEDULED;
+    return ret;
 }
-
 
 /* Hooks for responding to requests for lower layer */
 void io_reply_failed(struct IOUsbHWReq *io, int err)

@@ -12,7 +12,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev,
 void xhci_roothub_destroy(struct xhci_root_hub *rh);
 
 void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWReq *req);
-BOOL xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct IOUsbHWReq *req);
+int xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct IOUsbHWReq *req);
 void xhci_roothub_complete_int_request(struct xhci_root_hub *rh);
 
 unsigned int xhci_roothub_get_address(struct xhci_root_hub *rh);
