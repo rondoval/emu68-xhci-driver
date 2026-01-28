@@ -19,7 +19,7 @@
  * The quirk devices support hasn't been given yet.
  */
 
- #ifdef __INTELLISENSE__
+#ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #else
 #include <proto/exec.h>
@@ -180,7 +180,7 @@ void xhci_roothub_destroy(struct xhci_root_hub *rh)
 
 unsigned int xhci_roothub_get_address(struct xhci_root_hub *rh)
 {
-	if(!rh || !rh->udev)
+	if (!rh || !rh->udev)
 		return 0;
 
 	return rh->udev->poseidon_address;
@@ -289,7 +289,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 	_memset(buffer, 0, buffer_len);
 
 	const u8 num_ports = rh->descriptor.hub.bNbrPorts;
-	const u8 need_bytes = (num_ports + 7U) / 8U;
+	const u8 need_bytes = (num_ports + 8U) / 8U;
 	if (need_bytes > actual_len)
 	{
 		KprintfH("root hub status truncated: need %ld bytes, have %ld\n",
@@ -306,11 +306,12 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 		if (!change_bits)
 			continue;
 
-		size_t index = port / 8U;
+		size_t index = (port + 1) >> 3;
 		if (index >= actual_len)
 			continue;
 
-		buffer[index] |= 1U << (port % 8);
+		buffer[index] |= 1U << ((port + 1) & 7);
+		KprintfH("port %ld status change detected: changebits=0x%08lx\n", (LONG)(port + 1), (ULONG)change_bits);
 		change = TRUE;
 	}
 
@@ -320,7 +321,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 		return;
 	}
 
-	KprintfH("completing root hub interrupt, actual=%ld, first byte=0x%02x\n", (LONG)actual_len, buffer[0]);
+	KprintfH("completing root hub interrupt, actual=%ld, first byte=0x%02lx\n", (LONG)actual_len, buffer[0]);
 
 	rh->io_reply_data(rh->udev, rh->int_req, UHIOERR_NO_ERROR, actual_len);
 	rh->int_req = NULL;
