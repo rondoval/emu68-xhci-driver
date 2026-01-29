@@ -3,29 +3,29 @@
 
 #include <exec/types.h>
 #include <devices/usbhardware.h>
-#include <xhci/usb.h>
+
+/* Flags for use in DriverPrivate1 */
+#define REQ_INTERNAL 0x1 /* Internal request, free instead of reply */
+#define REQ_ENQUEUED 0x2 /* Request was already enqueued to EP */
+#define REQ_ON_RING 0x4  /* Request is currently on the transfer ring */
+
 
 struct XHCIUnit;
+struct xhci_ctrl;
 
-#define XHCI_REQ_RING_BUSY ((APTR)~0UL)
+/* Access udev */
+struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_address);
+struct usb_device *xhci_udev_get(struct XHCIUnit *unit, UWORD poseidon_address);
+void xhci_udev_free(struct usb_device *udev);
 
-/* Transfer helpers */
-int usb_glue_ctrl(struct XHCIUnit *unit, struct IOUsbHWReq *io);
-int usb_glue_bulk(struct XHCIUnit *unit, struct IOUsbHWReq *io);
-int usb_glue_int(struct XHCIUnit *unit, struct IOUsbHWReq *io);
-int usb_glue_iso(struct XHCIUnit *unit, struct IOUsbHWReq *io);
-int usb_glue_ctrl_after_address(struct usb_device *udev, struct IOUsbHWReq *io);
+/* Dispatch */
+int xhci_udev_send_ctrl(struct usb_device *udev, struct IOUsbHWReq *io);
+int xhci_udev_send(struct IOUsbHWReq *req);
 
-void usb_glue_free_udev_slot(struct usb_device *udev);
+/* Track replies */
+void xhci_udev_io_reply_failed(struct IOUsbHWReq *io, int err);
+void xhci_udev_io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual);
 
-void io_reply_failed(struct IOUsbHWReq *io, int err);
-void io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual);
-
-/* Internal helper: async CLEAR_FEATURE(ENDPOINT_HALT) for recovery paths */
-void usb_glue_clear_feature_halt_internal(struct usb_device *udev, u32 ep_index);
-void usb_glue_clear_tt_buffer_internal(struct usb_device *udev, u32 ep_index, int ep_type);
-
-struct usb_device *usb_glue_alloc_udev(struct xhci_ctrl *ctrl, UWORD poseidon_address);
-struct usb_device *get_or_init_udev(struct XHCIUnit *unit, UWORD poseidon_address);
-
-int dispatch_request(struct IOUsbHWReq *req);
+/* Send commands to device */
+void xhci_udev_clear_feature_halt(struct usb_device *udev, ULONG ep_index);
+void xhci_udev_clear_tt_buffer(struct usb_device *udev, ULONG ep_index, int ep_type);

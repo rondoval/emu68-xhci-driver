@@ -365,7 +365,7 @@ static void usb_glue_disconnect_device(struct xhci_ctrl *ctrl, struct usb_device
             if (!child || child == udev)
                 continue;
 
-            if (child->parent == udev && child->used)
+            if (child->parent == udev)
                 usb_glue_disconnect_device(ctrl, child, TRUE);
         }
     }
@@ -560,7 +560,6 @@ void xhci_usb_parse_control_message(struct usb_device *udev, struct IOUsbHWReq *
                 ctrl->devices_by_poseidon_address[old_addr] = NULL;
 
             current->poseidon_address = new_addr;
-            current->used = 1;
 
             if (current->slot_id && ctrl->devs[current->slot_id])
                 ctrl->devs[current->slot_id]->udev = current;

@@ -1,10 +1,6 @@
 #ifndef XHCI_COMMANDS_H
 #define XHCI_COMMANDS_H
 
-#include <exec/lists.h>
-#include <compat.h>
-#include <xhci/xhci.h>
-
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event);
 
 void xhci_reset_ep(struct usb_device *udev, u32 ep_index);

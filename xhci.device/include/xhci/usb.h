@@ -11,13 +11,8 @@
 #ifndef _USB_H_
 #define _USB_H_
 
-#include <exec/lists.h>
-
-#include <compat.h>
 #include <xhci/usb_defs.h>
 #include <xhci/ch9.h>
-#include <xhci/xhci-events.h>
-#include <devices/usbhardware.h>
 
 /*
  * The EHCI spec says that we must align to at least 32 bytes.  However,
@@ -96,7 +91,6 @@ enum slot_state {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
-	BOOL used;
 	unsigned int	poseidon_address;			/* Device address as seen by Poseidon */
 	unsigned int    xhci_address;				/* Device address as seen by xHCI */
 	unsigned int	slot_id;		/* Slot ID for xHCI */

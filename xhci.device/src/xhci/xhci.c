@@ -21,16 +21,10 @@
 
 #include <exec/memory.h>
 
-#include <compat.h>
 #include <debug.h>
-#include <device.h>
 
-#include <xhci/usb.h>
-#include <devices/usbhardware.h>
 #include <xhci/xhci.h>
-#include <xhci/xhci-commands.h>
 #include <xhci/xhci-root-hub.h>
-#include <xhci/xhci-debug.h>
 #include <xhci/xhci-udev.h>
 
 #ifdef DEBUG
@@ -125,7 +119,7 @@ static int handshake(uint32_t volatile *ptr, uint32_t mask, uint32_t done, int u
 	int ret;
 
 	// TODO fixed value ULONG_MAX
-	ret = readx_poll_timeout(xhci_readl, ptr, result, (result & mask) == done || result == 0xffffffff, usec);
+	ret = readx_poll_timeout(readl, ptr, result, (result & mask) == done || result == 0xffffffff, usec);
 	if (result == 0xffffffff) /* card removed */
 		return -ENODEV;
 
@@ -144,9 +138,9 @@ static int xhci_start(struct xhci_hcor *hcor)
 	int ret;
 
 	Kprintf("Starting the controller\n");
-	temp = xhci_readl(&hcor->or_usbcmd);
+	temp = readl(&hcor->or_usbcmd);
 	temp |= (CMD_RUN);
-	xhci_writel(&hcor->or_usbcmd, temp);
+	writel(temp, &hcor->or_usbcmd);
 
 	/*
 	 * Wait for the HCHalted Status bit to be 0 to indicate the host is
@@ -172,12 +166,12 @@ static int xhci_reset(struct xhci_hcor *hcor)
 
 	/* Halting the Host first */
 	Kprintf("// Halt the HC: %lx\n", hcor);
-	state = xhci_readl(&hcor->or_usbsts) & STS_HALT;
+	state = readl(&hcor->or_usbsts) & STS_HALT;
 	if (!state)
 	{
-		cmd = xhci_readl(&hcor->or_usbcmd);
+		cmd = readl(&hcor->or_usbcmd);
 		cmd &= ~CMD_RUN;
-		xhci_writel(&hcor->or_usbcmd, cmd);
+		writel(cmd, &hcor->or_usbcmd);
 	}
 
 	ret = handshake(&hcor->or_usbsts,
@@ -189,9 +183,9 @@ static int xhci_reset(struct xhci_hcor *hcor)
 	}
 
 	Kprintf("// Reset the HC\n");
-	cmd = xhci_readl(&hcor->or_usbcmd);
+	cmd = readl(&hcor->or_usbcmd);
 	cmd |= CMD_RESET_USB;
-	xhci_writel(&hcor->or_usbcmd, cmd);
+	writel(cmd, &hcor->or_usbcmd);
 
 	ret = handshake(&hcor->or_usbcmd, CMD_RESET_USB, 0, XHCI_MAX_RESET_USEC);
 	if (ret)
@@ -218,17 +212,17 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	 * Program the Number of Device Slots Enabled field in the CONFIG
 	 * register with the max value of slots the HC can handle.
 	 */
-	val = (xhci_readl(&hccr->cr_hcsparams1) & HCS_SLOTS_MASK);
-	val2 = xhci_readl(&hcor->or_config);
+	val = (readl(&hccr->cr_hcsparams1) & HCS_SLOTS_MASK);
+	val2 = readl(&hcor->or_config);
 	val |= (val2 & ~HCS_SLOTS_MASK);
-	xhci_writel(&hcor->or_config, val);
+	writel(val, &hcor->or_config);
 
 	/* initializing xhci data structures */
 	if (xhci_mem_init(ctrl, hccr, hcor) < 0)
 		return -ENOMEM;
 
-	ctrl->devices_by_poseidon_address[0] = usb_glue_alloc_udev(ctrl, 0);
-	ctrl->root_hub = xhci_roothub_create(ctrl->devices_by_poseidon_address[0], io_reply_data);
+	ctrl->devices_by_poseidon_address[0] = xhci_udev_alloc(ctrl, 0);
+	ctrl->root_hub = xhci_roothub_create(ctrl->devices_by_poseidon_address[0], xhci_udev_io_reply_data);
 	if (!ctrl->root_hub)
 	{
 		return -ENOMEM;
@@ -241,10 +235,10 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	}
 
 	/* Zero'ing IRQ control register and IRQ pending register */
-	xhci_writel(&ctrl->ir_set->irq_control, 0x0);
-	xhci_writel(&ctrl->ir_set->irq_pending, 0x0);
+	writel(0x0, &ctrl->ir_set->irq_control);
+	writel(0x0, &ctrl->ir_set->irq_pending);
 
-	reg = HC_VERSION(xhci_readl(&hccr->cr_capbase));
+	reg = HC_VERSION(readl(&hccr->cr_capbase));
 	Kprintf("USB XHCI %lx.%02lx\n", reg >> 8, reg & 0xff);
 	ctrl->hci_version = reg;
 
@@ -258,10 +252,10 @@ static int xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 	xhci_reset(ctrl->hcor);
 
 	Kprintf("// Disabling event ring interrupts\n");
-	temp = xhci_readl(&ctrl->hcor->or_usbsts);
-	xhci_writel(&ctrl->hcor->or_usbsts, temp & ~STS_EINT);
-	temp = xhci_readl(&ctrl->ir_set->irq_pending);
-	xhci_writel(&ctrl->ir_set->irq_pending, ER_IRQ_DISABLE(temp));
+	temp = readl(&ctrl->hcor->or_usbsts);
+	writel(temp & ~STS_EINT, &ctrl->hcor->or_usbsts);
+	temp = readl(&ctrl->ir_set->irq_pending);
+	writel(ER_IRQ_DISABLE(temp), &ctrl->ir_set->irq_pending);
 
 	xhci_roothub_destroy(ctrl->root_hub);
 	ctrl->root_hub = NULL;

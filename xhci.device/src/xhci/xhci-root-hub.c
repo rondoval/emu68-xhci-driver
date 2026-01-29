@@ -134,7 +134,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 
 	CopyMem(&prototype_descriptor, &rh->descriptor, sizeof(prototype_descriptor));
 
-	u8 ports = HCS_MAX_PORTS(xhci_readl(&ctrl->hccr->cr_hcsparams1));
+	u8 ports = HCS_MAX_PORTS(readl(&ctrl->hccr->cr_hcsparams1));
 	if (ports > USB_MAXCHILDREN)
 		ports = USB_MAXCHILDREN;
 
@@ -158,7 +158,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 	Kprintf("Initialized root hub with %ld ports\n", (LONG)ports);
 
 	/* Port Indicators */
-	u32 reg = xhci_readl(&ctrl->hccr->cr_hccparams);
+	u32 reg = readl(&ctrl->hccr->cr_hccparams);
 	u16 wHubCharacteristics = LE16(rh->descriptor.hub.wHubCharacteristics);
 	if (HCS_INDICATOR(reg))
 		wHubCharacteristics |= HUB_CHAR_PORTIND;
@@ -249,9 +249,9 @@ static void xhci_roothub_clear_port_change_bit(u16 wValue, u16 wIndex, volatile 
 	}
 
 	/* Change bits are all write 1 to clear */
-	xhci_writel(addr, port_status | status);
+	writel(port_status | status, addr);
 
-	port_status = xhci_readl(addr);
+	port_status = readl(addr);
 	(void)port_change_bit;
 	(void)wIndex;
 	KprintfH("clear port %s change, actual port %ld status  = 0x%lx\n", port_change_bit, wIndex, port_status);
@@ -301,7 +301,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 							PORT_PLC;
 	for (u8 port = 0; port < num_ports; ++port)
 	{
-		u32 portsc = xhci_readl(&ctrl->hcor->portregs[port].or_portsc);
+		u32 portsc = readl(&ctrl->hcor->portregs[port].or_portsc);
 		u32 change_bits = portsc & change_mask;
 		if (!change_bits)
 			continue;
@@ -438,7 +438,7 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 		break;
 	case USB_REQ_GET_STATUS | ((USB_RT_PORT | USB_DIR_IN) << 8):
 		_memset(tmpbuf, 0, 4);
-		reg = xhci_readl(status_reg);
+		reg = readl(status_reg);
 		if (reg & PORT_CONNECT)
 		{
 			tmpbuf[0] |= USB_PORT_STAT_CONNECTION;
@@ -495,7 +495,7 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 				 LE16(req->wIndex) - 1, reg);
 		break;
 	case USB_REQ_SET_FEATURE | ((USB_DIR_OUT | USB_RT_PORT) << 8):
-		reg = xhci_readl(status_reg);
+		reg = readl(status_reg);
 		reg = xhci_roothub_port_state_to_neutral(reg);
 		KprintfH("SET_FEATURE PORT %ld status=0x%lx feature=0x%lx\n",
 				 LE16(req->wIndex) - 1, reg, LE16(req->wValue));
@@ -504,24 +504,24 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 		case USB_PORT_FEAT_ENABLE:
 			KprintfH("Set PORT_PE\n");
 			reg |= PORT_PE;
-			xhci_writel(status_reg, reg);
+			writel(reg, status_reg);
 			break;
 		case USB_PORT_FEAT_POWER:
 			KprintfH("Set PORT_POWER\n");
 			reg |= PORT_POWER;
-			xhci_writel(status_reg, reg);
+			writel(reg, status_reg);
 			break;
 		case USB_PORT_FEAT_RESET:
 			KprintfH("Set PORT_RESET\n");
 			reg |= PORT_RESET;
-			xhci_writel(status_reg, reg);
+			writel(reg, status_reg);
 			break;
 		case USB_PORT_FEAT_SUSPEND:
 			/* Put link into U3 suspend */
 			KprintfH("Putting link to U3 standby\n");
 			reg &= ~PORT_PLS_MASK;
 			reg |= XDEV_U3;
-			xhci_writel(status_reg, reg);
+			writel(reg, status_reg);
 			break;
 		default:
 			Kprintf("unknown feature %lx\n", LE16(req->wValue));
@@ -529,7 +529,7 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 		}
 		break;
 	case USB_REQ_CLEAR_FEATURE | ((USB_DIR_OUT | USB_RT_PORT) << 8):
-		reg = xhci_readl(status_reg);
+		reg = readl(status_reg);
 		reg = xhci_roothub_port_state_to_neutral(reg);
 		KprintfH("CLEAR_FEATURE PORT %ld status=0x%lx feature=0x%lx\n",
 				 LE16(req->wIndex) - 1, reg, LE16(req->wValue));
@@ -564,7 +564,7 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 			Kprintf("Unknown feature 0x%lx\n", LE16(req->wValue));
 			goto unknown;
 		}
-		xhci_writel(status_reg, reg);
+		writel(reg, status_reg);
 		break;
 	default:
 		Kprintf("Unknown request\n");

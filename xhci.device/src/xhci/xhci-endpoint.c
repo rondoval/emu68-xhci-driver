@@ -29,9 +29,9 @@
 struct ep_context
 {
     struct usb_device *udev; /* back reference to device */
-    int endpoint_number; /* Endpoint number (0-15) */
-    enum ep_state state; /* Current endpoint state */
-    APTR memoryPool;     /* Memory pool for this endpoint */
+    int endpoint_number;     /* Endpoint number (0-15) */
+    enum ep_state state;     /* Current endpoint state */
+    APTR memoryPool;         /* Memory pool for this endpoint */
 
     IOReqList pending_reqs;             /* list of pending requests */
     TransferDescriptorList *active_tds; /* list of in-flight TDs */
@@ -95,7 +95,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
             while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
             {
                 struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-                io_reply_failed(req, reply_code);
+                xhci_udev_io_reply_failed(req, reply_code);
             }
 
             xhci_td_destroy_list(ep_ctx->active_tds, reply_code);
@@ -107,7 +107,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
             }
             if (ep_ctx->rt_stop_pending)
             {
-                io_reply_failed(ep_ctx->rt_stop_pending, reply_code);
+                xhci_udev_io_reply_failed(ep_ctx->rt_stop_pending, reply_code);
                 ep_ctx->rt_stop_pending = NULL;
             }
             ep_ctx->rt_req = NULL;
@@ -153,11 +153,11 @@ void xhci_ep_set_failed(struct ep_context *ep_ctx)
 
 void xhci_ep_enqueue(struct ep_context *ep_ctx, struct IOUsbHWReq *io)
 {
-    if (io->iouh_DriverPrivate1 == ep_ctx)
+    if ((ULONG)io->iouh_DriverPrivate1 & REQ_ENQUEUED)
         AddHeadMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
     else
     {
-        io->iouh_DriverPrivate1 = ep_ctx;
+        io->iouh_DriverPrivate1 = (APTR)((ULONG)io->iouh_DriverPrivate1 | REQ_ENQUEUED);
         AddTailMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
     }
 
@@ -168,34 +168,30 @@ void xhci_ep_enqueue(struct ep_context *ep_ctx, struct IOUsbHWReq *io)
 
 static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
 {
-    //TODO not needed as this is called from idle only?
-    // enum ep_state state = xhci_ep_get_state(ep_ctx);
-    // if (state == USB_DEV_EP_STATE_FAILED || state == USB_DEV_EP_STATE_RESETTING || state == USB_DEV_EP_STATE_ABORTING)
-    //     return;
+    // TODO not needed as this is called from idle only?
+    //  enum ep_state state = xhci_ep_get_state(ep_ctx);
+    //  if (state == USB_DEV_EP_STATE_FAILED || state == USB_DEV_EP_STATE_RESETTING || state == USB_DEV_EP_STATE_ABORTING)
+    //      return;
 
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)))
     {
         struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-        req->iouh_DriverPrivate2 = NULL; //TODO why? should not be needed
 
         KprintfH("starting queued request cmd=%ld ep=%ld\n",
                  (LONG)req->iouh_Req.io_Command,
                  (LONG)(req->iouh_Endpoint & 0x0F));
-                 
-        int err = dispatch_request(req);
+
+        int err = xhci_udev_send(req);
         if (err != UHIOERR_NO_ERROR)
         {
             req->iouh_Req.io_Error = err;
-            io_reply_failed(req, err);
+            xhci_udev_io_reply_failed(req, err);
             continue;
         }
 
         /* If the endpoint went idle immediately (e.g. zero-length or error), keep draining */
         if (xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_FAILED)
-            return;
-
-        if (req->iouh_DriverPrivate2 == XHCI_REQ_RING_BUSY)
             return;
     }
 }
@@ -208,7 +204,7 @@ void xhci_ep_set_idle(struct ep_context *ep_ctx)
         xhci_ep_schedule_next(ep_ctx);
 }
 
-void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t *trb_addrs, ULONG timeout_ms, unsigned int trb_count)
+void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct IOUsbHWReq *req, dma_addr_t *trb_addrs, ULONG timeout_ms, unsigned int trb_count)
 {
     if (!trb_addrs || trb_count == 0)
     {
@@ -217,10 +213,25 @@ void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct IOUsbHWReq *req, en
         return;
     }
 
+    enum ep_state new_state;
+    BOOL is_rt;
+    if (ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_STOPPED ||
+        ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_RUNNING ||
+        ep_ctx->state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
+    {
+        new_state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
+        is_rt = TRUE;
+    }
+    else
+    {
+        new_state = USB_DEV_EP_STATE_RECEIVING;
+        is_rt = FALSE;
+    }
+
     BOOL result = xhci_td_add(ep_ctx->active_tds,
                               req,
                               timeout_ms,
-                              (state == USB_DEV_EP_STATE_RT_ISO_RUNNING),
+                              is_rt,
                               trb_addrs,
                               trb_count);
     if (!result)
@@ -231,8 +242,8 @@ void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct IOUsbHWReq *req, en
         return;
     }
 
-    KprintfH("EP %ld state %ld -> %ld\n", (LONG)ep_ctx->endpoint_number, (LONG)ep_ctx->state, (LONG)state);
-    ep_ctx->state = state;
+    KprintfH("EP %ld state %ld -> %ld\n", (LONG)ep_ctx->endpoint_number, (LONG)ep_ctx->state, (LONG)new_state);
+    ep_ctx->state = new_state;
 }
 
 void xhci_ep_set_receiving_control_short(struct ep_context *ep_ctx)
@@ -295,7 +306,7 @@ void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code)
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
     {
         struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-        io_reply_failed(req, reply_code);
+        xhci_udev_io_reply_failed(req, reply_code);
     }
 
     xhci_td_fail_all(ep_ctx->active_tds, reply_code);
@@ -500,8 +511,10 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         rt_io->iouh_Frame = (UWORD)frame;
 
         struct xhci_giveback_info local_giveback = {0};
-        BOOL defer = TRUE; /* RT ISO defers doorbell to per-run giveback */
-        int ret = xhci_rt_iso_tx(ep_ctx->udev, rt_io, defer, first_td ? &local_giveback : NULL);
+        int ret = xhci_stream_tx(ep_ctx->udev, rt_io, 0,
+                                 TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE,
+                                 TRUE, /* RT ISO defers doorbell to per-run giveback */
+                                 first_td ? &local_giveback : NULL);
         if (ret != UHIOERR_NO_ERROR)
         {
             FreeVecPooled(ep_ctx->memoryPool, rt_io);
@@ -566,8 +579,10 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)ep_ctx->rt_inflight_tds);
 
         struct xhci_giveback_info local_giveback = {0};
-        BOOL defer = TRUE; /* RT ISO defers doorbell to per-run giveback */
-        int ret = xhci_rt_iso_tx(ep_ctx->udev, rt_io, defer, first_td ? &local_giveback : NULL);
+        int ret = xhci_stream_tx(ep_ctx->udev, rt_io, 0,
+                                 TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE,
+                                 TRUE, /* RT ISO defers doorbell to per-run giveback */
+                                 first_td ? &local_giveback : NULL);
         if (ret != UHIOERR_NO_ERROR)
         {
             FreeVecPooled(ep_ctx->memoryPool, rt_io->iouh_Data);
@@ -617,14 +632,14 @@ void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx)
 {
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
-        if(xhci_td_is_empty(ep_ctx->active_tds))
+        if (xhci_td_is_empty(ep_ctx->active_tds))
         {
             ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
             usb_glue_notify_rt_iso_stopped(ep_ctx);
         }
         return;
     }
-    
+
     /* handle deferred queue - pending */
     xhci_ep_schedule_next(ep_ctx);
 

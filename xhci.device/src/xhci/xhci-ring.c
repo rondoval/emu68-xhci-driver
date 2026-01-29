@@ -13,18 +13,12 @@
  *	    Vikas Sajjan <vikas.sajjan@samsung.com>
  */
 
-#include <compat.h>
 #include <debug.h>
-#include <xhci/usb.h>
-#include <devices/usbhardware.h>
-#include <minlist.h>
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>
-#include <xhci/xhci-events.h>
 #include <xhci/xhci-endpoint.h>
-#include <xhci/xhci-udev.h>
 #include <xhci/xhci-usb.h>
 
 #ifdef DEBUG
@@ -392,8 +386,7 @@ static void giveback_first_trb(struct usb_device *udev, int ep_index,
 	prime_first_trb(start_cycle, start_trb);
 
 	/* Ringing EP doorbell here */
-	xhci_writel(&ctrl->dba->doorbell[udev->slot_id],
-			DB_VALUE(ep_index, 0));
+	writel(DB_VALUE(ep_index, 0), &ctrl->dba->doorbell[udev->slot_id]);
 
 	return;
 }
@@ -410,8 +403,8 @@ void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info
 /*
  * Common helper for bulk/int/isoc rings.
  */
-static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
-				  unsigned int timeout_ms, enum ep_state state,
+int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
+				  unsigned int timeout_ms,
 				  u32 trb_type_bits, BOOL enable_short_packet,
 				  BOOL defer_doorbell,
 				  struct xhci_giveback_info *deferred_giveback)
@@ -622,7 +615,7 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		trb_buff_len = min((length - running_total), TRB_MAX_BUFF_SIZE);
 	} while (running_total < length);
 
-	xhci_ep_set_receiving(udev_ep_ctx, io, state, td_trb_addrs, timeout_ms, td_trb_count);
+	xhci_ep_set_receiving(udev_ep_ctx, io, td_trb_addrs, timeout_ms, td_trb_count);
 
 	/* Hand the first TRB back to the controller once the TD is ready. */
 	if (defer_doorbell)
@@ -645,70 +638,6 @@ static int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	}
 
 	return UHIOERR_NO_ERROR;
-}
-
-/**** Bulk and Control transfer methods ****/
-
-/**
- * Queues up the BULK Request
- *
- * @param udev		pointer to the USB device structure
- * @param io		pointer to the IOUsbHWReq structure
- * @param timeout_ms	timeout in milliseconds
- * Return: returns 0 if successful else error code
- */
-int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms)
-{
-	KprintfH("slot=%ld ep=%ld dir=%s buf=%lx len=%ld\n",
-			 (LONG)udev->slot_id,
-			 (LONG)(io->iouh_Endpoint & 0xf),
-			 (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-			 io->iouh_Data, io->iouh_Length);
-
-	return xhci_stream_tx(udev, io, timeout_ms,
-				  USB_DEV_EP_STATE_RECEIVING,
-				  TRB_TYPE(TRB_NORMAL), TRUE,
-				  FALSE,
-				  NULL);
-}
-
-int xhci_int_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms)
-{
-	KprintfH("slot=%ld ep=%ld dir=%s buf=%lx len=%ld\n",
-			 (LONG)udev->slot_id,
-			 (LONG)(io->iouh_Endpoint & 0xf),
-			 (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-			 io->iouh_Data, io->iouh_Length);
-
-	return xhci_stream_tx(udev, io, timeout_ms,
-				  USB_DEV_EP_STATE_RECEIVING,
-				  TRB_TYPE(TRB_NORMAL), TRUE,
-				  FALSE,
-				  NULL);
-}
-
-int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms)
-{
-	KprintfH("slot=%ld ep=%ld dir=%s buf=%lx len=%ld interval=%ld\n",
-			 (LONG)udev->slot_id,
-			 (LONG)(io->iouh_Endpoint & 0xf),
-			 (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-			 io->iouh_Data, io->iouh_Length, (LONG)io->iouh_Interval);
-
-	return xhci_stream_tx(udev, io, timeout_ms,
-				  USB_DEV_EP_STATE_RECEIVING,
-				  TRB_TYPE(TRB_ISOC) | TRB_SIA, FALSE,
-				  FALSE,
-				  NULL);
-}
-
-int xhci_rt_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, BOOL defer_doorbell, struct xhci_giveback_info *giveback)
-{
-	return xhci_stream_tx(udev, io, 0,
-				  USB_DEV_EP_STATE_RT_ISO_RUNNING,
-				  TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE,
-				  defer_doorbell,
-				  giveback);
 }
 
 /**
@@ -920,7 +849,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	KprintfH("status TRB addr: %lx\n", (ULONG)event_trb);
 	td_trb_addrs[td_trb_index++] = event_trb;
 
-	xhci_ep_set_receiving(udev_ep_ctx, io, USB_DEV_EP_STATE_RECEIVING, td_trb_addrs, timeout_ms, td_trb_count);
+	xhci_ep_set_receiving(udev_ep_ctx, io, td_trb_addrs, timeout_ms, td_trb_count);
 
 	giveback_first_trb(udev, ep_index, start_cycle, start_trb);
 

@@ -23,7 +23,6 @@
 #include <devices/usbhardware.h>
 #include <pci_types.h>
 #include <pci.h>
-#include <xhci/usb.h>
 #include <xhci/xhci.h>
 
 
@@ -157,10 +156,10 @@ static int xhci_pci_init(struct pci_device *dev, struct xhci_hccr **ret_hccr,
 	Kprintf("[xhci] %s: init mapped hccr %lx\n", __func__, hccr);
 
 	hcor = (struct xhci_hcor *)((uintptr_t) hccr +
-			HC_LENGTH(xhci_readl(&hccr->cr_capbase)));
+			HC_LENGTH(readl(&hccr->cr_capbase)));
 
 	Kprintf("[xhci] %s: init hccr %lx and hcor %lx hc_length %ld\n",
-	      __func__, hccr, hcor, (u32)HC_LENGTH(xhci_readl(&hccr->cr_capbase)));
+	      __func__, hccr, hcor, (u32)HC_LENGTH(readl(&hccr->cr_capbase)));
 
 	*ret_hccr = hccr;
 	*ret_hcor = hcor;

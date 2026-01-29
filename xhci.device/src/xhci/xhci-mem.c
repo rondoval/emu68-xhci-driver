@@ -132,7 +132,7 @@ static void xhci_scratchpad_free(struct xhci_ctrl *ctrl)
 	if (!ctrl->scratchpad)
 		return;
 
-	num_sp = HCS_MAX_SCRATCHPAD(xhci_readl(&hccr->cr_hcsparams2));
+	num_sp = HCS_MAX_SCRATCHPAD(readl(&hccr->cr_hcsparams2));
 	xhci_dma_unmap(ctrl, ctrl->scratchpad->sp_array[0],
 				   num_sp * ctrl->page_size);
 	xhci_dma_unmap(ctrl, ctrl->dcbaa->dev_context_ptrs[0],
@@ -441,7 +441,7 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	void *buf;
 	int i;
 
-	num_sp = HCS_MAX_SCRATCHPAD(xhci_readl(&hccr->cr_hcsparams2));
+	num_sp = HCS_MAX_SCRATCHPAD(readl(&hccr->cr_hcsparams2));
 	if (!num_sp)
 		return 0;
 
@@ -462,7 +462,7 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	xhci_flush_cache((uintptr_t)&ctrl->dcbaa->dev_context_ptrs[0],
 					 sizeof(ctrl->dcbaa->dev_context_ptrs[0]));
 
-	page_size = xhci_readl(&hcor->or_pagesize) & 0xffff;
+	page_size = readl(&hcor->or_pagesize) & 0xffff;
 	for (i = 0; i < 16; i++)
 	{
 		if ((0x1 & page_size) != 0)
@@ -533,9 +533,9 @@ static struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctr
 
 	ctx->type = type;
 	ctx->size = (MAX_EP_CTX_NUM + 1) *
-				CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams));
+				CTX_SIZE(readl(&ctrl->hccr->cr_hccparams));
 	if (type == XHCI_CTX_TYPE_INPUT)
-		ctx->size += CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams));
+		ctx->size += CTX_SIZE(readl(&ctrl->hccr->cr_hccparams));
 
 	ctx->bytes = xhci_malloc(ctrl, ctx->size);
 	ctx->dma = xhci_dma_map(ctrl, ctx->bytes, ctx->size);
@@ -666,12 +666,12 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	xhci_writeq(&hcor->or_crcr, val_64);
 
 	/* write the address of db register */
-	val = xhci_readl(&hccr->cr_dboff);
+	val = readl(&hccr->cr_dboff);
 	val &= DBOFF_MASK;
 	ctrl->dba = (struct xhci_doorbell_array *)((char *)hccr + val);
 
 	/* write the address of runtime register */
-	val = xhci_readl(&hccr->cr_rtsoff);
+	val = readl(&hccr->cr_rtsoff);
 	val &= RTSOFF_MASK;
 	ctrl->run_regs = (struct xhci_run_regs *)((char *)hccr + val);
 
@@ -709,10 +709,10 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 				(u64)deq & (u64)~ERST_PTR_MASK);
 
 	/* set ERST count with the number of entries in the segment table */
-	val = xhci_readl(&ctrl->ir_set->erst_size);
+	val = readl(&ctrl->ir_set->erst_size);
 	val &= ERST_SIZE_MASK;
 	val |= ERST_NUM_SEGS;
-	xhci_writel(&ctrl->ir_set->erst_size, val);
+	writel(val, &ctrl->ir_set->erst_size);
 
 	/* this is the event ring segment table pointer */
 	val_64 = xhci_readq(&ctrl->ir_set->erst_base);
@@ -733,7 +733,7 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	 * or some spurious Device Notification Events
 	 * might screw things here.
 	 */
-	xhci_writel(&hcor->or_dnctrl, 0x0);
+	writel(0x0, &hcor->or_dnctrl);
 
 	return 0;
 }
@@ -767,7 +767,7 @@ struct xhci_slot_ctx *xhci_get_slot_ctx(struct xhci_ctrl *ctrl,
 	if (ctx->type == XHCI_CTX_TYPE_DEVICE)
 		return (struct xhci_slot_ctx *)ctx->bytes;
 
-	return (struct xhci_slot_ctx *)(ctx->bytes + CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams)));
+	return (struct xhci_slot_ctx *)(ctx->bytes + CTX_SIZE(readl(&ctrl->hccr->cr_hccparams)));
 }
 
 /**
@@ -788,7 +788,7 @@ struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_ctrl *ctrl,
 		ep_index++;
 
 	return (struct xhci_ep_ctx *)(ctx->bytes +
-								  (ep_index * CTX_SIZE(xhci_readl(&ctrl->hccr->cr_hccparams))));
+								  (ep_index * CTX_SIZE(readl(&ctrl->hccr->cr_hccparams))));
 }
 
 /**

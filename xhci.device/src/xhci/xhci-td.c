@@ -28,7 +28,7 @@ struct xhci_td
     BOOL deadline_active;      /* true if deadline_us is valid */
     ULONG deadline_us;         /* absolute deadline in usec, 0 means no timeout */
     BOOL is_rt_iso;            /* true if this TD is part of RT ISO pipeline */
-    UWORD trb_count;    /* number of TRBs consumed by this TD */
+    UWORD trb_count;           /* number of TRBs consumed by this TD */
     dma_addr_t *trb_addrs;     /* DMA addresses for every TRB in this TD */
 };
 
@@ -67,7 +67,7 @@ BOOL xhci_td_is_empty(TransferDescriptorList *td_list)
 
     BOOL is_empty;
     ObtainSemaphore(&td_list->semaphore);
-    is_empty = ( td_list->list.mlh_TailPred == (struct MinNode *)&td_list->list );
+    is_empty = (td_list->list.mlh_TailPred == (struct MinNode *)&td_list->list);
     ReleaseSemaphore(&td_list->semaphore);
     return is_empty;
 }
@@ -136,11 +136,11 @@ static struct xhci_td *td_create(TransferDescriptorList *td_list,
 
     /*
      * This is a hack for abortio()...
-     * We'll put in the TD pointer into DriverPrivate1 so that abortio can find it later.
+     * We'll put in the TD pointer into DriverPrivate2 so that abortio can find it later.
      */
-    io_req->iouh_Req.io_Message.mn_Node.ln_Pred = NULL;
-    if (io_req->iouh_DriverPrivate1 != (APTR)0xDEAD001)
-        io_req->iouh_DriverPrivate1 = (APTR)td;
+    io_req->iouh_DriverPrivate1 = (APTR)((ULONG)io_req->iouh_DriverPrivate1 | REQ_ON_RING);
+    if (!((ULONG)io_req->iouh_DriverPrivate1 & REQ_INTERNAL))
+        io_req->iouh_DriverPrivate2 = (APTR)td;
 
     td->deadline_active = (timeout_ms != 0);
     td->deadline_us = get_time() + timeout_ms * 1000UL;
@@ -296,7 +296,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
             if (td->is_rt_iso)
                 FreeVecPooled(td_list->memoryPool, td->req);
             else
-                io_reply_failed(td->req, io_Error);
+                xhci_udev_io_reply_failed(td->req, io_Error);
         }
         xhci_td_free(td_list, td);
     }
@@ -315,22 +315,20 @@ void xhci_td_abort_req(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io)
 {
     Forbid();
 
-    /* If the IO was not quick and is of type message (not handled yet or in process), abord it and remove from queue.
-     * The TX task clears ln_Pred to indicate the request is already on TX ring and can't be cancelled. */
+    /* If the IO was not quick and is of type message (not handled yet or in process), abord it and remove from queue. */
     if ((io->iouh_Req.io_Flags & IOF_QUICK) == 0 && io->iouh_Req.io_Message.mn_Node.ln_Type == NT_MESSAGE)
     {
-        if (io->iouh_Req.io_Message.mn_Node.ln_Pred != NULL)
+        if (!((ULONG)(io->iouh_DriverPrivate1) & REQ_ON_RING))
             Remove(&io->iouh_Req.io_Message.mn_Node);
-        else if (io->iouh_DriverPrivate1 != NULL && io->iouh_DriverPrivate1 != (APTR)0xDEAD001)
+        else if (!((ULONG)io->iouh_DriverPrivate1 & REQ_INTERNAL))
         {
-            struct xhci_td *td = (struct xhci_td *)io->iouh_DriverPrivate1;
+            struct xhci_td *td = (struct xhci_td *)io->iouh_DriverPrivate2;
             td->req = NULL; /* prevent completion */
             if (io->iouh_Data)
                 xhci_dma_unmap(ctrl, (dma_addr_t)io->iouh_Data, io->iouh_Length);
             // Poseidon is not aware of RT ISO internal requests
         }
-        io->iouh_Req.io_Error = IOERR_ABORTED;
-        ReplyMsg(&io->iouh_Req.io_Message);
+        xhci_udev_io_reply_failed(io, IOERR_ABORTED);
     }
     Permit();
 }

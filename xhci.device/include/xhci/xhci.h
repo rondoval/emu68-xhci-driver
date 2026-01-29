@@ -1120,18 +1120,6 @@ struct xhci_virt_device
 	struct xhci_virt_ep eps[31];
 };
 
-/* TODO: copied from ehci.h - can be refactored? */
-/* xHCI spec says all registers are little endian */
-static inline unsigned int xhci_readl(uint32_t volatile *regs)
-{
-	return readl(regs);
-}
-
-static inline void xhci_writel(uint32_t volatile *regs, const unsigned int val)
-{
-	writel(val, regs);
-}
-
 /*
  * Registers should always be accessed with double word or quad word accesses.
  * Some xHCI implementations may support 64-bit address pointers.  Registers
@@ -1283,10 +1271,11 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl,
 					struct xhci_container_ctx *out_ctx);
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
 void xhci_update_hub_tt(struct usb_device *udev);
-int xhci_bulk_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
-int xhci_int_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
-int xhci_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
-int xhci_rt_iso_tx(struct usb_device *udev, struct IOUsbHWReq *io, BOOL defer_doorbell, struct xhci_giveback_info *giveback);
+int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
+				  unsigned int timeout_ms,
+				  u32 trb_type_bits, BOOL enable_short_packet,
+				  BOOL defer_doorbell,
+				  struct xhci_giveback_info *deferred_giveback);
 void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info *giveback);
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 

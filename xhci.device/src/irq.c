@@ -18,27 +18,25 @@
 
 static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 {
-	u32 iman = xhci_readl(&ctrl->ir_set->irq_pending);
-	xhci_writel(&ctrl->ir_set->irq_pending,
-		       ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman));
+	u32 iman = readl(&ctrl->ir_set->irq_pending);
+	writel(ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman),&ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
-	u32 iman = xhci_readl(&ctrl->ir_set->irq_pending);
-	xhci_writel(&ctrl->ir_set->irq_pending,
-		       ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman));
+	u32 iman = readl(&ctrl->ir_set->irq_pending);
+	writel(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman),&ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
 {
 	KprintfH("[xhci] %s: %s CMD_EIE | CMD_HSEIE\n", __func__, enable ? "enabling" : "disabling");
-	u32 cmd = xhci_readl(&ctrl->hcor->or_usbcmd);
+	u32 cmd = readl(&ctrl->hcor->or_usbcmd);
 	if (enable)
 		cmd |= (CMD_EIE | CMD_HSEIE);
 	else
 		cmd &= ~(CMD_EIE | CMD_HSEIE);
-	xhci_writel(&ctrl->hcor->or_usbcmd, cmd);
+	writel(cmd, &ctrl->hcor->or_usbcmd);
 }
 
 static ULONG xhci_intx_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *unit asm("a1"), ULONG vector asm("d0"))
@@ -47,7 +45,7 @@ static ULONG xhci_intx_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *
 	(void)vector;
 
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	ULONG status = xhci_readl(&ctrl->hcor->or_usbsts) & XHCI_IRQ_ACK_MASK;
+	ULONG status = readl(&ctrl->hcor->or_usbsts) & XHCI_IRQ_ACK_MASK;
 
 	if (!status)
 		return 0;
@@ -57,7 +55,7 @@ static ULONG xhci_intx_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *
 		Kprintf("[xhci] %s: fatal status interrupt (USBSTS=0x%08lx)\n", __func__, status);
 	}
 
-	xhci_writel(&ctrl->hcor->or_usbsts, status & XHCI_IRQ_ACK_MASK);
+	writel(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
 	xhci_irq_disable_runtime(ctrl);
 
 	if(unit->xhci_ctrl->pci_dev->msi.enabled)

@@ -21,7 +21,6 @@
 
 #include <compat.h>
 #include <debug.h>
-#include <exec/semaphores.h>
 
 #include <xhci/usb.h>
 #include <devices/usbhardware.h>
@@ -29,7 +28,6 @@
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-events.h>
 #include <xhci/xhci-debug.h>
-#include <xhci/xhci-td.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-usb.h>
 #include <xhci/xhci-endpoint.h>
@@ -370,12 +368,12 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     BOOL halted = (comp == COMP_STALL || comp == COMP_BABBLE || comp == COMP_SPLIT_ERR || comp == COMP_TX_ERR);
     if (halted)
     {
-        io_reply_failed(req, status);
+        xhci_udev_io_reply_failed(req, status);
         xhci_reset_ep(udev, xhci_ep_index_from_parts(req->iouh_Endpoint, req->iouh_Dir));
         return;
     }
 
-    io_reply_data(udev, req, status, act_len);
+    xhci_udev_io_reply_data(udev, req, status, act_len);
     if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER && comp == COMP_SHORT_TX)
         xhci_ep_set_receiving_control_short(ep_ctx);
     else 

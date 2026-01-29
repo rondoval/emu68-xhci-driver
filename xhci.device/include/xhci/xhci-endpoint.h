@@ -25,7 +25,7 @@ struct ep_context *xhci_ep_get_context(struct usb_device *udev, int endpoint);
 
 void xhci_ep_set_failed(struct ep_context *ep_ctx);
 void xhci_ep_set_idle(struct ep_context *ep_ctx);
-void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct IOUsbHWReq *req, enum ep_state state, dma_addr_t *trb_addrs, ULONG timeout_ms, unsigned int trb_count);
+void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct IOUsbHWReq *req, dma_addr_t *trb_addrs, ULONG timeout_ms, unsigned int trb_count);
 void xhci_ep_set_receiving_control_short(struct ep_context *ep_ctx);
 void xhci_ep_set_resetting(struct ep_context *ep_ctx);
 void xhci_ep_set_aborting(struct ep_context *ep_ctx);

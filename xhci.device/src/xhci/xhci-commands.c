@@ -4,8 +4,6 @@
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>
-#include <xhci/xhci-events.h>
-#include <xhci/xhci-td.h>
 #include <xhci/xhci-usb.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-udev.h>
@@ -127,7 +125,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     AddTailMinList(&ctrl->pending_commands, (struct MinNode *)pending_cmd);
 
     /* Ring the command ring doorbell */
-    xhci_writel(&ctrl->dba->doorbell[0], DB_VALUE_HOST);
+    writel(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
 }
 
 /*
@@ -189,7 +187,7 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
         if (endpoint != 0 && ep_type != USB_ENDPOINT_XFER_CONTROL)
         {
             /* Dispatch deferred device-side CLEAR_FEATURE after host recovery. */
-            usb_glue_clear_feature_halt_internal(cmd->udev, ep_index);
+            xhci_udev_clear_feature_halt(cmd->udev, ep_index);
         }
 
         /* For control/bulk endpoints behind a TT, clear the TT buffer on the hub. */
@@ -197,7 +195,7 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
         {
             if (ep_type == USB_ENDPOINT_XFER_CONTROL || ep_type == USB_ENDPOINT_XFER_BULK)
             {
-                usb_glue_clear_tt_buffer_internal(cmd->udev, ep_index, ep_type);
+                xhci_udev_clear_tt_buffer(cmd->udev, ep_index, ep_type);
             }
         }
     }
@@ -300,7 +298,7 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
     if (GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
     {
         Kprintf("ERROR: Enable Slot command failed.\n");
-        io_reply_failed(cmd->req, UHIOERR_HOSTERROR);
+        xhci_udev_io_reply_failed(cmd->req, UHIOERR_HOSTERROR);
         return;
     }
 
@@ -316,7 +314,7 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
          * the slot in default. So, issue Disable Slot command now.
          */
         Kprintf("Could not allocate xHCI USB device data structures\n");
-        io_reply_failed(cmd->req, UHIOERR_OUTOFMEMORY);
+        xhci_udev_io_reply_failed(cmd->req, UHIOERR_OUTOFMEMORY);
         return;
     }
 
@@ -345,7 +343,7 @@ static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *
 
     if (cmd->udev)
     {
-        usb_glue_free_udev_slot(cmd->udev);
+        xhci_udev_free(cmd->udev);
     }
 }
 
@@ -399,7 +397,7 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
          */
         xhci_disable_slot(cmd->udev);
         if (cmd->req)
-            io_reply_failed(cmd->req, err);
+            xhci_udev_io_reply_failed(cmd->req, err);
         return;
     }
 
@@ -431,13 +429,13 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
         if (is_set_address)
         {
             /* Upper layer will migrate the context based on Poseidon address. */
-            io_reply_data(cmd->udev, cmd->req, UHIOERR_NO_ERROR, 0);
+            xhci_udev_io_reply_data(cmd->udev, cmd->req, UHIOERR_NO_ERROR, 0);
         }
         else
         {
-            int ret = usb_glue_ctrl_after_address(cmd->udev, cmd->req);
+            int ret = xhci_udev_send_ctrl(cmd->udev, cmd->req);
             if (ret != UHIOERR_NO_ERROR)
-                io_reply_failed(cmd->req, ret);
+                xhci_udev_io_reply_failed(cmd->req, ret);
         }
     }
 }
@@ -661,7 +659,7 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     {
         Kprintf("ERROR: no virt_dev for slot %ld\n", (ULONG)slot_id);
         if (req)
-            io_reply_failed(req, UHIOERR_OUTOFMEMORY);
+            xhci_udev_io_reply_failed(req, UHIOERR_OUTOFMEMORY);
         return;
     }
 
@@ -674,7 +672,7 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
             KprintfH("slot %ld already addressed (dev_state=%08lx), skipping.\n",
                      (ULONG)slot_id, (ULONG)LE32(sc->dev_state));
             if (req)
-                io_reply_data(udev, req, UHIOERR_NO_ERROR, 0);
+                xhci_udev_io_reply_data(udev, req, UHIOERR_NO_ERROR, 0);
             return;
         }
     }

@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0+
 #ifdef __INTELLISENSE__
-#include <clib/timer_protos.h>
 #include <clib/exec_protos.h>
 #include <clib/utility_protos.h>
 #else
-#include <proto/timer.h>
 #include <proto/exec.h>
 #include <proto/utility.h>
 #endif
@@ -17,8 +15,6 @@
 #include <config.h>
 #include <device.h>
 #include <debug.h>
-#include <compat.h>
-#include <pci.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-endpoint.h>
@@ -329,7 +325,8 @@ static inline int Do_UHCMD_USBOPER(struct IOUsbHWReq *io)
  */
 static inline int Do_UHCMD_XFER(struct IOUsbHWReq *io)
 {
-    int result = dispatch_request(io);
+    io->iouh_DriverPrivate1 = 0; // clear any flags, just in case
+    int result = xhci_udev_send(io);
     if (result != UHIOERR_NO_ERROR)
     {
         io->iouh_Req.io_Error = result;
@@ -347,7 +344,7 @@ static inline int Do_UHCMD_ADDISOHANDLER(struct IOUsbHWReq *io)
     if (!io->iouh_Data)
         goto badparams;
 
-    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
     if (!udev)
         goto badparams;
 
@@ -376,7 +373,7 @@ static inline int Do_UHCMD_REMISOHANDLER(struct IOUsbHWReq *io)
     if (!io->iouh_Data)
         goto badparams;
 
-    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
     if (!udev)
         goto badparams;
 
@@ -407,7 +404,7 @@ static inline int Do_UHCMD_STARTRTISO(struct IOUsbHWReq *io)
              (ULONG)io->iouh_Frame,
              (ULONG)io->iouh_Interval,
              (ULONG)io->iouh_Length);
-    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
     if (!udev)
     {
         Kprintf("bad params\n");
@@ -431,7 +428,7 @@ static inline int Do_UHCMD_STOPRTISO(struct IOUsbHWReq *io)
 
     KprintfH("RT ISO stop requested addr=%ld ep=%ld\n",
              (LONG)io->iouh_DevAddr, (LONG)(io->iouh_Endpoint & 0x0F));
-    struct usb_device *udev = get_or_init_udev(unit, io->iouh_DevAddr);
+    struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
     if (!udev)
     {
         Kprintf("bad params\n");
