@@ -267,10 +267,15 @@ struct IOUsbHWReq *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_
 
     ReleaseSemaphore(&td_list->semaphore);
 
-    if (req)
+    if (req && req->iouh_Length > 0)
     {
-        xhci_dma_unmap(td_list->ctrl, (dma_addr_t)req->iouh_Data, req->iouh_Length);
-        xhci_inval_cache((uintptr_t)req->iouh_Data, (ULONG)req->iouh_Length);
+        BOOL need_data;
+        if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+            need_data = (req->iouh_SetupData.bmRequestType & USB_DIR_IN) != 0;
+        else
+            need_data = (req->iouh_Dir == UHDIR_IN);
+
+        xhci_dma_unmap(td_list->ctrl, (dma_addr_t)req->iouh_Data, req->iouh_Length, need_data);
     }
 
     return req;
@@ -290,7 +295,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
         if (td->req)
         {
             if (td->req->iouh_Data)
-                xhci_dma_unmap(td_list->ctrl, (dma_addr_t)td->req->iouh_Data, td->length);
+                xhci_dma_unmap(td_list->ctrl, (dma_addr_t)td->req->iouh_Data, td->length, FALSE);
             if (td->is_rt_iso && td->req->iouh_Dir == UHDIR_IN && td->req->iouh_Data)
                 FreeVecPooled(td_list->memoryPool, td->req->iouh_Data);
             if (td->is_rt_iso)
@@ -325,7 +330,7 @@ void xhci_td_abort_req(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io)
             struct xhci_td *td = (struct xhci_td *)io->iouh_DriverPrivate2;
             td->req = NULL; /* prevent completion */
             if (io->iouh_Data)
-                xhci_dma_unmap(ctrl, (dma_addr_t)io->iouh_Data, io->iouh_Length);
+                xhci_dma_unmap(ctrl, (dma_addr_t)io->iouh_Data, io->iouh_Length, FALSE);
             // Poseidon is not aware of RT ISO internal requests
         }
         xhci_udev_io_reply_failed(io, IOERR_ABORTED);

@@ -37,63 +37,64 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, size_t size)
+dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, ULONG size, BOOL copy)
 {
-	// TODO this is wrong, move mapping up, do it on Poseidon buffers in command handling
-	if (!ctrl || !addr || size == 0)
-		return (dma_addr_t)(uintptr_t)addr;
+	if (((ULONG)addr & ARCH_DMA_MINALIGN_MASK) == 0)
+	{
+		xhci_flush_cache(addr, size);
+		return (dma_addr_t)addr;
+	}
 
-	if ((((uintptr_t)addr) & ARCH_DMA_MINALIGN_MASK) == 0)
-		return (dma_addr_t)(uintptr_t)addr;
-
-	if (!ctrl->memoryPool)
-		return (dma_addr_t)(uintptr_t)addr;
-
-	size_t alloc_len = ALIGN(size, ARCH_DMA_MINALIGN);
+	if (!ctrl || !ctrl->memoryPool || !addr || size == 0)
+		return (dma_addr_t)addr;
 	struct xhci_dma_bounce *bounce = AllocVecPooled(ctrl->memoryPool, sizeof(*bounce));
 	if (!bounce)
 	{
 		Kprintf("failed to allocate metadata for %lx len=%ld\n", (ULONG)addr, (LONG)size);
-		return (dma_addr_t)(uintptr_t)addr;
+		return (dma_addr_t)addr;
 	}
 
+	ULONG alloc_len = ALIGN(size, ARCH_DMA_MINALIGN);
 	void *aligned = memalign(ctrl->memoryPool, ARCH_DMA_MINALIGN, alloc_len);
 	if (!aligned)
 	{
 		Kprintf("failed to allocate bounce buffer for %lx len=%ld\n", (ULONG)addr, (LONG)size);
 		FreeVecPooled(ctrl->memoryPool, bounce);
-		return (dma_addr_t)(uintptr_t)addr;
+		return (dma_addr_t)addr;
 	}
 
-	CopyMem(addr, aligned, size);
-	xhci_flush_cache((uintptr_t)aligned, alloc_len);
+	if (copy)
+	{
+		CopyMem(addr, aligned, size);
+	}
+	xhci_flush_cache(aligned, alloc_len);
 
 	bounce->orig = addr;
 	bounce->bounce = aligned;
-	bounce->size = size;
-	bounce->alloc_len = alloc_len;
 	bounce->next = ctrl->dma_bounce_list;
 	ctrl->dma_bounce_list = bounce;
 
-	return (dma_addr_t)(uintptr_t)aligned;
+	return (dma_addr_t)aligned;
 }
 
-void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, size_t size)
+void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, ULONG size, BOOL copy)
 {
 	if (!ctrl || addr == 0)
 		return;
-
-	(void)size;
 
 	struct xhci_dma_bounce **link = &ctrl->dma_bounce_list;
 	while (*link)
 	{
 		struct xhci_dma_bounce *node = *link;
-		if ((dma_addr_t)(uintptr_t)node->orig == addr)
+		if ((dma_addr_t)node->orig == addr)
 		{
-			xhci_inval_cache((uintptr_t)node->bounce, node->alloc_len);
-			if (node->size)
-				CopyMem(node->bounce, node->orig, node->size);
+			if (copy)
+			{
+				xhci_inval_cache(node->bounce, size);
+				if (size)
+					CopyMem(node->bounce, (APTR)addr, size);
+			}
+
 			memalign_free(ctrl->memoryPool, node->bounce);
 			*link = node->next;
 			FreeVecPooled(ctrl->memoryPool, node);
@@ -101,6 +102,8 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, size_t size)
 		}
 		link = &(*link)->next;
 	}
+
+	xhci_inval_cache((APTR)addr, size);
 }
 
 /**

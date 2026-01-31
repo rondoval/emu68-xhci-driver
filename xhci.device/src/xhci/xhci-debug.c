@@ -81,9 +81,9 @@ static const char *ep_type_name(ULONG type)
     }
 }
 
-void xhci_dump_slot_ctx(const char *tag, const struct xhci_slot_ctx *slot_ctx)
+void xhci_dump_slot_ctx(const char *tag, struct xhci_slot_ctx *slot_ctx)
 {
-    xhci_inval_cache((uintptr_t)slot_ctx, sizeof(struct xhci_slot_ctx));
+    xhci_inval_cache(slot_ctx, sizeof(struct xhci_slot_ctx));
     const char *pfx = tag ? tag : "";
 
     if (!slot_ctx)
@@ -145,9 +145,9 @@ void xhci_dump_slot_ctx(const char *tag, const struct xhci_slot_ctx *slot_ctx)
 
 void xhci_dump_ep_ctx(const char *tag,
                       UBYTE ep_index,
-                      const struct xhci_ep_ctx *ep_ctx)
+                      struct xhci_ep_ctx *ep_ctx)
 {
-    xhci_inval_cache((uintptr_t)ep_ctx, sizeof(struct xhci_ep_ctx));
+    xhci_inval_cache(ep_ctx, sizeof(struct xhci_ep_ctx));
     const char *pfx = tag ? tag : "";
 
     if (!ep_ctx)

@@ -306,7 +306,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 		if (!change_bits)
 			continue;
 
-		size_t index = (port + 1) >> 3;
+		u32 index = (port + 1) >> 3;
 		if (index >= actual_len)
 			continue;
 

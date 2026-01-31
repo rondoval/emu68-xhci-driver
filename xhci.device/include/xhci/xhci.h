@@ -16,6 +16,12 @@
 #ifndef HOST_XHCI_H_
 #define HOST_XHCI_H_
 
+#ifdef __INTELLISENSE__
+#include <clib/exec_protos.h>
+#else
+#include <proto/exec.h>
+#endif
+
 #include <compat.h>
 #include <pci_types.h>
 #include <devices/usbhardware.h>
@@ -495,7 +501,6 @@ struct xhci_container_ctx
 
 	int size;
 	u8 *bytes;
-	dma_addr_t dma;
 };
 
 /**
@@ -697,8 +702,6 @@ struct xhci_device_context_array
 {
 	/* 64-bit device addresses; we only write 32-bit addresses */
 	__le64 dev_context_ptrs[MAX_HC_SLOTS];
-	/* private xHCD pointers */
-	dma_addr_t dma;
 };
 /* TODO: write function to set the 64-bit device DMA address */
 /*
@@ -1025,7 +1028,6 @@ struct xhci_segment
 	union xhci_trb *trbs;
 	/* private to HCD */
 	struct xhci_segment *next;
-	dma_addr_t dma;
 };
 
 struct xhci_ring
@@ -1057,8 +1059,6 @@ struct xhci_erst
 {
 	struct xhci_erst_entry *entries;
 	unsigned int num_entries;
-	/* xhci->event_ring keeps track of segment dma addresses */
-	dma_addr_t erst_dma_addr;
 	/* Num entries the ERST can contain */
 	unsigned int erst_size;
 };
@@ -1217,10 +1217,8 @@ static inline void xhci_writeq(__le64 volatile *regs, const u64 val)
 struct xhci_dma_bounce
 {
 	struct xhci_dma_bounce *next;
-	void *orig;
-	void *bounce;
-	size_t size;
-	size_t alloc_len;
+	APTR orig;
+	APTR bounce;
 };
 
 struct xhci_ctrl
@@ -1255,7 +1253,6 @@ struct xhci_ctrl
 
 #define xhci_to_dev(_ctrl) NULL
 
-dma_addr_t xhci_trb_virt_to_dma(struct xhci_segment *seg, union xhci_trb *trb);
 struct xhci_input_control_ctx *xhci_get_input_control_ctx(struct xhci_container_ctx *ctx);
 struct xhci_slot_ctx *xhci_get_slot_ctx(struct xhci_ctrl *ctrl,
 										struct xhci_container_ctx *ctx);
@@ -1272,21 +1269,28 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl,
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
 void xhci_update_hub_tt(struct usb_device *udev);
 int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
-				  unsigned int timeout_ms,
-				  u32 trb_type_bits, BOOL enable_short_packet,
-				  BOOL defer_doorbell,
-				  struct xhci_giveback_info *deferred_giveback);
+				   unsigned int timeout_ms,
+				   u32 trb_type_bits, BOOL enable_short_packet,
+				   BOOL defer_doorbell,
+				   struct xhci_giveback_info *deferred_giveback);
 void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info *giveback);
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 
+inline void xhci_flush_cache(APTR addr, ULONG len)
+{
+	CachePreDMA(addr, &len, 0);
+}
 
-void xhci_flush_cache(uintptr_t addr, u32 type_len);
-void xhci_inval_cache(uintptr_t addr, u32 type_len);
+inline void xhci_inval_cache(APTR addr, ULONG len)
+{
+	CachePostDMA(addr, &len, 0);
+}
+
 void xhci_cleanup(struct xhci_ctrl *ctrl);
-dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr,
-						size_t size);
+dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, APTR addr,
+						ULONG size, BOOL copy);
 void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr,
-					size_t size);
+					ULONG size, BOOL copy);
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 								  BOOL link_trbs);
 int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);

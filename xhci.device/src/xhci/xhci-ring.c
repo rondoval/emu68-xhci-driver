@@ -31,24 +31,6 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-/*
- * Returns zero if the TRB isn't in this segment, otherwise it returns the DMA
- * address of the TRB.
- */
-dma_addr_t xhci_trb_virt_to_dma(struct xhci_segment *seg,
-								union xhci_trb *trb)
-{
-	unsigned long segment_offset;
-
-	if (!seg || !trb || trb < seg->trbs)
-		return 0;
-	/* offset in TRBs */
-	segment_offset = trb - seg->trbs;
-	if (segment_offset >= TRBS_PER_SEGMENT)
-		return 0;
-	return seg->dma + (segment_offset * sizeof(*trb));
-}
-
 /**
  * Is this TRB a link TRB or was the last TRB the last TRB in this event ring
  * segment?  I.e. would the updated event TRB pointer step off the end of the
@@ -151,7 +133,7 @@ static void inc_enq(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
 			next->link.control |= LE32(chain);
 
 			next->link.control ^= LE32(TRB_CYCLE);
-			xhci_flush_cache((uintptr_t)next,
+			xhci_flush_cache(next,
 							 sizeof(union xhci_trb));
 		}
 		/* Toggle the cycle bit after the last ring segment. */
@@ -216,7 +198,6 @@ dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
 					 BOOL more_trbs_coming, unsigned int *trb_fields)
 {
 	struct xhci_generic_trb *trb;
-	dma_addr_t addr;
 	int i;
 
 	trb = &ring->enqueue->generic;
@@ -224,13 +205,11 @@ dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
 	for (i = 0; i < 4; i++)
 		trb->field[i] = LE32(trb_fields[i]);
 
-	xhci_flush_cache((uintptr_t)trb, sizeof(struct xhci_generic_trb));
-
-	addr = xhci_trb_virt_to_dma(ring->enq_seg, (union xhci_trb *)trb);
+	xhci_flush_cache(trb, sizeof(struct xhci_generic_trb));
 
 	inc_enq(ctrl, ring, more_trbs_coming);
 
-	return addr;
+	return (dma_addr_t)trb;
 }
 
 /**
@@ -281,7 +260,7 @@ int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
 
 		next->link.control ^= LE32(TRB_CYCLE);
 
-		xhci_flush_cache((uintptr_t)next, sizeof(union xhci_trb));
+		xhci_flush_cache(next, sizeof(union xhci_trb));
 
 		/* Toggle the cycle bit after the last ring segment. */
 		if (last_trb_on_last_seg(ctrl, ep_ring, ep_ring->enq_seg, next))
@@ -374,12 +353,12 @@ static void prime_first_trb(int start_cycle, struct xhci_generic_trb *start_trb)
 	else
 		start_trb->field[3] &= LE32(~TRB_CYCLE);
 
-	xhci_flush_cache((uintptr_t)start_trb, sizeof(struct xhci_generic_trb));
+	xhci_flush_cache(start_trb, sizeof(struct xhci_generic_trb));
 }
 
 static void giveback_first_trb(struct usb_device *udev, int ep_index,
-				   int start_cycle,
-				   struct xhci_generic_trb *start_trb)
+							   int start_cycle,
+							   struct xhci_generic_trb *start_trb)
 {
 	struct xhci_ctrl *ctrl = udev->controller;
 
@@ -397,17 +376,17 @@ void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info
 		return;
 
 	giveback_first_trb(udev, giveback->ep_index, giveback->start_cycle,
-			      giveback->start_trb);
+					   giveback->start_trb);
 }
 
 /*
  * Common helper for bulk/int/isoc rings.
  */
 int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
-				  unsigned int timeout_ms,
-				  u32 trb_type_bits, BOOL enable_short_packet,
-				  BOOL defer_doorbell,
-				  struct xhci_giveback_info *deferred_giveback)
+				   unsigned int timeout_ms,
+				   u32 trb_type_bits, BOOL enable_short_packet,
+				   BOOL defer_doorbell,
+				   struct xhci_giveback_info *deferred_giveback)
 {
 	int num_trbs = 0;
 	struct xhci_generic_trb *start_trb;
@@ -445,10 +424,10 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		KprintfH("Cannot submit bulk/isoc/int transfer, ep in state %d\n", cur_state);
 		xhci_ep_enqueue(udev_ep_ctx, io);
 		return UHIOERR_NO_ERROR;
-	}	
-	
+	}
+
 	unsigned int ep_index = ep * 2 - ((io->iouh_Dir == UHDIR_IN) ? 0 : 1);
-	u64 buf_64 = xhci_dma_map(ctrl, io->iouh_Data, length);
+	u64 buf_64 = xhci_dma_map(ctrl, io->iouh_Data, length, TRUE); // io->iouh_Dir == UHDIR_OUT);
 	dma_addr_t last_transfer_trb_addr;
 
 	virt_dev = ctrl->devs[slot_id];
@@ -462,7 +441,7 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		deferred_giveback->start_cycle = 0;
 	}
 
-	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes,
+	xhci_inval_cache(virt_dev->out_ctx->bytes,
 					 virt_dev->out_ctx->size);
 
 	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
@@ -504,8 +483,8 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	if (!ring_has_room(ring, udev_ep_ctx, num_trbs + 1))
 	{
 		KprintfH("Ring full ep=%ld needed=%ld\n",
-			   (LONG)ep,
-			   (LONG)num_trbs + 1);
+				 (LONG)ep,
+				 (LONG)num_trbs + 1);
 		xhci_ep_enqueue(udev_ep_ctx, io);
 		return UHIOERR_NO_ERROR;
 	}
@@ -548,7 +527,7 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 
 	if (length > 0)
 		/* flush the buffer before handing it to the controller */
-		xhci_flush_cache((ULONG)io->iouh_Data, length);
+		xhci_flush_cache(io->iouh_Data, length);
 
 	/* Queue each TRB, chaining when necessary and marking the final one IOC. */
 	/* Queue the first TRB, even if it's zero-length. */
@@ -703,7 +682,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		}
 	}
 
-	xhci_inval_cache((uintptr_t)virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+	xhci_inval_cache(virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
 
 	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
 
@@ -807,16 +786,16 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 
 	if (length > 0)
 	{
-		if (io->iouh_SetupData.bmRequestType & USB_DIR_IN)
+		BOOL is_direction_in = (io->iouh_SetupData.bmRequestType & USB_DIR_IN) != 0;
+		if (is_direction_in)
 			field |= TRB_DIR_IN;
-		buf_64 = xhci_dma_map(ctrl, io->iouh_Data, length);
+		buf_64 = xhci_dma_map(ctrl, io->iouh_Data, length, !is_direction_in);
 
 		trb_fields[0] = lower_32_bits(buf_64);
 		trb_fields[1] = upper_32_bits(buf_64);
 		trb_fields[2] = length_field;
 		trb_fields[3] = field | ep_ring->cycle_state;
 
-		xhci_flush_cache((uintptr_t)buf_64, length); // TODO dma_map should not realocate buffer... then revert to buffer
 		KprintfH("data TRB fields: %08lx %08lx %08lx %08lx\n",
 				 (ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
 		ULONG data_trb = queue_trb(ctrl, ep_ring, TRUE, trb_fields);

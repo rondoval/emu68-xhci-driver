@@ -72,14 +72,11 @@ static const ep_state_handler ep_state_dispatch[] = {
  */
 inline static void xhci_acknowledge_event(struct xhci_ctrl *ctrl)
 {
-    dma_addr_t deq;
-
     /* Advance our dequeue pointer to the next event */
     inc_deq(ctrl, ctrl->event_ring);
 
     /* Inform the hardware */
-    deq = xhci_trb_virt_to_dma(ctrl->event_ring->deq_seg, ctrl->event_ring->dequeue);
-    xhci_writeq(&ctrl->ir_set->erst_dequeue, deq | ERST_EHB);
+    xhci_writeq(&ctrl->ir_set->erst_dequeue, (dma_addr_t)ctrl->event_ring->dequeue | ERST_EHB);
 }
 
 /* Endpoint event dispatcher
@@ -117,7 +114,7 @@ static void dispatch_ep_event(struct usb_device *udev, union xhci_trb *event)
  */
 static BOOL event_ready(struct xhci_ctrl *ctrl)
 {
-    xhci_inval_cache((uintptr_t)ctrl->event_ring->dequeue,
+    xhci_inval_cache(ctrl->event_ring->dequeue,
                      sizeof(union xhci_trb));
 
     union xhci_trb *event = ctrl->event_ring->dequeue;
@@ -219,7 +216,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
             if (xhci_ep_is_expired(ep_ctx))
             {
                 KprintfH("XHCI TD timeout on slot %ld ep %ld\n", (LONG)udev->slot_id, (LONG)ep);
-                //TODO wrong, we need specific ep_index - need to change how we track endpoint contexts
+                // TODO wrong, we need specific ep_index - need to change how we track endpoint contexts
                 xhci_stop_endpoint(udev, ep);
             }
         }
@@ -376,7 +373,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     xhci_udev_io_reply_data(udev, req, status, act_len);
     if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER && comp == COMP_SHORT_TX)
         xhci_ep_set_receiving_control_short(ep_ctx);
-    else 
+    else
         xhci_ep_set_idle(ep_ctx);
 }
 

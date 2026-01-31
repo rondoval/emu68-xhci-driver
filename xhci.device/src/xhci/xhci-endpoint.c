@@ -423,7 +423,6 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct IOUsbHWReq *req, ULONG 
     if (rt_buffer_req.ubr_Buffer)
     {
         ULONG copy_len = min(act_len, rt_buffer_req.ubr_Length);
-        // xhci_inval_cache((uintptr_t)req->iouh_Data, copy_len);
         CopyMem(req->iouh_Data, rt_buffer_req.ubr_Buffer, copy_len);
         rt_buffer_req.ubr_Length = copy_len;
 
@@ -666,7 +665,6 @@ BYTE xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
     }
 
     /* microframe_index is in 125us units; for FS frames use the frame number (divide by 8). */
-    xhci_inval_cache((uintptr_t)&ep_ctx->udev->controller->run_regs->microframe_index, sizeof(UWORD));
     ep_ctx->rt_next_frame = (readl(ep_ctx->udev->controller->run_regs->microframe_index) >> 3) & 0xffff;
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
     xhci_ep_schedule_rt_iso(ep_ctx);
