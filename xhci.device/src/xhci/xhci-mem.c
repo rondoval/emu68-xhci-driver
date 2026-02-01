@@ -168,17 +168,6 @@ static void xhci_free_virt_devices(struct xhci_ctrl *ctrl)
  */
 void xhci_cleanup(struct xhci_ctrl *ctrl)
 {
-	struct xhci_dma_bounce *bounce = ctrl->dma_bounce_list;
-	while (bounce)
-	{
-		struct xhci_dma_bounce *next = bounce->next;
-		if (bounce->bounce)
-			memalign_free(ctrl->memoryPool, bounce->bounce);
-		FreeVecPooled(ctrl->memoryPool, bounce);
-		bounce = next;
-	}
-	ctrl->dma_bounce_list = NULL;
-
 	xhci_ring_free(ctrl, ctrl->event_ring);
 	xhci_ring_free(ctrl, ctrl->cmd_ring);
 	xhci_scratchpad_free(ctrl);

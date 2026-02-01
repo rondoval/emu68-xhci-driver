@@ -26,6 +26,7 @@
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-udev.h>
+#include <devices/usbhardware.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -37,20 +38,20 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, ULONG size, BOOL copy)
+dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy)
 {
+	if (!req)
+		return NULL;
+
+	APTR addr = req->iouh_Data;
+	ULONG size = req->iouh_Length;
+
+	if (!ctrl || !ctrl->memoryPool || !addr || size == 0 || ((ULONG)req->iouh_DriverPrivate1 & REQ_INTERNAL))
+		return (dma_addr_t)addr;
+
 	if (((ULONG)addr & ARCH_DMA_MINALIGN_MASK) == 0)
 	{
 		xhci_flush_cache(addr, size);
-		return (dma_addr_t)addr;
-	}
-
-	if (!ctrl || !ctrl->memoryPool || !addr || size == 0)
-		return (dma_addr_t)addr;
-	struct xhci_dma_bounce *bounce = AllocVecPooled(ctrl->memoryPool, sizeof(*bounce));
-	if (!bounce)
-	{
-		Kprintf("failed to allocate metadata for %lx len=%ld\n", (ULONG)addr, (LONG)size);
 		return (dma_addr_t)addr;
 	}
 
@@ -59,9 +60,10 @@ dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, ULONG size, BOOL cop
 	if (!aligned)
 	{
 		Kprintf("failed to allocate bounce buffer for %lx len=%ld\n", (ULONG)addr, (LONG)size);
-		FreeVecPooled(ctrl->memoryPool, bounce);
 		return (dma_addr_t)addr;
 	}
+
+	req->iouh_DriverPrivate1 = (APTR)((ULONG)req->iouh_DriverPrivate1 | REQ_DMA_MAPPED);
 
 	if (copy)
 	{
@@ -69,41 +71,43 @@ dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, void *addr, ULONG size, BOOL cop
 	}
 	xhci_flush_cache(aligned, alloc_len);
 
-	bounce->orig = addr;
-	bounce->bounce = aligned;
-	bounce->next = ctrl->dma_bounce_list;
-	ctrl->dma_bounce_list = bounce;
-
+	req->iouh_DriverPrivate2 = aligned;
 	return (dma_addr_t)aligned;
 }
 
-void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr, ULONG size, BOOL copy)
+void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy)
 {
-	if (!ctrl || addr == 0)
+	if (!ctrl || !req)
 		return;
 
-	struct xhci_dma_bounce **link = &ctrl->dma_bounce_list;
-	while (*link)
-	{
-		struct xhci_dma_bounce *node = *link;
-		if ((dma_addr_t)node->orig == addr)
-		{
-			if (copy)
-			{
-				xhci_inval_cache(node->bounce, size);
-				if (size)
-					CopyMem(node->bounce, (APTR)addr, size);
-			}
+	APTR addr = req->iouh_Data;
+	ULONG size = req->iouh_Length;
+	if (!addr || size == 0 || ((ULONG)req->iouh_DriverPrivate1 & REQ_INTERNAL))
+		return;
 
-			memalign_free(ctrl->memoryPool, node->bounce);
-			*link = node->next;
-			FreeVecPooled(ctrl->memoryPool, node);
-			return;
-		}
-		link = &(*link)->next;
+	if (!((ULONG)req->iouh_DriverPrivate1 & REQ_DMA_MAPPED))
+	{
+		if (copy)
+			xhci_inval_cache(addr, size);
+		return;
 	}
 
-	xhci_inval_cache((APTR)addr, size);
+	APTR bounce = (APTR)req->iouh_DriverPrivate2;
+	if (!bounce)
+	{
+		Kprintf("No bounce buffer found for unmap of %lx len=%ld\n", (ULONG)addr, (LONG)size);
+		return;
+	}
+
+	if (copy)
+	{
+		xhci_inval_cache(bounce, size);
+		CopyMem(bounce, addr, size);
+	}
+
+	memalign_free(ctrl->memoryPool, bounce);
+	req->iouh_DriverPrivate1 = (APTR)((ULONG)req->iouh_DriverPrivate1 & ~REQ_DMA_MAPPED);
+	req->iouh_DriverPrivate2 = NULL;
 }
 
 /**

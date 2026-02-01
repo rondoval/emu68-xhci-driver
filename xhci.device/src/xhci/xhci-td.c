@@ -253,7 +253,7 @@ struct IOUsbHWReq *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_
         else
             need_data = (req->iouh_Dir == UHDIR_IN);
 
-        xhci_dma_unmap(td_list->ctrl, (dma_addr_t)req->iouh_Data, req->iouh_Length, need_data);
+        xhci_dma_unmap(td_list->ctrl, req, need_data);
     }
 
     return req;
@@ -271,7 +271,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
         if (td->req)
         {
             if (td->req->iouh_Data)
-                xhci_dma_unmap(td_list->ctrl, (dma_addr_t)td->req->iouh_Data, td->length, FALSE);
+                xhci_dma_unmap(td_list->ctrl, td->req, FALSE);
             if (td->is_rt_iso && td->req->iouh_Dir == UHDIR_IN && td->req->iouh_Data)
                 FreeVecPooled(td_list->memoryPool, td->req->iouh_Data);
             if (td->is_rt_iso)

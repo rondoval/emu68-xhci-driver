@@ -1214,13 +1214,6 @@ static inline void xhci_writeq(__le64 volatile *regs, const u64 val)
 /* true: Controller Not Ready to accept doorbell or op reg writes after reset */
 #define XHCI_STS_CNR (1 << 11)
 
-struct xhci_dma_bounce
-{
-	struct xhci_dma_bounce *next;
-	APTR orig;
-	APTR bounce;
-};
-
 struct xhci_ctrl
 {
 	struct xhci_hccr *hccr; /* R/O registers, not need for volatile */
@@ -1240,7 +1233,6 @@ struct xhci_ctrl
 	struct IOUsbHWReq *root_int_req;
 	u16 hci_version;
 	int page_size;
-	struct xhci_dma_bounce *dma_bounce_list;
 
 	APTR memoryPool;
 	struct pci_device *pci_dev;
@@ -1287,10 +1279,8 @@ inline void xhci_inval_cache(APTR addr, ULONG len)
 }
 
 void xhci_cleanup(struct xhci_ctrl *ctrl);
-dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, APTR addr,
-						ULONG size, BOOL copy);
-void xhci_dma_unmap(struct xhci_ctrl *ctrl, dma_addr_t addr,
-					ULONG size, BOOL copy);
+dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy);
+void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy);
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 								  BOOL link_trbs);
 int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);

@@ -8,6 +8,7 @@
 #define REQ_INTERNAL 0x1 /* Internal request, free instead of reply */
 #define REQ_ENQUEUED 0x2 /* Request was already enqueued to EP */
 #define REQ_ON_RING 0x4  /* Request is currently on the transfer ring */
+#define REQ_DMA_MAPPED 0x8 /* Request data buffer is DMA mapped */
 
 
 struct XHCIUnit;

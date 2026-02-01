@@ -427,7 +427,7 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	}
 
 	unsigned int ep_index = ep * 2 - ((io->iouh_Dir == UHDIR_IN) ? 0 : 1);
-	u64 buf_64 = xhci_dma_map(ctrl, io->iouh_Data, length, TRUE); // io->iouh_Dir == UHDIR_OUT);
+	u64 buf_64 = xhci_dma_map(ctrl, io, io->iouh_Dir == UHDIR_OUT);
 	dma_addr_t last_transfer_trb_addr;
 
 	virt_dev = ctrl->devs[slot_id];
@@ -789,7 +789,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		BOOL is_direction_in = (io->iouh_SetupData.bmRequestType & USB_DIR_IN) != 0;
 		if (is_direction_in)
 			field |= TRB_DIR_IN;
-		buf_64 = xhci_dma_map(ctrl, io->iouh_Data, length, !is_direction_in);
+		buf_64 = xhci_dma_map(ctrl, io, !is_direction_in);
 
 		trb_fields[0] = lower_32_bits(buf_64);
 		trb_fields[1] = upper_32_bits(buf_64);
