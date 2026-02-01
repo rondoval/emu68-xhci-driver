@@ -10,7 +10,6 @@ typedef struct MinList IOReqList;
 
 typedef struct {
     struct MinList list;
-    struct SignalSemaphore semaphore;
     struct xhci_ctrl *ctrl;
     APTR memoryPool;
     ULONG queued_trbs;
@@ -32,7 +31,7 @@ BOOL xhci_td_add(TransferDescriptorList *td_list,
 
 struct IOUsbHWReq *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr);
 
-void xhci_td_abort_req(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io);
+ULONG xhci_td_abort_req(struct IOUsbHWReq *io);
 void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error);
 
 #endif

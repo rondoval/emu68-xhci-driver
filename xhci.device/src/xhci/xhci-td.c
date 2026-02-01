@@ -42,7 +42,6 @@ TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
     }
 
     NewMinList(&td_list->list);
-    InitSemaphore(&td_list->semaphore);
     td_list->ctrl = ctrl;
     td_list->memoryPool = ctrl->memoryPool;
     td_list->queued_trbs = 0;
@@ -66,9 +65,7 @@ BOOL xhci_td_is_empty(TransferDescriptorList *td_list)
         return TRUE;
 
     BOOL is_empty;
-    ObtainSemaphore(&td_list->semaphore);
     is_empty = (td_list->list.mlh_TailPred == (struct MinNode *)&td_list->list);
-    ReleaseSemaphore(&td_list->semaphore);
     return is_empty;
 }
 
@@ -79,7 +76,6 @@ BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
 
     ULONG now = get_time();
     BOOL expired = FALSE;
-    ObtainSemaphore(&td_list->semaphore);
 
     struct MinNode *n = td_list->list.mlh_Head;
     while (n && n->mln_Succ)
@@ -97,7 +93,6 @@ BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
         n = n->mln_Succ;
     }
 
-    ReleaseSemaphore(&td_list->semaphore);
     return expired;
 }
 
@@ -107,9 +102,7 @@ ULONG xhci_td_get_queued_count(TransferDescriptorList *td_list)
         return 0;
 
     ULONG count;
-    ObtainSemaphore(&td_list->semaphore);
     count = td_list->queued_trbs;
-    ReleaseSemaphore(&td_list->semaphore);
     return count;
 }
 
@@ -134,13 +127,7 @@ static struct xhci_td *td_create(TransferDescriptorList *td_list,
 
     td->req = io_req;
 
-    /*
-     * This is a hack for abortio()...
-     * We'll put in the TD pointer into DriverPrivate2 so that abortio can find it later.
-     */
     io_req->iouh_DriverPrivate1 = (APTR)((ULONG)io_req->iouh_DriverPrivate1 | REQ_ON_RING);
-    if (!((ULONG)io_req->iouh_DriverPrivate1 & REQ_INTERNAL))
-        io_req->iouh_DriverPrivate2 = (APTR)td;
 
     td->deadline_active = (timeout_ms != 0);
     td->deadline_us = get_time() + timeout_ms * 1000UL;
@@ -176,9 +163,7 @@ BOOL xhci_td_add(TransferDescriptorList *td_list,
 
     td_list->queued_trbs += trb_count;
 
-    ObtainSemaphore(&td_list->semaphore);
     AddTailMinList(&td_list->list, (struct MinNode *)td);
-    ReleaseSemaphore(&td_list->semaphore);
     return TRUE;
 }
 
@@ -188,8 +173,6 @@ static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_
         return NULL;
 
     struct xhci_td *found_td = NULL;
-
-    ObtainSemaphore(&td_list->semaphore);
 
     struct MinNode *n = td_list->list.mlh_Head;
     while (n && n->mln_Succ)
@@ -216,7 +199,6 @@ static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_
         n = n->mln_Succ;
     }
 
-    ReleaseSemaphore(&td_list->semaphore);
     return found_td;
 }
 
@@ -259,13 +241,9 @@ struct IOUsbHWReq *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_
 
     struct IOUsbHWReq *req = td->req;
 
-    ObtainSemaphore(&td_list->semaphore);
-
     RemoveMinNode((struct MinNode *)td);
     xhci_td_decrease_queued(td_list, td);
     xhci_td_free(td_list, td);
-
-    ReleaseSemaphore(&td_list->semaphore);
 
     if (req && req->iouh_Length > 0)
     {
@@ -286,8 +264,6 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
     if (!td_list)
         return;
 
-    ObtainSemaphore(&td_list->semaphore);
-
     struct MinNode *n;
     while ((n = RemHeadMinList(&td_list->list)) != NULL)
     {
@@ -307,7 +283,6 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
     }
 
     td_list->queued_trbs = 0;
-    ReleaseSemaphore(&td_list->semaphore);
 }
 
 /*
@@ -316,24 +291,21 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
  * well just null out the request so that the completion handler won't try
  * to reply to it.
  */
-void xhci_td_abort_req(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io)
+ULONG xhci_td_abort_req(struct IOUsbHWReq *io)
 {
+    ULONG aborted = -1;
     Forbid();
 
-    /* If the IO was not quick and is of type message (not handled yet or in process), abord it and remove from queue. */
+    /* If the IO was not quick and is of type message that is not yet on the hardware ring, abord it and remove from queue. */
     if ((io->iouh_Req.io_Flags & IOF_QUICK) == 0 && io->iouh_Req.io_Message.mn_Node.ln_Type == NT_MESSAGE)
     {
         if (!((ULONG)(io->iouh_DriverPrivate1) & REQ_ON_RING))
-            Remove(&io->iouh_Req.io_Message.mn_Node);
-        else if (!((ULONG)io->iouh_DriverPrivate1 & REQ_INTERNAL))
         {
-            struct xhci_td *td = (struct xhci_td *)io->iouh_DriverPrivate2;
-            td->req = NULL; /* prevent completion */
-            if (io->iouh_Data)
-                xhci_dma_unmap(ctrl, (dma_addr_t)io->iouh_Data, io->iouh_Length, FALSE);
-            // Poseidon is not aware of RT ISO internal requests
+            Remove(&io->iouh_Req.io_Message.mn_Node);
+            xhci_udev_io_reply_failed(io, IOERR_ABORTED);
+            aborted = 0;
         }
-        xhci_udev_io_reply_failed(io, IOERR_ABORTED);
     }
     Permit();
+    return aborted;
 }

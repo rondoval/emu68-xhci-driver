@@ -17,8 +17,7 @@ LONG abortIO(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6") 
 
     if (io->iouh_Req.io_Unit != NULL)
     {
-        struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-        xhci_td_abort_req(unit->xhci_ctrl, io);
+        return xhci_td_abort_req(io);
     }
-    return 0;
+    return -1;
 }
