@@ -27,7 +27,6 @@
 #include <devices/usbhardware.h>
 #include <xhci/usb.h>
 
-#define MAX_EP_CTX_NUM 31
 #define XHCI_ALIGNMENT 64
 /* Generic timeout for XHCI events */
 #define XHCI_TIMEOUT 5000
@@ -1088,15 +1087,6 @@ struct xhci_scratchpad
 struct xhci_virt_ep
 {
 	struct xhci_ring *ring;
-	unsigned int ep_state;
-#define SET_DEQ_PENDING (1 << 0)
-#define EP_HALTED (1 << 1)		 /* For stall handling */
-#define EP_HALT_PENDING (1 << 2) /* For URB cancellation */
-/* Transitioning the endpoint to using streams, don't enqueue URBs */
-#define EP_GETTING_STREAMS (1 << 3)
-#define EP_HAS_STREAMS (1 << 4)
-/* Transitioning the endpoint to not using streams, don't enqueue URBs */
-#define EP_GETTING_NO_STREAMS (1 << 5)
 };
 
 #define CTX_SIZE(_hcc) (HCC_64BYTE_CONTEXT(_hcc) ? 64 : 32)
@@ -1116,7 +1106,6 @@ struct xhci_virt_device
 	/* Used for addressing devices and configuration changes */
 	struct xhci_container_ctx *in_ctx;
 	/* Rings saved to ensure old alt settings can be re-instated */
-#define XHCI_MAX_RINGS_CACHED 31
 	struct xhci_virt_ep eps[31];
 };
 
@@ -1224,7 +1213,6 @@ struct xhci_ctrl
 		__attribute__((aligned(ARCH_DMA_MINALIGN)));
 	struct xhci_ring *event_ring;
 	struct xhci_ring *cmd_ring;
-	struct xhci_ring *transfer_ring;
 	struct xhci_intr_reg *ir_set;
 	struct xhci_erst erst;
 	struct xhci_scratchpad *scratchpad;

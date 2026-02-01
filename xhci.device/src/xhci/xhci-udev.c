@@ -366,7 +366,7 @@ void xhci_udev_io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int
 }
 
 
-static inline void xhci_udev_send_control_request(struct usb_device *udev, int endpoint,
+static inline void xhci_udev_send_control_request(struct usb_device *udev, int ep_index,
                                                  UBYTE bmRequestType, UBYTE bRequest,
                                                  UWORD wValue, UWORD wIndex, UWORD wLength)
 {
@@ -392,26 +392,24 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, int e
 
     io->iouh_DevAddr = udev->poseidon_address;
 
-    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     xhci_ep_enqueue(ep_ctx, io);
 }
 
 /* Issue an internal CLEAR_FEATURE(ENDPOINT_HALT) to endpoint (by ep_index) on udev. Fire-and-forget. */
 void xhci_udev_clear_feature_halt(struct usb_device *udev, ULONG ep_index)
 {
-    int endpoint = EP_INDEX_TO_ENDPOINT(ep_index);
-    if (!udev || !udev->controller || endpoint == 0)
+    if (!udev || !udev->controller || ep_index == 0)
         return;
 
     /* Convert ep_index (DCI-1) to USB endpoint address (number + direction bit). */
-    BOOL out = (ep_index & 0x1) != 0;
-    UBYTE ep_addr = (UBYTE)(endpoint | (out ? 0 : USB_DIR_IN));
+    UBYTE addr = xhci_ep_index_to_address(ep_index);
 
-    xhci_udev_send_control_request(udev, endpoint,
+    xhci_udev_send_control_request(udev, ep_index,
                                   USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
                                   USB_REQ_CLEAR_FEATURE,
                                   USB_ENDPOINT_HALT,
-                                  ep_addr,
+                                  addr,
                                   0);
 }
 
@@ -437,7 +435,7 @@ void xhci_udev_clear_tt_buffer(struct usb_device *udev, ULONG ep_index, int ep_t
         devinfo |= 1 << 15;
 
     xhci_udev_send_control_request(hub,
-                                  0, /* endpoint 0 */
+                                  0, /* ep_index 0 */
                                   USB_DIR_OUT | USB_RT_PORT,
                                   HUB_CLEAR_TT_BUFFER,
                                   devinfo,
@@ -447,7 +445,7 @@ void xhci_udev_clear_tt_buffer(struct usb_device *udev, ULONG ep_index, int ep_t
     /* Control endpoints require clearing both directions. */
     if (ep_type == USB_ENDPOINT_XFER_CONTROL)
         xhci_udev_send_control_request(hub,
-                                      0, /* endpoint 0 */
+                                      0, /* ep_index 0 */
                                       USB_DIR_OUT | USB_RT_PORT,
                                       HUB_CLEAR_TT_BUFFER,
                                       devinfo ^ (1 << 15), /* toggle direction bit */

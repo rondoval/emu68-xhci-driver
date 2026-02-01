@@ -84,19 +84,14 @@ inline static void xhci_acknowledge_event(struct xhci_ctrl *ctrl)
  */
 static void dispatch_ep_event(struct usb_device *udev, union xhci_trb *event)
 {
-    UWORD endpoint = TRB_TO_ENDPOINT(LE32(event->trans_event.flags));
-    if (endpoint >= USB_MAXENDPOINTS)
-    {
-        Kprintf("Invalid endpoint %ld\n", endpoint);
-        return;
-    }
+    UWORD ep_index = TRB_TO_EP_INDEX(LE32(event->trans_event.flags));
 
-    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     enum ep_state state = xhci_ep_get_state(ep_ctx);
 
     if (ep_state_dispatch[state])
     {
-        KprintfH("addr %ld EP %ld state %ld -> handling event\n", udev->poseidon_address, (LONG)endpoint, (LONG)state);
+        KprintfH("addr %ld EP %ld state %ld -> handling event\n", udev->poseidon_address, (LONG)ep_index, (LONG)state);
         ep_state_handler handler = ep_state_dispatch[state];
         handler(udev, ep_ctx, event);
     }
@@ -151,7 +146,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
             int slot = TRB_TO_SLOT_ID(LE32(event->trans_event.flags));
             KprintfH("Transfer Event TRB detected: slot %ld ep %ld (%08lx %08lx %08lx %08lx)\n",
                      (LONG)slot,
-                     (LONG)TRB_TO_ENDPOINT(LE32(event->trans_event.flags)),
+                     (LONG)TRB_TO_EP_INDEX(LE32(event->trans_event.flags)),
                      (LONG)LE32(event->generic.field[0]),
                      (LONG)LE32(event->generic.field[1]),
                      (LONG)LE32(event->generic.field[2]),
@@ -210,14 +205,13 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
         if (!udev)
             continue;
 
-        for (int ep = 0; ep < USB_MAXENDPOINTS; ep++)
+        for (int ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
         {
-            struct ep_context *ep_ctx = xhci_ep_get_context(udev, ep);
+            struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
             if (xhci_ep_is_expired(ep_ctx))
             {
-                KprintfH("XHCI TD timeout on slot %ld ep %ld\n", (LONG)udev->slot_id, (LONG)ep);
-                // TODO wrong, we need specific ep_index - need to change how we track endpoint contexts
-                xhci_stop_endpoint(udev, ep);
+                KprintfH("XHCI TD timeout on slot %ld ep %ld\n", (LONG)udev->slot_id, (LONG)ep_index);
+                xhci_stop_endpoint(udev, ep_index);
             }
         }
     }
@@ -284,8 +278,8 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
 {
     (void)event;
     enum ep_state state = xhci_ep_get_state(ep_ctx);
-    int endpoint = xhci_ep_get_endpoint_number(ep_ctx);
-    Kprintf("No handler for endpoint %ld state %ld addr %ld\n", endpoint, state, udev->poseidon_address);
+    int ep_index = xhci_ep_get_ep_index(ep_ctx);
+    Kprintf("No handler for endpoint %ld state %ld addr %ld\n", ep_index, state, udev->poseidon_address);
     KprintfH("Event TRB: (%08lx %08lx %08lx %08lx)\n",
              (ULONG)LE32(event->generic.field[0]),
              (ULONG)LE32(event->generic.field[1]),
@@ -297,7 +291,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
 {
 
     u32 flags = LE32(event->trans_event.flags);
-    int endpoint = TRB_TO_ENDPOINT(flags);
+    int ep_index = TRB_TO_EP_INDEX(flags);
     u64 trb_addr = LE64(event->trans_event.buffer);
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->trans_event.transfer_len));
 
@@ -310,7 +304,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
              (ULONG)lower_32_bits(trb_addr));
     struct xhci_container_ctx *out_ctx = ctrl->devs[udev->slot_id]->out_ctx;
     xhci_dump_slot_ctx("[xhci-event] ep_handle_receiving_generic:", xhci_get_slot_ctx(ctrl, out_ctx));
-    xhci_dump_ep_ctx("[xhci-event] ep_handle_receiving_generic:", endpoint, xhci_get_ep_ctx(ctrl, out_ctx, TRB_TO_EP_INDEX(flags)));
+    xhci_dump_ep_ctx("[xhci-event] ep_handle_receiving_generic:", ep_index, xhci_get_ep_ctx(ctrl, out_ctx, ep_index));
 #endif
 
     /* Isoch OUT rings signal underrun/overrun with null TRB pointers. Do not treat those as lost TDs. */
@@ -320,7 +314,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         Kprintf("Ring %s on addr %ld EP %ld state=%ld\n",
                 (comp == COMP_UNDERRUN) ? "underrun" : "overrun",
                 (LONG)udev->poseidon_address,
-                (LONG)endpoint,
+                (LONG)ep_index,
                 (LONG)state);
 
         if (state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
@@ -333,7 +327,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     if (!req)
     {
         Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %ld\n",
-                (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (ULONG)flags, (ULONG)LE32(event->trans_event.transfer_len), (LONG)endpoint);
+                (ULONG)upper_32_bits(trb_addr), (ULONG)lower_32_bits(trb_addr), (ULONG)flags, (ULONG)LE32(event->trans_event.transfer_len), (LONG)ep_index);
         return;
     }
 
@@ -366,7 +360,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     if (halted)
     {
         xhci_udev_io_reply_failed(req, status);
-        xhci_reset_ep(udev, xhci_ep_index_from_parts(req->iouh_Endpoint, req->iouh_Dir));
+        xhci_reset_ep(udev, ep_index);
         return;
     }
 
@@ -424,7 +418,7 @@ static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ct
     }
     if (GET_COMP_CODE(LE32(event->trans_event.transfer_len)) != COMP_STOP)
     {
-        Kprintf("Expected a TRB with STOP, got %ld with %ld\n", GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
+        Kprintf("Expected a TRB with STOP, got %ld\n", GET_COMP_CODE(LE32(event->trans_event.transfer_len)));
     }
 
     /* no state change - that is done by handle_abort_stop_ring */

@@ -467,7 +467,7 @@ static struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctr
 	}
 
 	ctx->type = type;
-	ctx->size = (MAX_EP_CTX_NUM + 1) *
+	ctx->size = (USB_MAX_ENDPOINT_CONTEXTS + 1) *
 				CTX_SIZE(readl(&ctrl->hccr->cr_hccparams));
 	if (type == XHCI_CTX_TYPE_INPUT)
 		ctx->size += CTX_SIZE(readl(&ctrl->hccr->cr_hccparams));

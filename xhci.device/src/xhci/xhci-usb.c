@@ -19,15 +19,6 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-usb] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-u32 xhci_ep_index_from_parts(u8 iouh_endpoint, u8 iouh_dir)
-{
-    UBYTE ep = iouh_endpoint & 0x0F;
-    BOOL dir_in = (iouh_dir == UHDIR_IN);
-    if (ep == 0)
-        return 0;
-    return (ep << 1) - (dir_in ? 0 : 1);
-}
-
 int xhci_ep_type_for_index(struct usb_device *udev, u32 ep_index)
 {
     if (!udev)
@@ -40,9 +31,7 @@ int xhci_ep_type_for_index(struct usb_device *udev, u32 ep_index)
     if (!cfg)
         return -1;
 
-    UBYTE ep_num = EP_INDEX_TO_ENDPOINT(ep_index);
-    BOOL out = (ep_index & 0x1) != 0;
-    UBYTE addr = ep_num | (out ? USB_DIR_OUT : USB_DIR_IN);
+    UBYTE addr = xhci_ep_index_to_address(ep_index);
 
     for (int i = 0; i < cfg->no_of_if; ++i)
     {
@@ -300,12 +289,9 @@ static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned i
 
         for (int e = 0; e < alt->no_of_ep; ++e)
         {
-            UBYTE ep_addr = alt->ep_desc[e].bEndpointAddress;
-            unsigned int epnum = ep_addr & 0x0F;
-            if (epnum == 0 || epnum >= USB_MAXENDPOINTS)
-                continue;
+            int ep_index = xhci_address_to_ep_index(&alt->ep_desc[e]);
 
-            struct ep_context *ep_ctx = xhci_ep_get_context(udev, epnum);
+            struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
             enum ep_state state = xhci_ep_get_state(ep_ctx);
             if (state == USB_DEV_EP_STATE_RT_ISO_RUNNING ||
                 state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
@@ -652,10 +638,7 @@ static struct usb_interface_altsetting *xhci_find_altsetting(struct usb_interfac
     return NULL;
 }
 
-static u32 xhci_collect_ep_mask(struct xhci_virt_device *virt_dev,
-                                const struct usb_interface_altsetting *alt,
-                                int reset_state,
-                                unsigned int *max_flag)
+static u32 xhci_collect_ep_mask(const struct usb_interface_altsetting *alt, unsigned int *max_flag)
 {
     if (!alt)
         return 0;
@@ -667,8 +650,6 @@ static u32 xhci_collect_ep_mask(struct xhci_virt_device *virt_dev,
         const struct usb_endpoint_descriptor *epd = &alt->ep_desc[i];
         unsigned int ep_index = xhci_get_ep_index((struct usb_endpoint_descriptor *)epd);
         mask |= 1U << (ep_index + 1);
-        if (reset_state && virt_dev)
-            virt_dev->eps[ep_index].ep_state = 0;
         if (max_flag && ep_index > *max_flag)
             *max_flag = ep_index;
     }
@@ -700,7 +681,7 @@ static u32 xhci_collect_config_masks(const struct usb_config *cfg,
                      (ULONG)ifnum, (LONG)active_alt->desc.bAlternateSetting);
         }
 
-        mask |= xhci_collect_ep_mask(NULL, active_alt, 0, max_flag);
+        mask |= xhci_collect_ep_mask(active_alt, max_flag);
     }
 
     return mask;
@@ -833,12 +814,11 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     }
 
     /* Poseidon stack guarantees endpoint queues are idle before switching. */
-    u32 drop_mask = xhci_collect_ep_mask(virt_dev, current_alt, 1, NULL);
+    u32 drop_mask = xhci_collect_ep_mask(current_alt, NULL);
 
     iface->active_altsetting = new_alt;
 
-    u32 add_mask = xhci_collect_ep_mask(NULL, new_alt, 0, NULL);
-
+    u32 add_mask = xhci_collect_ep_mask(new_alt, NULL);
     xhci_inval_cache(virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
     xhci_slot_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx);
     xhci_endpoint_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx, 0);
@@ -1080,7 +1060,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
                                     struct usb_interface *ifdesc)
 {
     KprintfH("xhci_init_ep_contexts_if: enter\n");
-    struct xhci_ep_ctx *ep_ctx[MAX_EP_CTX_NUM];
+    struct xhci_ep_ctx *ep_ctx[USB_MAX_ENDPOINT_CONTEXTS];
     int cur_ep;
     int ep_index;
     unsigned int dir;

@@ -25,10 +25,11 @@
 #endif
 
 /* Everything is aribtrary */
-#define USB_ALTSETTINGALLOC		16
-#define USB_MAXINTERFACES		16
-#define USB_MAXENDPOINTS		16
-#define USB_MAXCHILDREN			8	/* This is arbitrary */
+#define USB_MAX_ENDPOINT_CONTEXTS 	31
+#define USB_ALTSETTINGALLOC			16
+#define USB_MAXINTERFACES			16
+#define USB_MAXENDPOINTS			16
+#define USB_MAXCHILDREN				8	/* This is arbitrary */
 
 #define USB_MAX_ADDRESS 		127
 
@@ -107,7 +108,7 @@ struct usb_device {
 	unsigned int tt_think_time;   /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
 
 	/* Requests state data */
-	struct ep_context *ep_context[USB_MAXENDPOINTS];
+	struct ep_context *ep_context[USB_MAX_ENDPOINT_CONTEXTS];
 	
 	struct xhci_ctrl *controller; /* xHCI controller */
 };

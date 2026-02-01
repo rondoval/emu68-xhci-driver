@@ -84,17 +84,11 @@ static int Do_CMD_FLUSH(struct IOUsbHWReq *io)
         if (!udev || addr == xhci_roothub_get_address(ctrl->root_hub))
             continue;
 
-        for (unsigned int ep = 0; ep < USB_MAXENDPOINTS; ++ep)
+        for (unsigned int ep_index = 0; ep_index < USB_MAXENDPOINTS; ++ep_index)
         {
-            struct ep_context *ep_ctx = xhci_ep_get_context(udev, ep);
+            struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
             xhci_ep_flush(ep_ctx, IOERR_ABORTED);
-
-            u32 ep_out_index = xhci_ep_index_from_parts(ep, UHDIR_OUT);
-            u32 ep_in_index = xhci_ep_index_from_parts(ep, UHDIR_IN);
-            // TODO which one really exists?
-
-            xhci_stop_endpoint(udev, ep_out_index);
-            xhci_stop_endpoint(udev, ep_in_index);
+            xhci_stop_endpoint(udev, ep_index);
         }
     }
 
@@ -348,11 +342,9 @@ static inline int Do_UHCMD_ADDISOHANDLER(struct IOUsbHWReq *io)
     if (!udev)
         goto badparams;
 
-    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    if (endpoint >= USB_MAXENDPOINTS)
-        goto badparams;
+    int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
 
-    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     BYTE result = xhci_ep_rt_iso_add_handler(ep_ctx, io);
 
     io->iouh_Actual = 0;
@@ -377,11 +369,9 @@ static inline int Do_UHCMD_REMISOHANDLER(struct IOUsbHWReq *io)
     if (!udev)
         goto badparams;
 
-    unsigned int endpoint = io->iouh_Endpoint & 0x0F;
-    if (endpoint >= USB_MAXENDPOINTS)
-        goto badparams;
+    int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
 
-    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     BYTE result = xhci_ep_rt_iso_rem_handler(ep_ctx, io);
     io->iouh_Req.io_Error = result;
     return COMMAND_PROCESSED;
@@ -412,8 +402,8 @@ static inline int Do_UHCMD_STARTRTISO(struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    int endpoint = io->iouh_Endpoint & 0x0F;
-    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     BYTE result = xhci_ep_rt_iso_start(ep_ctx);
 
     io->iouh_Actual = 0;
@@ -436,8 +426,8 @@ static inline int Do_UHCMD_STOPRTISO(struct IOUsbHWReq *io)
         return COMMAND_PROCESSED;
     }
 
-    int endpoint = io->iouh_Endpoint & 0x0F;
-    struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
+    int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     BYTE result = xhci_ep_rt_iso_stop(ep_ctx, io);
     io->iouh_Req.io_Error = result;
     if (result != UHIOERR_NO_ERROR)

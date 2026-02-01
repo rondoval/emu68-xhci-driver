@@ -138,17 +138,16 @@ static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd,
     u32 flags = LE32(event->event_cmd.flags);
     ULONG slot_id = cmd->udev->slot_id;
     ULONG ep_index = cmd->ep_index;
-    ULONG endpoint = EP_INDEX_TO_ENDPOINT(ep_index);
 
     if (TRB_TO_SLOT_ID(flags) != slot_id)
     {
         Kprintf("Expected a TRB for slot %ld, got %ld\n", slot_id, TRB_TO_SLOT_ID(flags));
-        struct ep_context *ep_ctx = xhci_ep_get_context(cmd->udev, endpoint);
+        struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
         xhci_ep_set_failed(ep_ctx);
         return;
     }
 
-    KprintfH("Reset EP %ld completed successfully\n", endpoint);
+    KprintfH("Reset EP %ld completed successfully\n", ep_index);
     xhci_set_deq_pointer(cmd->udev, ep_index);
 }
 
@@ -158,9 +157,8 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
     u32 flags = LE32(event->event_cmd.flags);
     ULONG slot_id = cmd->udev->slot_id;
     ULONG ep_index = cmd->ep_index;
-    ULONG endpoint = EP_INDEX_TO_ENDPOINT(ep_index);
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
-    struct ep_context *ep_ctx = xhci_ep_get_context(cmd->udev, endpoint);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
 
     if (TRB_TO_SLOT_ID(flags) != slot_id || comp != COMP_SUCCESS)
     {
@@ -171,11 +169,11 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
         xhci_ep_set_failed(ep_ctx);
         return;
     }
-    KprintfH("Set DEQ for EP %ld completed successfully, status code %ld (success=1)\n", endpoint, comp);
+    KprintfH("Set DEQ for EP %ld completed successfully, status code %ld (success=1)\n", ep_index, comp);
 
     if (xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_RESETTING)
     {
-        KprintfH("EP %ld was resetting, completing reset\n", endpoint);
+        KprintfH("EP %ld was resetting, completing reset\n", ep_index);
         /*
          * If this is due to e.g. STALL recovery, we need to sort out the device itself...:
          * issue ClearFeature(CLEAR_TT_BUFFER) to the hub if its control or bulk ep and dev is behind a TT
@@ -184,7 +182,7 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
          */
         int ep_type = xhci_ep_type_for_index(cmd->udev, ep_index);
 
-        if (endpoint != 0 && ep_type != USB_ENDPOINT_XFER_CONTROL)
+        if (ep_index != 0 && ep_type != USB_ENDPOINT_XFER_CONTROL)
         {
             /* Dispatch deferred device-side CLEAR_FEATURE after host recovery. */
             xhci_udev_clear_feature_halt(cmd->udev, ep_index);
@@ -211,7 +209,6 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
     ULONG slot_id = cmd->udev->slot_id;
     ULONG ep_index = cmd->ep_index;
-    u32 endpoint = EP_INDEX_TO_ENDPOINT(ep_index);
 
     if (type != TRB_COMPLETION || TRB_TO_SLOT_ID(flags) != slot_id || comp != COMP_SUCCESS)
     {
@@ -219,10 +216,10 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
         return;
     }
 
-    KprintfH("Stopped EP %ld...\n", endpoint);
+    KprintfH("Stopped EP %ld...\n", ep_index);
 
     /* Fail all active TDs on this endpoint */
-    struct ep_context *ep_ctx = xhci_ep_get_context(cmd->udev, endpoint);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
     xhci_ep_set_failed(ep_ctx);
 
     xhci_set_deq_pointer(cmd->udev, ep_index);
@@ -505,11 +502,10 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
     // ep needs be in halted state, otherwise this command will fail
 
     struct xhci_ctrl *ctrl = udev->controller;
-    u32 ep = EP_INDEX_TO_ENDPOINT(ep_index);
-    struct ep_context *ep_ctx = xhci_ep_get_context(udev, ep);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
 
-    KprintfH("Resetting addr %ld slot=%ld EP %ld (index=%ld)...\n",
-             (LONG)udev->poseidon_address, (LONG)udev->slot_id, (LONG)ep, (LONG)ep_index);
+    KprintfH("Resetting addr %ld slot=%ld EP %ld...\n",
+             (LONG)udev->poseidon_address, (LONG)udev->slot_id, (LONG)ep_index);
     xhci_ep_set_resetting(ep_ctx);
 
     // set TSP=0 - reset split transaction, flush cached TDs
@@ -524,19 +520,18 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
  */
 void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
 {
-    u32 endpoint = EP_INDEX_TO_ENDPOINT(ep_index);
-    KprintfH("Stop EP addr=%ld ep=%ld (index=%ld)\n",
-             (LONG)udev->poseidon_address, (LONG)endpoint, (LONG)ep_index);
+    KprintfH("Stop EP addr=%ld ep=%ld\n",
+             (LONG)udev->poseidon_address, (LONG)ep_index);
     struct xhci_ctrl *ctrl = udev->controller;
 
-    enum ep_state state = xhci_ep_get_state(xhci_ep_get_context(udev, endpoint));
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    enum ep_state state = xhci_ep_get_state(ep_ctx);
     if (state == USB_DEV_EP_STATE_RECEIVING ||
         state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT ||
         state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
-        struct ep_context *ep_ctx = xhci_ep_get_context(udev, endpoint);
         xhci_ep_set_aborting(ep_ctx);
-        KprintfH("Stopping EP %ld...\n", endpoint);
+        KprintfH("Stopping EP %ld...\n", ep_index);
 
         // TODO suspend bit support
         xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL, udev);
@@ -585,12 +580,9 @@ void xhci_reset_device(struct usb_device *udev)
  */
 void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct IOUsbHWReq *req)
 {
-    struct xhci_container_ctx *in_ctx;
-    struct xhci_virt_device *virt_dev;
     struct xhci_ctrl *ctrl = udev->controller;
-
-    virt_dev = ctrl->devs[udev->slot_id];
-    in_ctx = virt_dev->in_ctx;
+    struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
+    struct xhci_container_ctx *in_ctx = virt_dev->in_ctx;
 
     KprintfH("about to issue %s for addr=%lu slot=%lu\n",
              ctx_change ? "EVAL_CONTEXT" : "CONFIG_EP",
@@ -624,9 +616,9 @@ void xhci_enable_slot(struct usb_device *udev, struct IOUsbHWReq *req)
 void xhci_disable_slot(struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    for (int ep = 0; ep < USB_MAXENDPOINTS; ep++)
+    for (int ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
     {
-        xhci_ep_set_aborting(xhci_ep_get_context(udev, ep));
+        xhci_ep_set_aborting(xhci_ep_get_context_for_index(udev, ep_index));
     }
 
     if (udev->slot_state == USB_DEV_SLOT_STATE_DISABLED)

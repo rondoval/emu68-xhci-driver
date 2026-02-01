@@ -407,14 +407,15 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	dma_addr_t *td_trb_addrs = NULL;
 	unsigned int td_trb_index = 0;
 	const int length = io->iouh_Length;
-	unsigned int ep = io->iouh_Endpoint & 0xf;
-	if (ep == 0)
+
+	const int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
+	if (ep_index == 0)
 	{
 		Kprintf("bulk/int/isoch transfer on EP0 is not supported\n");
 		return UHIOERR_BADPARAMS;
 	}
 
-	struct ep_context *udev_ep_ctx = xhci_ep_get_context(udev, ep);
+	struct ep_context *udev_ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
 
 	enum ep_state cur_state = xhci_ep_get_state(udev_ep_ctx);
 	if (cur_state == USB_DEV_EP_STATE_ABORTING ||
@@ -426,7 +427,6 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		return UHIOERR_NO_ERROR;
 	}
 
-	unsigned int ep_index = ep * 2 - ((io->iouh_Dir == UHDIR_IN) ? 0 : 1);
 	u64 buf_64 = xhci_dma_map(ctrl, io, io->iouh_Dir == UHDIR_OUT);
 	dma_addr_t last_transfer_trb_addr;
 
@@ -453,7 +453,7 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	ring = virt_dev->eps[ep_index].ring;
 	if (!ring)
 	{
-		Kprintf("no ring for ep %ld\n", (LONG)ep);
+		Kprintf("no ring for ep %d\n", ep_index);
 		return UHIOERR_HOSTERROR;
 	}
 
@@ -482,8 +482,8 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	unsigned int td_trb_count = (unsigned int)num_trbs;
 	if (!ring_has_room(ring, udev_ep_ctx, num_trbs + 1))
 	{
-		KprintfH("Ring full ep=%ld needed=%ld\n",
-				 (LONG)ep,
+		KprintfH("Ring full ep=%d needed=%ld\n",
+				 ep_index,
 				 (LONG)num_trbs + 1);
 		xhci_ep_enqueue(udev_ep_ctx, io);
 		return UHIOERR_NO_ERROR;
@@ -641,7 +641,6 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	struct xhci_generic_trb *start_trb;
 	struct xhci_ctrl *ctrl = udev->controller;
 	unsigned int slot_id = udev->slot_id;
-	unsigned int ep_index;
 	u32 trb_fields[4];
 	dma_addr_t *td_trb_addrs = NULL;
 	unsigned int td_trb_index = 0;
@@ -650,9 +649,9 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	u32 remainder;
 	const int length = io->iouh_Length;
 
-	ep_index = (io->iouh_Endpoint & 0xf) * 2; // ep_index is DCI-1 for control endpoints
+	const int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
 
-	struct ep_context *udev_ep_ctx = xhci_ep_get_context(udev, io->iouh_Endpoint & 0xf);
+	struct ep_context *udev_ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
 	enum ep_state state = xhci_ep_get_state(udev_ep_ctx);
 
 	if (state == USB_DEV_EP_STATE_ABORTING ||

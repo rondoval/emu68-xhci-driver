@@ -21,7 +21,7 @@ struct ep_context;
 
 BOOL xhci_ep_create_contexts(struct usb_device *udev, APTR memoryPool);
 void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code);
-struct ep_context *xhci_ep_get_context(struct usb_device *udev, int endpoint);
+struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, int ep_index);
 
 void xhci_ep_set_failed(struct ep_context *ep_ctx);
 void xhci_ep_set_idle(struct ep_context *ep_ctx);
@@ -31,7 +31,7 @@ void xhci_ep_set_resetting(struct ep_context *ep_ctx);
 void xhci_ep_set_aborting(struct ep_context *ep_ctx);
 
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx);
-int xhci_ep_get_endpoint_number(struct ep_context *ep_ctx);
+int xhci_ep_get_ep_index(struct ep_context *ep_ctx);
 BOOL xhci_ep_is_expired(struct ep_context *ep_ctx);
 struct IOUsbHWReq *xhci_ep_get_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr);
 int xhci_ep_get_active_trb_count(struct ep_context *ep_ctx);
