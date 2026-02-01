@@ -87,6 +87,11 @@ static void dispatch_ep_event(struct usb_device *udev, union xhci_trb *event)
     UWORD ep_index = TRB_TO_EP_INDEX(LE32(event->trans_event.flags));
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+    {
+        KprintfH("No ep context for addr %ld ep %ld\n", (LONG)udev->poseidon_address, (LONG)ep_index);
+        return;
+    }
     enum ep_state state = xhci_ep_get_state(ep_ctx);
 
     if (ep_state_dispatch[state])
@@ -208,7 +213,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
         for (int ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
         {
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-            if (xhci_ep_is_expired(ep_ctx))
+            if (ep_ctx && xhci_ep_is_expired(ep_ctx))
             {
                 KprintfH("XHCI TD timeout on slot %ld ep %ld\n", (LONG)udev->slot_id, (LONG)ep_index);
                 xhci_stop_endpoint(udev, ep_index);
@@ -332,8 +337,6 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     }
 
     ULONG act_len = req->iouh_Length - EVENT_TRB_LEN(LE32(event->trans_event.transfer_len));
-    // ULONG length = req->iouh_Length;
-    // ULONG act_len = min(length, length - (int)EVENT_TRB_LEN(LE32(event->trans_event.transfer_len)));
 
     BOOL is_rt_iso = req->iouh_Req.io_Command == UHCMD_ADDISOHANDLER;
     if (is_rt_iso)

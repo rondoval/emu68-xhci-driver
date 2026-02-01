@@ -87,8 +87,11 @@ static int Do_CMD_FLUSH(struct IOUsbHWReq *io)
         for (unsigned int ep_index = 0; ep_index < USB_MAXENDPOINTS; ++ep_index)
         {
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-            xhci_ep_flush(ep_ctx, IOERR_ABORTED);
-            xhci_stop_endpoint(udev, ep_index);
+            if (ep_ctx)
+            {
+                xhci_ep_flush(ep_ctx, IOERR_ABORTED);
+                xhci_stop_endpoint(udev, ep_index);
+            }
         }
     }
 
@@ -345,6 +348,9 @@ static inline int Do_UHCMD_ADDISOHANDLER(struct IOUsbHWReq *io)
     int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+        goto badparams;
+
     BYTE result = xhci_ep_rt_iso_add_handler(ep_ctx, io);
 
     io->iouh_Actual = 0;
@@ -372,6 +378,9 @@ static inline int Do_UHCMD_REMISOHANDLER(struct IOUsbHWReq *io)
     int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+        goto badparams;
+
     BYTE result = xhci_ep_rt_iso_rem_handler(ep_ctx, io);
     io->iouh_Req.io_Error = result;
     return COMMAND_PROCESSED;
@@ -396,18 +405,22 @@ static inline int Do_UHCMD_STARTRTISO(struct IOUsbHWReq *io)
              (ULONG)io->iouh_Length);
     struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
     if (!udev)
-    {
-        Kprintf("bad params\n");
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-        return COMMAND_PROCESSED;
-    }
+        goto badparams;
 
     int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+        goto badparams;
+
     BYTE result = xhci_ep_rt_iso_start(ep_ctx);
 
     io->iouh_Actual = 0;
     io->iouh_Req.io_Error = result;
+    return COMMAND_PROCESSED;
+
+badparams:
+    Kprintf("Bad params\n");
+    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
     return COMMAND_PROCESSED;
 }
 
@@ -420,14 +433,13 @@ static inline int Do_UHCMD_STOPRTISO(struct IOUsbHWReq *io)
              (LONG)io->iouh_DevAddr, (LONG)(io->iouh_Endpoint & 0x0F));
     struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
     if (!udev)
-    {
-        Kprintf("bad params\n");
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
-        return COMMAND_PROCESSED;
-    }
+        goto badparams;
 
     int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+        goto badparams;
+
     BYTE result = xhci_ep_rt_iso_stop(ep_ctx, io);
     io->iouh_Req.io_Error = result;
     if (result != UHIOERR_NO_ERROR)
@@ -437,6 +449,11 @@ static inline int Do_UHCMD_STOPRTISO(struct IOUsbHWReq *io)
     }
 
     return COMMAND_SCHEDULED;
+
+badparams:
+    Kprintf("Bad params\n");
+    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    return COMMAND_PROCESSED;
 }
 
 void ProcessCommand(struct IOUsbHWReq *io)

@@ -292,6 +292,8 @@ static BOOL usb_glue_iface_has_active_rt_iso(struct usb_device *udev, unsigned i
             int ep_index = xhci_address_to_ep_index(&alt->ep_desc[e]);
 
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+            if(!ep_ctx)
+                continue;
             enum ep_state state = xhci_ep_get_state(ep_ctx);
             if (state == USB_DEV_EP_STATE_RT_ISO_RUNNING ||
                 state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
@@ -1108,8 +1110,8 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
         ep_ctx[ep_index] = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, ep_index);
 
         /* Allocate the ep rings */
-        virt_dev->eps[ep_index].ring = xhci_ring_alloc(ctrl, 1, TRUE);
-        if (!virt_dev->eps[ep_index].ring)
+        BOOL result = xhci_ep_create_context(udev, ep_index, ctrl->memoryPool);
+        if (!result)
             return UHIOERR_OUTOFMEMORY;
 
         /*NOTE: ep_desc[0] actually represents EP1 and so on */
@@ -1126,8 +1128,10 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
             err_count = 3;
         ep_ctx[ep_index]->ep_info2 |= LE32(MAX_BURST(max_burst) | ERROR_COUNT(err_count));
 
-        trb_64 = (u64)(uintptr_t)virt_dev->eps[ep_index].ring->enqueue;
-        ep_ctx[ep_index]->deq = LE64(trb_64 | virt_dev->eps[ep_index].ring->cycle_state);
+        struct ep_context *ep_context = xhci_ep_get_context_for_index(udev, ep_index);
+        struct xhci_ring *ring = xhci_ep_get_ring(ep_context);
+        trb_64 = (u64)(uintptr_t)ring->enqueue;
+        ep_ctx[ep_index]->deq = LE64(trb_64 | ring->cycle_state);
 
         /*
          * xHCI spec 6.2.3:

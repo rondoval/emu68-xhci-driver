@@ -416,6 +416,11 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	}
 
 	struct ep_context *udev_ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+	if (!udev_ep_ctx)
+	{
+		Kprintf("No ep context for ep %d\n", ep_index);
+		return UHIOERR_BADPARAMS;
+	}
 
 	enum ep_state cur_state = xhci_ep_get_state(udev_ep_ctx);
 	if (cur_state == USB_DEV_EP_STATE_ABORTING ||
@@ -450,7 +455,7 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	xhci_dump_ep_ctx("[xhci-ring] xhci_stream_tx:", io->iouh_Endpoint, xep_ctx);
 #endif
 
-	ring = virt_dev->eps[ep_index].ring;
+	ring = xhci_ep_get_ring(udev_ep_ctx);
 	if (!ring)
 	{
 		Kprintf("no ring for ep %d\n", ep_index);
@@ -652,6 +657,12 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	const int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
 
 	struct ep_context *udev_ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+	if (!udev_ep_ctx)
+	{
+		Kprintf("No ep context for ep %d\n", ep_index);
+		return UHIOERR_BADPARAMS;
+	}
+
 	enum ep_state state = xhci_ep_get_state(udev_ep_ctx);
 
 	if (state == USB_DEV_EP_STATE_ABORTING ||
@@ -663,7 +674,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		return UHIOERR_NO_ERROR;
 	}
 
-	ep_ring = virt_dev->eps[ep_index].ring;
+	ep_ring = xhci_ep_get_ring(udev_ep_ctx);
 	if (!ep_ring)
 		return UHIOERR_HOSTERROR;
 

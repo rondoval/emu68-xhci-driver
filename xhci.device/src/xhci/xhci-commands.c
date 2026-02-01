@@ -143,6 +143,11 @@ static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd,
     {
         Kprintf("Expected a TRB for slot %ld, got %ld\n", slot_id, TRB_TO_SLOT_ID(flags));
         struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
+        if (!ep_ctx)
+        {
+            Kprintf("No ep context for addr %ld ep %ld\n", (LONG)cmd->udev->poseidon_address, (LONG)ep_index);
+            return;
+        }
         xhci_ep_set_failed(ep_ctx);
         return;
     }
@@ -159,6 +164,11 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
     ULONG ep_index = cmd->ep_index;
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
+    if (!ep_ctx)
+    {
+        Kprintf("No ep context for addr %ld ep %ld\n", (LONG)cmd->udev->poseidon_address, (LONG)ep_index);
+        return;
+    }
 
     if (TRB_TO_SLOT_ID(flags) != slot_id || comp != COMP_SUCCESS)
     {
@@ -220,6 +230,11 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     /* Fail all active TDs on this endpoint */
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
+    if (!ep_ctx)
+    {
+        Kprintf("No ep context for addr %ld ep %ld\n", (LONG)cmd->udev->poseidon_address, (LONG)ep_index);
+        return;
+    }
     xhci_ep_set_failed(ep_ctx);
 
     xhci_set_deq_pointer(cmd->udev, ep_index);
@@ -503,6 +518,11 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
 
     struct xhci_ctrl *ctrl = udev->controller;
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+    {
+        Kprintf("No ep context for addr %ld ep %ld\n", (LONG)udev->poseidon_address, (LONG)ep_index);
+        return;
+    }
 
     KprintfH("Resetting addr %ld slot=%ld EP %ld...\n",
              (LONG)udev->poseidon_address, (LONG)udev->slot_id, (LONG)ep_index);
@@ -525,6 +545,12 @@ void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
     struct xhci_ctrl *ctrl = udev->controller;
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+    {
+        Kprintf("No ep context for addr %ld ep %ld\n", (LONG)udev->poseidon_address, (LONG)ep_index);
+        return;
+    }
+
     enum ep_state state = xhci_ep_get_state(ep_ctx);
     if (state == USB_DEV_EP_STATE_RECEIVING ||
         state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT ||
@@ -546,9 +572,14 @@ void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
 void xhci_set_deq_pointer(struct usb_device *udev, u32 ep_index)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    ULONG slot_id = udev->slot_id;
 
-    struct xhci_ring *ring = ctrl->devs[slot_id]->eps[ep_index].ring;
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+    {
+        Kprintf("No ep context for addr %ld ep %ld\n", (LONG)udev->poseidon_address, (LONG)ep_index);
+        return;
+    }
+    struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
 
     u64 deq_ptr = (u32) ring->enqueue | ring->cycle_state;
 
@@ -618,7 +649,9 @@ void xhci_disable_slot(struct usb_device *udev)
     struct xhci_ctrl *ctrl = udev->controller;
     for (int ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
     {
-        xhci_ep_set_aborting(xhci_ep_get_context_for_index(udev, ep_index));
+        struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+        if (ep_ctx)
+            xhci_ep_set_aborting(ep_ctx);
     }
 
     if (udev->slot_state == USB_DEV_SLOT_STATE_DISABLED)

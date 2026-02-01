@@ -1105,8 +1105,6 @@ struct xhci_virt_device
 	struct xhci_container_ctx *out_ctx;
 	/* Used for addressing devices and configuration changes */
 	struct xhci_container_ctx *in_ctx;
-	/* Rings saved to ensure old alt settings can be re-instated */
-	struct xhci_virt_ep eps[31];
 };
 
 /*
@@ -1271,6 +1269,7 @@ dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL cop
 void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy);
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 								  BOOL link_trbs);
+void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
 int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);
 void xhci_free_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);
 int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,

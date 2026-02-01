@@ -53,7 +53,13 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_addres
     udev->speed = ctrl->pending_parent_speed;
 
     _NewMinList(&udev->configurations);
-    xhci_ep_create_contexts(udev, ctrl->memoryPool);
+    BOOL result = xhci_ep_create_context(udev, 0, ctrl->memoryPool);
+    if (!result)
+    {
+        Kprintf("Failed to create EP0 context for addr %ld\n", (LONG)poseidon_address);
+        FreeVecPooled(ctrl->memoryPool, udev);
+        return NULL;
+    }
 
     ctrl->devices_by_poseidon_address[poseidon_address] = udev;
     return udev;
@@ -393,6 +399,12 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, int e
     io->iouh_DevAddr = udev->poseidon_address;
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+    {
+        Kprintf("No ep context for ep index %d\n", ep_index);
+        FreeVecPooled(ctrl->memoryPool, io);
+        return;
+    }
     xhci_ep_enqueue(ep_ctx, io);
 }
 

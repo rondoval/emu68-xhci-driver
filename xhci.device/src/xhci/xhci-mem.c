@@ -26,6 +26,7 @@
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>
+#include <xhci/xhci-endpoint.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -59,7 +60,7 @@ static void xhci_segment_free(struct xhci_ctrl *ctrl, struct xhci_segment *seg)
  * @param ptr	pointer to "ring" to be freed
  * Return: none
  */
-static void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
+void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
 {
 	struct xhci_segment *seg;
 	struct xhci_segment *first_seg;
@@ -117,7 +118,6 @@ static void xhci_free_container_ctx(struct xhci_ctrl *ctrl,
 
 void xhci_free_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 {
-	int i;
 	struct xhci_virt_device *virt_dev;
 
 	virt_dev = ctrl->devs[slot_id];
@@ -125,10 +125,6 @@ void xhci_free_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 		return;
 
 	ctrl->dcbaa->dev_context_ptrs[slot_id] = 0;
-
-	for (i = 0; i < 31; ++i)
-		if (virt_dev->eps[i].ring)
-			xhci_ring_free(ctrl, virt_dev->eps[i].ring);
 
 	if (virt_dev->in_ctx)
 		xhci_free_container_ctx(ctrl, virt_dev->in_ctx);
@@ -530,17 +526,6 @@ int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
 	KprintfH("in_ctx bytes=%lx size=%ld\n",
 			 (ULONG)virt_dev->in_ctx->bytes, (ULONG)virt_dev->in_ctx->size);
 
-	/* Allocate endpoint 0 ring */
-	virt_dev->eps[0].ring = xhci_ring_alloc(ctrl, 1, TRUE);
-	if (!virt_dev->eps[0].ring)
-	{
-		Kprintf("EP0 ring alloc failed\n");
-		return -ENOMEM;
-	}
-	KprintfH("ep0 ring first_seg=%lx cycle=%ld\n",
-			 (ULONG)virt_dev->eps[0].ring->first_seg,
-			 (ULONG)virt_dev->eps[0].ring->cycle_state);
-
 	byte_64 = (dma_addr_t)virt_dev->out_ctx->bytes;
 
 	/* Point to output device context in dcbaa. */
@@ -926,8 +911,10 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 	/* EP 0 can handle "burst" sizes of 1, so Max Burst Size field is 0 */
 	ep0_ctx->ep_info2 |= LE32(MAX_BURST(0) | ERROR_COUNT(3));
 
-	u64 trb_64 = (dma_addr_t)virt_dev->eps[0].ring->first_seg->trbs;
-	ep0_ctx->deq = LE64(trb_64 | virt_dev->eps[0].ring->cycle_state);
+	struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, 0);
+	struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
+	u64 trb_64 = (dma_addr_t)ring->first_seg->trbs;
+	ep0_ctx->deq = LE64(trb_64 | ring->cycle_state);
 
 	/*
 	 * xHCI spec 6.2.3:

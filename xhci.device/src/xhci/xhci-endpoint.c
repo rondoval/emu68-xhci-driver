@@ -36,6 +36,8 @@ struct ep_context
     IOReqList pending_reqs;             /* list of pending requests */
     TransferDescriptorList *active_tds; /* list of in-flight TDs */
 
+    struct xhci_ring *ring; /* ring for this endpoint */
+
     /* RT ISO data */
     /*
      * The idea here is that if this is filled, the event handlers will use
@@ -59,25 +61,33 @@ struct ep_context
     ULONG rt_inflight_bytes;
 };
 
-BOOL xhci_ep_create_contexts(struct usb_device *udev, APTR memoryPool)
+BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, APTR memoryPool)
 {
-    for (int i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
+    struct ep_context *ep_ctx = AllocVecPooled(memoryPool, sizeof(struct ep_context));
+    if (!ep_ctx)
     {
-        struct ep_context *ep_ctx = AllocVecPooled(memoryPool, sizeof(struct ep_context));
-        if (!ep_ctx)
-        {
-            Kprintf("Failed to allocate ep_context for EP %d\n", i);
-            return FALSE;
-        }
-        ep_ctx->udev = udev;
-        ep_ctx->ep_index = i;
-        ep_ctx->memoryPool = memoryPool;
-        ep_ctx->state = USB_DEV_EP_STATE_IDLE;
-        _NewMinList(&ep_ctx->pending_reqs);
-        ep_ctx->active_tds = xhci_td_create_list(udev->controller);
-
-        udev->ep_context[i] = ep_ctx;
+        Kprintf("Failed to allocate ep_context for EP %d\n", ep_index);
+        return FALSE;
     }
+    ep_ctx->udev = udev;
+    ep_ctx->ep_index = ep_index;
+    ep_ctx->memoryPool = memoryPool;
+    ep_ctx->state = USB_DEV_EP_STATE_IDLE;
+    _NewMinList(&ep_ctx->pending_reqs);
+    ep_ctx->active_tds = xhci_td_create_list(udev->controller);
+    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, TRUE);
+    if (!ep_ctx->active_tds || !ep_ctx->ring)
+    {
+        Kprintf("Failed to create resources for EP %d\n", ep_index);
+        if (ep_ctx->active_tds)
+            xhci_td_destroy_list(ep_ctx->active_tds, UHIOERR_OUTOFMEMORY);
+        if (ep_ctx->ring)
+            xhci_ring_free(udev->controller, ep_ctx->ring);
+        FreeVecPooled(memoryPool, ep_ctx);
+        return FALSE;
+    }
+
+    udev->ep_context[ep_index] = ep_ctx;
     return TRUE;
 }
 
@@ -110,6 +120,9 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
             }
             ep_ctx->rt_req = NULL;
             ep_ctx->state = USB_DEV_EP_STATE_IDLE;
+
+            if (ep_ctx->ring)
+                xhci_ring_free(udev->controller, ep_ctx->ring);
 
             FreeVecPooled(ep_ctx->memoryPool, ep_ctx);
             udev->ep_context[i] = NULL;
@@ -276,6 +289,11 @@ BOOL xhci_ep_is_expired(struct ep_context *ep_ctx)
         return FALSE;
 
     return xhci_td_is_expired(td_list);
+}
+
+struct xhci_ring *xhci_ep_get_ring(struct ep_context *ep_ctx)
+{
+    return ep_ctx->ring;
 }
 
 struct IOUsbHWReq *xhci_ep_get_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr)
