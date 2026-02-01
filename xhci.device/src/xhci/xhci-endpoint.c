@@ -58,7 +58,6 @@ struct ep_context
 
     /* RT ISO inflight accounting */
     ULONG rt_inflight_bytes;
-    ULONG rt_inflight_tds;
 };
 
 BOOL xhci_ep_create_contexts(struct usb_device *udev, APTR memoryPool)
@@ -168,11 +167,6 @@ void xhci_ep_enqueue(struct ep_context *ep_ctx, struct IOUsbHWReq *io)
 
 static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
 {
-    // TODO not needed as this is called from idle only?
-    //  enum ep_state state = xhci_ep_get_state(ep_ctx);
-    //  if (state == USB_DEV_EP_STATE_FAILED || state == USB_DEV_EP_STATE_RESETTING || state == USB_DEV_EP_STATE_ABORTING)
-    //      return;
-
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)))
     {
@@ -295,9 +289,14 @@ struct IOUsbHWReq *xhci_ep_get_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_
     return xhci_td_get_by_trb(td_list, trb_addr);
 }
 
+int xhci_ep_get_active_trb_count(struct ep_context *ep_ctx)
+{
+    return xhci_td_get_queued_trb_count(ep_ctx->active_tds);
+}
+
 int xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
 {
-    return xhci_td_get_queued_count(ep_ctx->active_tds);
+    return xhci_td_get_queued_td_count(ep_ctx->active_tds);
 }
 
 void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code)
@@ -319,8 +318,6 @@ void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code)
 inline static void xhci_ep_rt_iso_update_counters(struct ep_context *ep_ctx, struct IOUsbHWReq *req)
 {
     /* Maintain RT ISO inflight counters. */
-    if (ep_ctx->rt_inflight_tds > 0)
-        ep_ctx->rt_inflight_tds--;
     if (ep_ctx->rt_inflight_bytes >= req->iouh_Length)
         ep_ctx->rt_inflight_bytes -= req->iouh_Length;
 }
@@ -328,7 +325,6 @@ inline static void xhci_ep_rt_iso_update_counters(struct ep_context *ep_ctx, str
 inline static void xhci_ep_rt_iso_zero_counters(struct ep_context *ep_ctx)
 {
     ep_ctx->rt_inflight_bytes = 0;
-    ep_ctx->rt_inflight_tds = 0;
 }
 
 static void xhci_ep_set_rt_stopped(struct ep_context *ep_ctx)
@@ -478,7 +474,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
                  (ULONG)frame,
                  (ULONG)rt_buffer_req.ubr_Length,
                  (ULONG)ep_ctx->rt_inflight_bytes,
-                 (ULONG)ep_ctx->rt_inflight_tds);
+                 (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
         CallHookPkt(ep_ctx->rt_req->urti_OutReqHook, ep_ctx->rt_req, &rt_buffer_req);
 
@@ -529,12 +525,11 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
         ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
         ep_ctx->rt_inflight_bytes += rt_io->iouh_Length;
-        ep_ctx->rt_inflight_tds++;
         KprintfH("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
                  (ULONG)rt_io->iouh_Length,
                  (ULONG)ep_ctx->rt_inflight_bytes,
-                 (ULONG)ep_ctx->rt_inflight_tds);
+                 (ULONG)xhci_ep_get_active_td_count(ep_ctx));
         first_td = FALSE;
     }
 
@@ -550,7 +545,8 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
     BOOL have_giveback = FALSE;
     BOOL first_td = TRUE;
 
-    while (ep_ctx->rt_inflight_tds < RT_ISO_IN_TARGET_TDS)
+    int inflight = xhci_ep_get_active_td_count(ep_ctx);
+    while (inflight < RT_ISO_IN_TARGET_TDS)
     {
         ULONG frame = ep_ctx->rt_next_frame;
         struct IOUsbHWReq *rt_io = AllocVecPooled(ep_ctx->memoryPool, sizeof(struct IOUsbHWReq));
@@ -575,7 +571,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)frame,
                  (ULONG)rt_io->iouh_Length,
                  (ULONG)ep_ctx->rt_inflight_bytes,
-                 (ULONG)ep_ctx->rt_inflight_tds);
+                 (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
         struct xhci_giveback_info local_giveback = {0};
         int ret = xhci_stream_tx(ep_ctx->udev, rt_io, 0,
@@ -589,6 +585,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
+        ++inflight;
 
         if (first_td && local_giveback.start_trb)
         {
@@ -598,12 +595,11 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 
         ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
         ep_ctx->rt_inflight_bytes += rt_io->iouh_Length;
-        ep_ctx->rt_inflight_tds++;
         KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
                  (ULONG)rt_io->iouh_Length,
                  (ULONG)ep_ctx->rt_inflight_bytes,
-                 (ULONG)ep_ctx->rt_inflight_tds);
+                 (ULONG)xhci_ep_get_active_td_count(ep_ctx));
         first_td = FALSE;
     }
 
@@ -703,7 +699,7 @@ BYTE xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct IOUsbHWReq *req)
         KprintfH("RT ISO stopping addr=%ld ep=%ld inflight_tds=%lu inflight_bytes=%lu\n",
                  (LONG)req->iouh_DevAddr,
                  (LONG)ep_ctx->endpoint_number,
-                 (ULONG)ep_ctx->rt_inflight_tds,
+                 (ULONG)xhci_ep_get_active_td_count(ep_ctx),
                  (ULONG)ep_ctx->rt_inflight_bytes);
         ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPING;
     }

@@ -45,6 +45,7 @@ TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
     td_list->ctrl = ctrl;
     td_list->memoryPool = ctrl->memoryPool;
     td_list->queued_trbs = 0;
+    td_list->queued_tds = 0;
 
     return td_list;
 }
@@ -64,9 +65,7 @@ BOOL xhci_td_is_empty(TransferDescriptorList *td_list)
     if (!td_list)
         return TRUE;
 
-    BOOL is_empty;
-    is_empty = (td_list->list.mlh_TailPred == (struct MinNode *)&td_list->list);
-    return is_empty;
+    return (td_list->list.mlh_TailPred == (struct MinNode *)&td_list->list);
 }
 
 BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
@@ -75,7 +74,6 @@ BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
         return FALSE;
 
     ULONG now = get_time();
-    BOOL expired = FALSE;
 
     struct MinNode *n = td_list->list.mlh_Head;
     while (n && n->mln_Succ)
@@ -83,27 +81,32 @@ BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
         struct xhci_td *td = (struct xhci_td *)n;
         if (td->deadline_active && (int32_t)(now - td->deadline_us) >= 0)
         {
-            expired = TRUE;
             KprintfH("Found expired TD req=%lx deadline=%lu now=%lu\n",
                      td->req,
                      (ULONG)td->deadline_us,
                      (ULONG)now);
-            break;
+            return TRUE;
         }
         n = n->mln_Succ;
     }
 
-    return expired;
+    return FALSE;
 }
 
-ULONG xhci_td_get_queued_count(TransferDescriptorList *td_list)
+ULONG xhci_td_get_queued_trb_count(TransferDescriptorList *td_list)
 {
     if (!td_list)
         return 0;
 
-    ULONG count;
-    count = td_list->queued_trbs;
-    return count;
+    return td_list->queued_trbs;
+}
+
+ULONG xhci_td_get_queued_td_count(TransferDescriptorList *td_list)
+{
+    if (!td_list)
+        return 0;
+
+    return td_list->queued_tds;
 }
 
 static struct xhci_td *td_create(TransferDescriptorList *td_list,
@@ -162,6 +165,7 @@ BOOL xhci_td_add(TransferDescriptorList *td_list,
         return FALSE;
 
     td_list->queued_trbs += trb_count;
+    td_list->queued_tds++;
 
     AddTailMinList(&td_list->list, (struct MinNode *)td);
     return TRUE;
@@ -172,45 +176,39 @@ static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_
     if (!td_list)
         return NULL;
 
-    struct xhci_td *found_td = NULL;
-
     struct MinNode *n = td_list->list.mlh_Head;
     while (n && n->mln_Succ)
     {
         struct xhci_td *td = (struct xhci_td *)n;
         if (td->completion_trb == trb_addr)
-        {
-            found_td = td;
-            break;
-        }
+            return td;
+
         if (td->trb_addrs)
         {
             for (unsigned int i = 0; i < td->trb_count; i++)
             {
                 if (td->trb_addrs[i] == trb_addr)
-                {
-                    found_td = td;
-                    break;
-                }
+                    return td;
             }
-            if (found_td)
-                break;
         }
         n = n->mln_Succ;
     }
 
-    return found_td;
+    return NULL;
 }
 
 static void xhci_td_decrease_queued(TransferDescriptorList *td_list, struct xhci_td *td)
 {
-    if (td->trb_count == 0)
-        return;
+    if (td->trb_count > 0)
+    {
+        if (td_list->queued_trbs >= td->trb_count)
+            td_list->queued_trbs -= td->trb_count;
+        else
+            td_list->queued_trbs = 0;
+    }
 
-    if (td_list->queued_trbs >= td->trb_count)
-        td_list->queued_trbs -= td->trb_count;
-    else
-        td_list->queued_trbs = 0;
+    if (td_list->queued_tds > 0)
+        td_list->queued_tds--;
 }
 
 static void xhci_td_free(TransferDescriptorList *td_list, struct xhci_td *td)
@@ -283,6 +281,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
     }
 
     td_list->queued_trbs = 0;
+    td_list->queued_tds = 0;
 }
 
 /*

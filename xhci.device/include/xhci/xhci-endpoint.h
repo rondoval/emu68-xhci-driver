@@ -34,6 +34,7 @@ enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx);
 int xhci_ep_get_endpoint_number(struct ep_context *ep_ctx);
 BOOL xhci_ep_is_expired(struct ep_context *ep_ctx);
 struct IOUsbHWReq *xhci_ep_get_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr);
+int xhci_ep_get_active_trb_count(struct ep_context *ep_ctx);
 int xhci_ep_get_active_td_count(struct ep_context *ep_ctx);
 void xhci_ep_enqueue(struct ep_context *ep_ctx, struct IOUsbHWReq *io);
 void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code);

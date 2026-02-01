@@ -13,6 +13,7 @@ typedef struct {
     struct xhci_ctrl *ctrl;
     APTR memoryPool;
     ULONG queued_trbs;
+    ULONG queued_tds;
 } TransferDescriptorList;
 
 TransferDescriptorList* xhci_td_create_list(struct xhci_ctrl *ctrl);
@@ -20,7 +21,8 @@ void xhci_td_destroy_list(TransferDescriptorList *td_list, UBYTE error_code);
 
 BOOL xhci_td_is_empty(TransferDescriptorList *td_list);
 BOOL xhci_td_is_expired(TransferDescriptorList *td_list);
-ULONG xhci_td_get_queued_count(TransferDescriptorList *td_list);
+ULONG xhci_td_get_queued_trb_count(TransferDescriptorList *td_list);
+ULONG xhci_td_get_queued_td_count(TransferDescriptorList *td_list);
 
 BOOL xhci_td_add(TransferDescriptorList *td_list,
     struct IOUsbHWReq *io_req,

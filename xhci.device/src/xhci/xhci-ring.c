@@ -334,7 +334,7 @@ static int ring_has_room(struct xhci_ring *ring, struct ep_context *ep_ctx, unsi
 	unsigned int capacity = ring_capacity(ring);
 	if (capacity == 0)
 		return 0;
-	return xhci_ep_get_active_td_count(ep_ctx) + needed <= capacity;
+	return xhci_ep_get_active_trb_count(ep_ctx) + needed <= capacity;
 }
 
 /**
