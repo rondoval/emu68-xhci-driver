@@ -157,7 +157,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
                      (LONG)LE32(event->generic.field[2]),
                      (LONG)LE32(event->generic.field[3]));
 
-            struct usb_device *udev = ctrl->devs[slot]->udev;
+            struct usb_device *udev = ctrl->devices_by_slot_id[slot];
             if (!udev)
             {
                 Kprintf("No usb_device for slot %ld\n", slot);
@@ -307,7 +307,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
              (ULONG)LE32(event->trans_event.transfer_len),
              (ULONG)upper_32_bits(trb_addr),
              (ULONG)lower_32_bits(trb_addr));
-    struct xhci_container_ctx *out_ctx = ctrl->devs[udev->slot_id]->out_ctx;
+    struct xhci_container_ctx *out_ctx = udev->out_ctx;
     xhci_dump_slot_ctx("[xhci-event] ep_handle_receiving_generic:", xhci_get_slot_ctx(ctrl, out_ctx));
     xhci_dump_ep_ctx("[xhci-event] ep_handle_receiving_generic:", ep_index, xhci_get_ep_ctx(ctrl, out_ctx, ep_index));
 #endif

@@ -44,7 +44,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_addres
     if (!udev)
     {
         Kprintf("Failed to allocate usb_device for addr %ld\n", (LONG)poseidon_address);
-        return NULL;
+        goto nothing;
     }
 
     _memset(udev, 0, sizeof(*udev));
@@ -57,12 +57,40 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_addres
     if (!result)
     {
         Kprintf("Failed to create EP0 context for addr %ld\n", (LONG)poseidon_address);
-        FreeVecPooled(ctrl->memoryPool, udev);
-        return NULL;
+        goto free_udev;
     }
+
+    /* Allocate the (output) device context that will be used in the HC. */
+    udev->out_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_DEVICE);
+    if (!udev->out_ctx)
+    {
+        Kprintf("Failed to allocate out context for addr %ld\n", (LONG)poseidon_address);
+        goto destroy_ep;
+    }
+    KprintfH("out_ctx bytes=%lx size=%ld\n",
+             (ULONG)udev->out_ctx->bytes, (ULONG)udev->out_ctx->size);
+
+    /* Allocate the (input) device context for address device command */
+    udev->in_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_INPUT);
+    if (!udev->in_ctx)
+    {
+        Kprintf("Failed to allocate in context for addr %ld\n", (LONG)poseidon_address);
+        goto destroy_out_ctx;
+    }
+    KprintfH("in_ctx bytes=%lx size=%ld\n",
+             (ULONG)udev->in_ctx->bytes, (ULONG)udev->in_ctx->size);
 
     ctrl->devices_by_poseidon_address[poseidon_address] = udev;
     return udev;
+
+destroy_out_ctx:
+    xhci_free_container_ctx(ctrl, udev->out_ctx);
+destroy_ep:
+    xhci_ep_destroy_contexts(udev, UHIOERR_OUTOFMEMORY);
+free_udev:
+    FreeVecPooled(ctrl->memoryPool, udev);
+nothing:
+    return NULL;
 }
 
 struct usb_device *xhci_udev_get(struct XHCIUnit *unit, UWORD poseidon_address)
@@ -122,10 +150,14 @@ void xhci_udev_free(struct usb_device *udev)
         FreeVecPooled(ctrl->memoryPool, conf);
     }
 
-    if (udev->slot_id && ctrl->devs[udev->slot_id])
-        ctrl->devs[udev->slot_id]->udev = NULL;
+    if (udev->in_ctx)
+        xhci_free_container_ctx(udev->controller, udev->in_ctx);
+    if (udev->out_ctx)
+        xhci_free_container_ctx(udev->controller, udev->out_ctx);
 
+    ctrl->dcbaa->dev_context_ptrs[udev->slot_id] = 0;
     ctrl->devices_by_poseidon_address[udev->poseidon_address] = NULL;
+    ctrl->devices_by_slot_id[udev->slot_id] = NULL;
     FreeVecPooled(ctrl->memoryPool, udev);
 }
 
@@ -371,10 +403,9 @@ void xhci_udev_io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int
     ReplyMsg((struct Message *)io);
 }
 
-
 static inline void xhci_udev_send_control_request(struct usb_device *udev, int ep_index,
-                                                 UBYTE bmRequestType, UBYTE bRequest,
-                                                 UWORD wValue, UWORD wIndex, UWORD wLength)
+                                                  UBYTE bmRequestType, UBYTE bRequest,
+                                                  UWORD wValue, UWORD wIndex, UWORD wLength)
 {
     if (!udev || !udev->controller)
         return;
@@ -386,7 +417,7 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, int e
 
     _memset(io, 0, sizeof(*io));
     io->iouh_Req.io_Command = UHCMD_CONTROLXFER;
-    io->iouh_Req.io_Flags = IOF_QUICK;          /* no reply port */
+    io->iouh_Req.io_Flags = IOF_QUICK;                             /* no reply port */
     io->iouh_DriverPrivate1 = (APTR)(REQ_INTERNAL | REQ_ENQUEUED); /* magic tag to free on completion */
     io->iouh_DriverPrivate2 = (APTR)ctrl;
 
@@ -418,11 +449,11 @@ void xhci_udev_clear_feature_halt(struct usb_device *udev, ULONG ep_index)
     UBYTE addr = xhci_ep_index_to_address(ep_index);
 
     xhci_udev_send_control_request(udev, ep_index,
-                                  USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
-                                  USB_REQ_CLEAR_FEATURE,
-                                  USB_ENDPOINT_HALT,
-                                  addr,
-                                  0);
+                                   USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
+                                   USB_REQ_CLEAR_FEATURE,
+                                   USB_ENDPOINT_HALT,
+                                   addr,
+                                   0);
 }
 
 /* Issue an internal CLEAR_TT_BUFFER to the parent hub for control/bulk endpoints behind a TT. */
@@ -447,20 +478,20 @@ void xhci_udev_clear_tt_buffer(struct usb_device *udev, ULONG ep_index, int ep_t
         devinfo |= 1 << 15;
 
     xhci_udev_send_control_request(hub,
-                                  0, /* ep_index 0 */
-                                  USB_DIR_OUT | USB_RT_PORT,
-                                  HUB_CLEAR_TT_BUFFER,
-                                  devinfo,
-                                  (u16)udev->parent_port,
-                                  0);
+                                   0, /* ep_index 0 */
+                                   USB_DIR_OUT | USB_RT_PORT,
+                                   HUB_CLEAR_TT_BUFFER,
+                                   devinfo,
+                                   (u16)udev->parent_port,
+                                   0);
 
     /* Control endpoints require clearing both directions. */
     if (ep_type == USB_ENDPOINT_XFER_CONTROL)
         xhci_udev_send_control_request(hub,
-                                      0, /* ep_index 0 */
-                                      USB_DIR_OUT | USB_RT_PORT,
-                                      HUB_CLEAR_TT_BUFFER,
-                                      devinfo ^ (1 << 15), /* toggle direction bit */
-                                      (u16)udev->parent_port,
-                                      0);
+                                       0, /* ep_index 0 */
+                                       USB_DIR_OUT | USB_RT_PORT,
+                                       HUB_CLEAR_TT_BUFFER,
+                                       devinfo ^ (1 << 15), /* toggle direction bit */
+                                       (u16)udev->parent_port,
+                                       0);
 }

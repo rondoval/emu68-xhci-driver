@@ -395,8 +395,6 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	u32 field = 0;
 	u32 length_field = 0;
 	struct xhci_ctrl *ctrl = udev->controller;
-	unsigned int slot_id = udev->slot_id;
-	struct xhci_virt_device *virt_dev;
 	struct xhci_ring *ring; /* EP transfer ring */
 
 	int running_total, trb_buff_len;
@@ -435,10 +433,6 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	u64 buf_64 = xhci_dma_map(ctrl, io, io->iouh_Dir == UHDIR_OUT);
 	dma_addr_t last_transfer_trb_addr;
 
-	virt_dev = ctrl->devs[slot_id];
-	if (!virt_dev)
-		return UHIOERR_HOSTERROR;
-
 	if (deferred_giveback)
 	{
 		deferred_giveback->start_trb = NULL;
@@ -446,12 +440,12 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		deferred_giveback->start_cycle = 0;
 	}
 
-	xhci_inval_cache(virt_dev->out_ctx->bytes,
-					 virt_dev->out_ctx->size);
+	xhci_inval_cache(udev->out_ctx->bytes,
+					 udev->out_ctx->size);
 
-	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
+	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, ep_index);
 #ifdef DEBUG_HIGH
-	xhci_dump_slot_ctx("[xhci-ring] xhci_stream_tx:", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
+	xhci_dump_slot_ctx("[xhci-ring] xhci_stream_tx:", xhci_get_slot_ctx(ctrl, udev->out_ctx));
 	xhci_dump_ep_ctx("[xhci-ring] xhci_stream_tx:", io->iouh_Endpoint, xep_ctx);
 #endif
 
@@ -649,7 +643,6 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	u32 trb_fields[4];
 	dma_addr_t *td_trb_addrs = NULL;
 	unsigned int td_trb_index = 0;
-	struct xhci_virt_device *virt_dev = ctrl->devs[slot_id];
 	struct xhci_ring *ep_ring;
 	u32 remainder;
 	const int length = io->iouh_Length;
@@ -692,9 +685,9 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		}
 	}
 
-	xhci_inval_cache(virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+	xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
 
-	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, virt_dev->out_ctx, ep_index);
+	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, ep_index);
 
 	/* 1 TRB for setup, 1 for status */
 	num_trbs = 2;

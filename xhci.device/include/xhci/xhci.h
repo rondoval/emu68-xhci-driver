@@ -1084,28 +1084,7 @@ struct xhci_scratchpad
 #define XHCI_STOP_EP_CMD_TIMEOUT 5
 /* XXX: Make these module parameters */
 
-struct xhci_virt_ep
-{
-	struct xhci_ring *ring;
-};
-
 #define CTX_SIZE(_hcc) (HCC_64BYTE_CONTEXT(_hcc) ? 64 : 32)
-
-struct xhci_virt_device
-{
-	struct usb_device *udev;
-	/*
-	 * Commands to the hardware are passed an "input context" that
-	 * tells the hardware what to change in its data structures.
-	 * The hardware will return changes in an "output context" that
-	 * software must allocate for the hardware.  We need to keep
-	 * track of input and output contexts separately because
-	 * these commands might fail and we don't trust the hardware.
-	 */
-	struct xhci_container_ctx *out_ctx;
-	/* Used for addressing devices and configuration changes */
-	struct xhci_container_ctx *in_ctx;
-};
 
 /*
  * Registers should always be accessed with double word or quad word accesses.
@@ -1214,7 +1193,6 @@ struct xhci_ctrl
 	struct xhci_intr_reg *ir_set;
 	struct xhci_erst erst;
 	struct xhci_scratchpad *scratchpad;
-	struct xhci_virt_device *devs[MAX_HC_SLOTS];
 	struct xhci_root_hub *root_hub;
 	struct IOUsbHWReq *root_int_req;
 	u16 hci_version;
@@ -1223,9 +1201,12 @@ struct xhci_ctrl
 	APTR memoryPool;
 	struct pci_device *pci_dev;
 	struct usb_device *devices_by_poseidon_address[USB_MAX_ADDRESS + 1];
+	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];
+	
 	struct usb_device *pending_parent; /* parent hub pending for next default-address child */
 	unsigned int pending_parent_port;
 	enum usb_device_speed pending_parent_speed;
+
 	struct MinList pending_commands; /* list of pending commands */
 };
 
@@ -1270,8 +1251,8 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy);
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 								  BOOL link_trbs);
 void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
-int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);
-void xhci_free_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id);
+struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int type);
+void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx);
 int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 				  struct xhci_hcor *hcor);
 

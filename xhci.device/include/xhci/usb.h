@@ -109,6 +109,18 @@ struct usb_device {
 
 	/* Requests state data */
 	struct ep_context *ep_context[USB_MAX_ENDPOINT_CONTEXTS];
+
+	/*
+	 * Commands to the hardware are passed an "input context" that
+	 * tells the hardware what to change in its data structures.
+	 * The hardware will return changes in an "output context" that
+	 * software must allocate for the hardware.  We need to keep
+	 * track of input and output contexts separately because
+	 * these commands might fail and we don't trust the hardware.
+	 */
+	struct xhci_container_ctx *out_ctx;
+	/* Used for addressing devices and configuration changes */
+	struct xhci_container_ctx *in_ctx;
 	
 	struct xhci_ctrl *controller; /* xHCI controller */
 };

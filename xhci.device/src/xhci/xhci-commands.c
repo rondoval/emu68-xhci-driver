@@ -263,12 +263,8 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
         if (cmd->udev)
         {
-            struct xhci_virt_device *virt_dev = ctrl->devs[cmd->udev->slot_id];
-            if (virt_dev)
-            {
-                xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
-                xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
-            }
+            xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, cmd->udev->in_ctx));
+            xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, cmd->udev->out_ctx));
         }
 #endif
         return;
@@ -279,12 +275,8 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     if (type == TRB_EVAL_CONTEXT && cmd->udev)
     {
-        struct xhci_virt_device *virt_dev = ctrl->devs[cmd->udev->slot_id];
-        if (virt_dev)
-        {
-            xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
-            xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
-        }
+        xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, cmd->udev->in_ctx));
+        xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, cmd->udev->out_ctx));
     }
 #endif
 
@@ -310,31 +302,27 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
         return;
     }
 
-    cmd->udev->slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
-    cmd->udev->slot_state = USB_DEV_SLOT_STATE_ENABLED;
-    KprintfH("assigned slot_id=%ld for addr=%lu\n", (ULONG)cmd->udev->slot_id, (ULONG)cmd->udev->poseidon_address);
+    struct usb_device *udev = cmd->udev;
+    int slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
 
-    int ret = xhci_alloc_virt_device(ctrl, cmd->udev->slot_id);
-    if (ret < 0)
-    {
-        /*
-         * TODO: Unsuccessful Address Device command shall leave
-         * the slot in default. So, issue Disable Slot command now.
-         */
-        Kprintf("Could not allocate xHCI USB device data structures\n");
-        xhci_udev_io_reply_failed(cmd->req, UHIOERR_OUTOFMEMORY);
-        return;
-    }
+    udev->slot_id = slot_id;
+    udev->slot_state = USB_DEV_SLOT_STATE_ENABLED;
+    ctrl->devices_by_slot_id[slot_id] = udev;
+    KprintfH("assigned slot_id=%ld for addr=%lu\n", (ULONG)slot_id, (ULONG)udev->poseidon_address);
 
-    if (ctrl->devs[cmd->udev->slot_id])
-        ctrl->devs[cmd->udev->slot_id]->udev = cmd->udev;
+    /* Point to output device context in dcbaa. */
+    ctrl->dcbaa->dev_context_ptrs[slot_id] = LE64((dma_addr_t)udev->out_ctx->bytes);
+
+    xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[slot_id], sizeof(__le64));
+    KprintfH("DCBAA[%ld]=%lx\n", (ULONG)slot_id, (ULONG)LE64(ctrl->dcbaa->dev_context_ptrs[slot_id]));
 
     // Continue with Address Device command, passing cmd->req
-    xhci_address_device(cmd->udev, cmd->req);
+    xhci_address_device(udev, cmd->req);
 }
 
 static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
+    (void)ctrl;
     KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
 
@@ -347,12 +335,7 @@ static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *
 
     KprintfH("Disabled slot %ld successfully (comp=%ld).\n", cmd->udev->slot_id, comp);
     cmd->udev->slot_state = USB_DEV_SLOT_STATE_DISABLED;
-    xhci_free_virt_device(ctrl, cmd->udev->slot_id);
-
-    if (cmd->udev)
-    {
-        xhci_udev_free(cmd->udev);
-    }
+    xhci_udev_free(cmd->udev);
 }
 
 static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
@@ -389,13 +372,9 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
     {
         if (cmd->udev)
         {
-            struct xhci_virt_device *virt_dev = ctrl->devs[cmd->udev->slot_id];
-            if (virt_dev)
-            {
-                Kprintf("Address Device failure for slot %ld (code %ld)\n", (ULONG)cmd->udev->slot_id, (ULONG)err);
-                xhci_dump_slot_ctx("[xhci-commands] handle_address_device:", xhci_get_slot_ctx(ctrl, virt_dev->in_ctx));
-                xhci_dump_slot_ctx("[xhci-commands] handle_address_device:", xhci_get_slot_ctx(ctrl, virt_dev->out_ctx));
-            }
+            Kprintf("Address Device failure for slot %ld (code %ld)\n", (ULONG)cmd->udev->slot_id, (ULONG)err);
+            xhci_dump_slot_ctx("[xhci-commands] handle_address_device:", xhci_get_slot_ctx(ctrl, cmd->udev->in_ctx));
+            xhci_dump_slot_ctx("[xhci-commands] handle_address_device:", xhci_get_slot_ctx(ctrl, cmd->udev->out_ctx));
         }
         /*
          * Unsuccessful Address Device command shall leave the
@@ -407,18 +386,16 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
         return;
     }
 
-    struct xhci_virt_device *virt_dev = ctrl->devs[cmd->udev->slot_id];
+    xhci_inval_cache(cmd->udev->out_ctx->bytes,
+                     cmd->udev->out_ctx->size);
 
-    xhci_inval_cache(virt_dev->out_ctx->bytes,
-                     virt_dev->out_ctx->size);
-
-    cmd->udev->xhci_address = LE32(xhci_get_slot_ctx(ctrl, virt_dev->out_ctx)->dev_state) & DEV_ADDR_MASK;
+    cmd->udev->xhci_address = LE32(xhci_get_slot_ctx(ctrl, cmd->udev->out_ctx)->dev_state) & DEV_ADDR_MASK;
     cmd->udev->slot_state = USB_DEV_SLOT_STATE_ADDRESSED;
     KprintfH("Assigned xHCI address %ld to slot %ld (Poseidon address %ld)\n",
              (ULONG)cmd->udev->xhci_address, (ULONG)cmd->udev->slot_id, (cmd->req) ? (ULONG)cmd->req->iouh_DevAddr : (ULONG)0);
 
 #ifdef DEBUG_HIGH
-    struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->out_ctx);
+    struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, cmd->udev->out_ctx);
 
     KprintfH("xHC internal address is: %ld dev_info=%08lx dev_info2=%08lx dev_state=%08lx\n",
              (ULONG)(LE32(slot_ctx->dev_state) & DEV_ADDR_MASK),
@@ -581,7 +558,7 @@ void xhci_set_deq_pointer(struct usb_device *udev, u32 ep_index)
     }
     struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
 
-    u64 deq_ptr = (u32) ring->enqueue | ring->cycle_state;
+    u64 deq_ptr = (u32)ring->enqueue | ring->cycle_state;
 
     KprintfH("Setting DEQ pointer for EP index %ld to %lx\n", (LONG)ep_index, (ULONG)deq_ptr);
     xhci_queue_command(ctrl, deq_ptr, udev->slot_id, ep_index, TRB_SET_DEQ, NULL, udev); // handle_set_deq
@@ -612,8 +589,7 @@ void xhci_reset_device(struct usb_device *udev)
 void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct IOUsbHWReq *req)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
-    struct xhci_container_ctx *in_ctx = virt_dev->in_ctx;
+    struct xhci_container_ctx *in_ctx = udev->in_ctx;
 
     KprintfH("about to issue %s for addr=%lu slot=%lu\n",
              ctx_change ? "EVAL_CONTEXT" : "CONFIG_EP",
@@ -669,23 +645,12 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
 {
     struct xhci_ctrl *ctrl = udev->controller;
     struct xhci_input_control_ctx *ctrl_ctx;
-    struct xhci_virt_device *virt_dev;
     unsigned int slot_id = udev->slot_id;
-
-    virt_dev = ctrl->devs[slot_id];
-    KprintfH("virt_dev=%lx, slot_id=%ld\n", (ULONG)virt_dev, (LONG)slot_id);
-    if (!virt_dev)
-    {
-        Kprintf("ERROR: no virt_dev for slot %ld\n", (ULONG)slot_id);
-        if (req)
-            xhci_udev_io_reply_failed(req, UHIOERR_OUTOFMEMORY);
-        return;
-    }
 
     /* If already addressed (internal address non-zero), don't re-issue. */
     {
-        xhci_inval_cache(virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
-        struct xhci_slot_ctx *sc = xhci_get_slot_ctx(ctrl, virt_dev->out_ctx);
+        xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
+        struct xhci_slot_ctx *sc = xhci_get_slot_ctx(ctrl, udev->out_ctx);
         if ((LE32(sc->dev_state) & DEV_ADDR_MASK) != 0)
         {
             KprintfH("slot %ld already addressed (dev_state=%08lx), skipping.\n",
@@ -703,22 +668,22 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     KprintfH("Setting up addressable device (slot %ld)\n", (ULONG)slot_id);
     xhci_setup_addressable_virt_dev(ctrl, udev);
 
-    ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
+    ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
     KprintfH("ctrl_ctx=%lx in_ctx=%lx out_ctx=%lx\n",
-             (ULONG)ctrl_ctx, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx);
+             (ULONG)ctrl_ctx, (ULONG)udev->in_ctx, (ULONG)udev->out_ctx);
     ctrl_ctx->add_flags = LE32(SLOT_FLAG | EP0_FLAG);
     ctrl_ctx->drop_flags = 0;
 
     xhci_flush_cache(ctrl_ctx, sizeof(struct xhci_input_control_ctx));
 
     KprintfH("queue ADDR_DEV cmd, in_ctx->bytes=%lx addr=%lu slot=%lu parent_addr=%lu parent_port=%lu route=0x%lx\n",
-             (ULONG)virt_dev->in_ctx->bytes,
+             (ULONG)udev->in_ctx->bytes,
              (ULONG)udev->poseidon_address,
              (ULONG)slot_id,
              (ULONG)(udev->parent ? udev->parent->poseidon_address : 0),
              (ULONG)udev->parent_port,
              (ULONG)udev->route);
-    xhci_queue_command(ctrl, (dma_addr_t)virt_dev->in_ctx->bytes, slot_id, 0, TRB_ADDR_DEV, req, udev);
+    xhci_queue_command(ctrl, (dma_addr_t)udev->in_ctx->bytes, slot_id, 0, TRB_ADDR_DEV, req, udev);
 }
 
 void xhci_address_device(struct usb_device *udev, struct IOUsbHWReq *req)

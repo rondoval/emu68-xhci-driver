@@ -549,9 +549,6 @@ void xhci_usb_parse_control_message(struct usb_device *udev, struct IOUsbHWReq *
 
             current->poseidon_address = new_addr;
 
-            if (current->slot_id && ctrl->devs[current->slot_id])
-                ctrl->devs[current->slot_id]->udev = current;
-
             KprintfH("migrated ctx from addr %ld to %ld\n", (LONG)old_addr, (LONG)new_addr);
         }
     }
@@ -736,17 +733,16 @@ static struct usb_interface_altsetting *xhci_select_active_alt(struct usb_interf
 
 static int xhci_init_ep_contexts_if(struct usb_device *udev,
                                     struct xhci_ctrl *ctrl,
-                                    struct xhci_virt_device *virt_dev,
                                     struct usb_interface *ifdesc);
 
 static void xhci_update_slot_last_ctx(struct xhci_ctrl *ctrl,
-                                      struct xhci_virt_device *virt_dev,
+                                      struct usb_device *udev,
                                       unsigned int max_ep_flag)
 {
-    if (!ctrl || !virt_dev)
+    if (!ctrl || !udev)
         return;
 
-    struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
+    struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, udev->in_ctx);
     if (!slot_ctx)
         return;
 
@@ -808,12 +804,6 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     }
 
     struct xhci_ctrl *ctrl = udev->controller;
-    struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
-    if (!virt_dev || !virt_dev->in_ctx || !virt_dev->out_ctx)
-    {
-        Kprintf("xhci_set_interface: missing virtual device for slot %ld\n", (LONG)udev->slot_id);
-        return UHIOERR_HOSTERROR;
-    }
 
     /* Poseidon stack guarantees endpoint queues are idle before switching. */
     u32 drop_mask = xhci_collect_ep_mask(current_alt, NULL);
@@ -821,11 +811,11 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     iface->active_altsetting = new_alt;
 
     u32 add_mask = xhci_collect_ep_mask(new_alt, NULL);
-    xhci_inval_cache(virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
-    xhci_slot_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx);
-    xhci_endpoint_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx, 0);
+    xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
+    xhci_slot_copy(ctrl, udev->in_ctx, udev->out_ctx);
+    xhci_endpoint_copy(ctrl, udev->in_ctx, udev->out_ctx, 0);
 
-    struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
+    struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
     if (!ctrl_ctx)
     {
         Kprintf("xhci_set_interface: missing input control context\n");
@@ -836,7 +826,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     int err = UHIOERR_NO_ERROR;
     if (new_alt->no_of_ep > 0)
     {
-        err = xhci_init_ep_contexts_if(udev, ctrl, virt_dev, iface);
+        err = xhci_init_ep_contexts_if(udev, ctrl, iface);
         if (err != UHIOERR_NO_ERROR)
         {
             Kprintf("xhci_set_interface: failed to init ep contexts (err=%ld)\n", (LONG)err);
@@ -851,7 +841,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     ctrl_ctx->drop_flags = LE32(drop_flags);
 
     unsigned int max_ep_flag = compute_max_ep_flag(cfg);
-    xhci_update_slot_last_ctx(ctrl, virt_dev, max_ep_flag);
+    xhci_update_slot_last_ctx(ctrl, udev, max_ep_flag);
 
     KprintfH("xhci_set_interface: updating device context for addr=%ld iface=%ld alt=%ld drop=0x%lx add=0x%lx\n",
              (LONG)udev->poseidon_address,
@@ -1058,7 +1048,6 @@ static u32 xhci_get_max_esit_payload(struct usb_device *udev,
  */
 static int xhci_init_ep_contexts_if(struct usb_device *udev,
                                     struct xhci_ctrl *ctrl,
-                                    struct xhci_virt_device *virt_dev,
                                     struct usb_interface *ifdesc)
 {
     KprintfH("xhci_init_ep_contexts_if: enter\n");
@@ -1107,7 +1096,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
         avg_trb_len = max_esit_payload;
 
         ep_index = xhci_get_ep_index(endpt_desc);
-        ep_ctx[ep_index] = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, ep_index);
+        ep_ctx[ep_index] = xhci_get_ep_ctx(ctrl, udev->in_ctx, ep_index);
 
         /* Allocate the ep rings */
         BOOL result = xhci_ep_create_context(udev, ep_index, ctrl->memoryPool);
@@ -1186,13 +1175,11 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
     struct xhci_container_ctx *in_ctx;
     struct xhci_input_control_ctx *ctrl_ctx;
     struct xhci_ctrl *ctrl = udev->controller;
-    int slot_id = udev->slot_id;
-    struct xhci_virt_device *virt_dev = ctrl->devs[slot_id];
     unsigned int max_ifnum = cfg->no_of_if;
     unsigned int max_ep_flag = 0;
 
-    out_ctx = virt_dev->out_ctx;
-    in_ctx = virt_dev->in_ctx;
+    out_ctx = udev->out_ctx;
+    in_ctx = udev->in_ctx;
 
     ctrl_ctx = xhci_get_input_control_ctx(in_ctx);
     u32 add_flags = SLOT_FLAG;
@@ -1205,7 +1192,7 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
 
     /* slot context */
     xhci_slot_copy(ctrl, in_ctx, out_ctx);
-    xhci_update_slot_last_ctx(ctrl, virt_dev, max_ep_flag);
+    xhci_update_slot_last_ctx(ctrl, udev, max_ep_flag);
 
     xhci_endpoint_copy(ctrl, in_ctx, out_ctx, 0);
 
@@ -1213,7 +1200,7 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
     for (unsigned int ifnum = 0; ifnum < max_ifnum; ++ifnum)
     {
         struct usb_interface *ifdesc = &cfg->if_desc[ifnum];
-        int err = xhci_init_ep_contexts_if(udev, ctrl, virt_dev, ifdesc);
+        int err = xhci_init_ep_contexts_if(udev, ctrl, ifdesc);
         if (err != UHIOERR_NO_ERROR)
         {
             return err;
@@ -1234,7 +1221,6 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
 int xhci_check_maxpacket(struct usb_device *udev, unsigned int max_packet_size)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    unsigned int slot_id = udev->slot_id;
     int ep_index = 0; /* control endpoint */
     struct xhci_container_ctx *in_ctx;
     struct xhci_container_ctx *out_ctx;
@@ -1242,7 +1228,7 @@ int xhci_check_maxpacket(struct usb_device *udev, unsigned int max_packet_size)
     struct xhci_ep_ctx *ep_ctx;
     unsigned int hw_max_packet_size;
 
-    out_ctx = ctrl->devs[slot_id]->out_ctx;
+    out_ctx = udev->out_ctx;
     xhci_inval_cache(out_ctx->bytes, out_ctx->size);
     KprintfH("Checking max packet size for ep 0\n");
 
@@ -1255,9 +1241,9 @@ int xhci_check_maxpacket(struct usb_device *udev, unsigned int max_packet_size)
         KprintfH("Issuing evaluate context command.\n");
 
         /* Set up the modified control endpoint 0 */
-        xhci_endpoint_copy(ctrl, ctrl->devs[slot_id]->in_ctx,
-                           ctrl->devs[slot_id]->out_ctx, ep_index);
-        in_ctx = ctrl->devs[slot_id]->in_ctx;
+        xhci_endpoint_copy(ctrl, udev->in_ctx,
+                           udev->out_ctx, ep_index);
+        in_ctx = udev->in_ctx;
         ep_ctx = xhci_get_ep_ctx(ctrl, in_ctx, ep_index);
         ep_ctx->ep_info2 &= LE32(~MAX_PACKET(MAX_PACKET_MASK));
         ep_ctx->ep_info2 |= LE32(MAX_PACKET(max_packet_size));

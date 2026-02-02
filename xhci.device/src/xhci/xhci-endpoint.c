@@ -146,8 +146,7 @@ struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, int ep
  * except for control endpoints.
  * But Poseidon assumes there is only one transfer ongoing per endpoint number,
  * regardless of direction (I think).
- * So we sort of treat both contexts as one.. at least for now.
- * Perhaps they should be separate and just treated as one for scheduling new TDs.
+ * We're currently treating each endpoint context separately, so it may cause issues.
  * endpoint - endpoint number (0-15)
  * ep_index - endpoint context index (0-30)
  * DCI - context index (1-31)

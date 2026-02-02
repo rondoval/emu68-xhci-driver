@@ -109,51 +109,10 @@ static void xhci_scratchpad_free(struct xhci_ctrl *ctrl)
  * @param ptr	pointer to "xhci_container_ctx" to be freed
  * Return: none
  */
-static void xhci_free_container_ctx(struct xhci_ctrl *ctrl,
-									struct xhci_container_ctx *ctx)
+void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx)
 {
 	memalign_free(ctrl->memoryPool, ctx->bytes);
 	FreeVecPooled(ctrl->memoryPool, ctx);
-}
-
-void xhci_free_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
-{
-	struct xhci_virt_device *virt_dev;
-
-	virt_dev = ctrl->devs[slot_id];
-	if (!virt_dev)
-		return;
-
-	ctrl->dcbaa->dev_context_ptrs[slot_id] = 0;
-
-	if (virt_dev->in_ctx)
-		xhci_free_container_ctx(ctrl, virt_dev->in_ctx);
-	if (virt_dev->out_ctx)
-		xhci_free_container_ctx(ctrl, virt_dev->out_ctx);
-
-	FreeVecPooled(ctrl->memoryPool, virt_dev);
-	/* make sure we are pointing to NULL */
-	ctrl->devs[slot_id] = NULL;
-}
-
-/**
- * frees the virtual devices for "xhci_ctrl" pointer passed
- *
- * @param ptr	pointer to "xhci_ctrl" whose virtual devices are to be freed
- * Return: none
- */
-static void xhci_free_virt_devices(struct xhci_ctrl *ctrl)
-{
-	int slot_id;
-
-	/*
-	 * refactored here to loop through all virt_dev
-	 * Slot ID 0 is reserved
-	 */
-	for (slot_id = 0; slot_id < MAX_HC_SLOTS; slot_id++)
-	{
-		xhci_free_virt_device(ctrl, slot_id);
-	}
 }
 
 /**
@@ -167,7 +126,6 @@ void xhci_cleanup(struct xhci_ctrl *ctrl)
 	xhci_ring_free(ctrl, ctrl->event_ring);
 	xhci_ring_free(ctrl, ctrl->cmd_ring);
 	xhci_scratchpad_free(ctrl);
-	xhci_free_virt_devices(ctrl);
 	memalign_free(ctrl->memoryPool, ctrl->erst.entries);
 	memalign_free(ctrl->memoryPool, ctrl->dcbaa);
 	_memset(ctrl, 0, sizeof(struct xhci_ctrl));
@@ -444,7 +402,7 @@ fail_sp:
  * @param type type of XHCI Container Context
  * Return: NULL if failed else pointer to the context on success
  */
-static struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int type)
+struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int type)
 {
 	struct xhci_container_ctx *ctx;
 
@@ -474,72 +432,6 @@ static struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctr
 }
 
 /**
- * Allocating virtual device
- *
- * @param udev	pointer to USB deivce structure
- * Return: 0 on success else -1 on failure
- */
-int xhci_alloc_virt_device(struct xhci_ctrl *ctrl, unsigned int slot_id)
-{
-	u64 byte_64 = 0;
-	struct xhci_virt_device *virt_dev;
-
-	/* Slot ID 0 is reserved */
-	if (ctrl->devs[slot_id])
-	{
-		Kprintf("Virt dev for slot[%ld] already allocated\n", slot_id);
-		return -EEXIST;
-	}
-
-	KprintfH("slot_id=%ld\n", (ULONG)slot_id);
-	ctrl->devs[slot_id] = AllocVecPooled(ctrl->memoryPool,
-										 sizeof(struct xhci_virt_device));
-
-	if (!ctrl->devs[slot_id])
-	{
-		Kprintf("Failed to allocate virtual device\n");
-		return -ENOMEM;
-	}
-
-	_memset(ctrl->devs[slot_id], 0, sizeof(struct xhci_virt_device));
-	virt_dev = ctrl->devs[slot_id];
-
-	/* Allocate the (output) device context that will be used in the HC. */
-	virt_dev->out_ctx = xhci_alloc_container_ctx(ctrl,
-												 XHCI_CTX_TYPE_DEVICE);
-	if (!virt_dev->out_ctx)
-	{
-		Kprintf("Failed to allocate out context for virt dev\n");
-		return -ENOMEM;
-	}
-	KprintfH("out_ctx bytes=%lx size=%ld\n",
-			 (ULONG)virt_dev->out_ctx->bytes, (ULONG)virt_dev->out_ctx->size);
-
-	/* Allocate the (input) device context for address device command */
-	virt_dev->in_ctx = xhci_alloc_container_ctx(ctrl,
-												XHCI_CTX_TYPE_INPUT);
-	if (!virt_dev->in_ctx)
-	{
-		Kprintf("Failed to allocate in context for virt dev\n");
-		return -ENOMEM;
-	}
-	KprintfH("in_ctx bytes=%lx size=%ld\n",
-			 (ULONG)virt_dev->in_ctx->bytes, (ULONG)virt_dev->in_ctx->size);
-
-	byte_64 = (dma_addr_t)virt_dev->out_ctx->bytes;
-
-	/* Point to output device context in dcbaa. */
-	ctrl->dcbaa->dev_context_ptrs[slot_id] = LE64(byte_64);
-
-	xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[slot_id],
-					 sizeof(__le64));
-	KprintfH("DCBAA[%ld]=%lx\n",
-			 (ULONG)slot_id,
-			 (ULONG)LE64(ctrl->dcbaa->dev_context_ptrs[slot_id]));
-	return 0;
-}
-
-/**
  * Allocates the necessary data structures
  * for XHCI host controller
  *
@@ -554,7 +446,6 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	uint64_t val_64;
 	uint64_t trb_64;
 	uint32_t val;
-	int i;
 	struct xhci_segment *seg;
 
 	/* DCBAA initialization */
@@ -632,10 +523,6 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 
 	/* set up the scratchpad buffer array and scratchpad buffers */
 	xhci_scratchpad_alloc(ctrl);
-
-	/* initializing the virtual devices to NULL */
-	for (i = 0; i < MAX_HC_SLOTS; ++i)
-		ctrl->devs[i] = NULL;
 
 	/*
 	 * Just Zero'ing this register completely,
@@ -790,22 +677,15 @@ static unsigned int build_route_string(struct usb_device *parent, unsigned int p
  */
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev)
 {
-	struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
-	if (!virt_dev)
-	{
-		Kprintf("Invalid virtual device\n");
-		return;
-	}
-
 	udev->parent = ctrl->pending_parent;
 	udev->parent_port = ctrl->pending_parent_port;
 	udev->route = build_route_string(udev->parent, udev->parent_port);
 
 	/* Extract the EP0 and Slot Ctrl */
-	struct xhci_ep_ctx *ep0_ctx = xhci_get_ep_ctx(ctrl, virt_dev->in_ctx, 0);
-	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
+	struct xhci_ep_ctx *ep0_ctx = xhci_get_ep_ctx(ctrl, udev->in_ctx, 0);
+	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, udev->in_ctx);
 	KprintfH("slot=%ld in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
-			 (ULONG)udev->slot_id, (ULONG)virt_dev->in_ctx, (ULONG)virt_dev->out_ctx,
+			 (ULONG)udev->slot_id, (ULONG)udev->in_ctx, (ULONG)udev->out_ctx,
 			 (ULONG)ep0_ctx, (ULONG)slot_ctx);
 
 	/* Only the control endpoint is valid - one endpoint context */
@@ -942,17 +822,14 @@ void xhci_update_hub_tt(struct usb_device *udev)
 	udev->route = build_route_string(udev->parent, udev->parent_port);
 
 	struct xhci_ctrl *ctrl = udev->controller;
-	struct xhci_virt_device *virt_dev = ctrl->devs[udev->slot_id];
-	if (!virt_dev || !virt_dev->in_ctx || !virt_dev->out_ctx)
-		return;
 
-	xhci_inval_cache(virt_dev->out_ctx->bytes, virt_dev->out_ctx->size);
+	xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
 
 	/* Start from the controller's current view of the slot context */
-	xhci_slot_copy(ctrl, virt_dev->in_ctx, virt_dev->out_ctx);
+	xhci_slot_copy(ctrl, udev->in_ctx, udev->out_ctx);
 
-	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, virt_dev->in_ctx);
-	struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(virt_dev->in_ctx);
+	struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, udev->in_ctx);
+	struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
 	if (!slot_ctx || !ctrl_ctx)
 		return;
 
