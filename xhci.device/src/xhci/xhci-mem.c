@@ -27,6 +27,7 @@
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>
 #include <xhci/xhci-endpoint.h>
+#include <xhci/xhci-ring.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -39,50 +40,6 @@
 #endif
 
 #define CACHELINE_SIZE 64
-
-/**
- * frees the "segment" pointer passed
- *
- * @param ptr	pointer to "segement" to be freed
- * Return: none
- */
-static void xhci_segment_free(struct xhci_ctrl *ctrl, struct xhci_segment *seg)
-{
-	memalign_free(ctrl->memoryPool, seg->trbs);
-	seg->trbs = NULL;
-
-	FreeVecPooled(ctrl->memoryPool, seg);
-}
-
-/**
- * frees the "ring" pointer passed
- *
- * @param ptr	pointer to "ring" to be freed
- * Return: none
- */
-void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
-{
-	struct xhci_segment *seg;
-	struct xhci_segment *first_seg;
-
-	if (!ring)
-	{
-		Kprintf("Ring is NULL, nothing to free\n");
-		return;
-	}
-
-	first_seg = ring->first_seg;
-	seg = first_seg->next;
-	while (seg != first_seg)
-	{
-		struct xhci_segment *next = seg->next;
-		xhci_segment_free(ctrl, seg);
-		seg = next;
-	}
-	xhci_segment_free(ctrl, first_seg);
-
-	FreeVecPooled(ctrl->memoryPool, ring);
-}
 
 /**
  * Free the scratchpad buffer array and scratchpad buffers
@@ -137,7 +94,7 @@ void xhci_cleanup(struct xhci_ctrl *ctrl)
  * @param size	size of memory to be allocated
  * Return: allocates the memory and returns the aligned pointer
  */
-static void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
+void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
 {
 	void *ptr;
 	ULONG cacheline_size = max(XHCI_ALIGNMENT, CACHELINE_SIZE);
@@ -153,168 +110,6 @@ static void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
 	xhci_flush_cache(ptr, size);
 
 	return ptr;
-}
-
-/**
- * Make the prev segment point to the next segment.
- * Change the last TRB in the prev segment to be a Link TRB which points to the
- * address of the next segment.  The caller needs to set any Link TRB
- * related flags, such as End TRB, Toggle Cycle, and no snoop.
- *
- * @param prev	pointer to the previous segment
- * @param next	pointer to the next segment
- * @param link_trbs	flag to indicate whether to link the trbs or NOT
- * Return: none
- */
-static void xhci_link_segments(struct xhci_segment *prev,
-							   struct xhci_segment *next, BOOL link_trbs)
-{
-	u32 val;
-
-	if (!prev || !next)
-		return;
-	prev->next = next;
-	if (link_trbs)
-	{
-		prev->trbs[TRBS_PER_SEGMENT - 1].link.segment_ptr =
-			LE64((dma_addr_t)next->trbs);
-
-		/*
-		 * Set the last TRB in the segment to
-		 * have a TRB type ID of Link TRB
-		 */
-		val = LE32(prev->trbs[TRBS_PER_SEGMENT - 1].link.control);
-		val &= ~TRB_TYPE_BITMASK;
-		val |= TRB_TYPE(TRB_LINK);
-		prev->trbs[TRBS_PER_SEGMENT - 1].link.control = LE32(val);
-	}
-}
-
-/**
- * Initialises the Ring's enqueue,dequeue,enq_seg pointers
- *
- * @param ring	pointer to the RING to be intialised
- * Return: none
- */
-static void xhci_initialize_ring_info(struct xhci_ring *ring)
-{
-	/*
-	 * The ring is empty, so the enqueue pointer == dequeue pointer
-	 */
-	ring->enqueue = ring->first_seg->trbs;
-	ring->enq_seg = ring->first_seg;
-	ring->dequeue = ring->enqueue;
-	ring->deq_seg = ring->first_seg;
-
-	/*
-	 * The ring is initialized to 0. The producer must write 1 to the
-	 * cycle bit to handover ownership of the TRB, so PCS = 1.
-	 * The consumer must compare CCS to the cycle bit to
-	 * check ownership, so CCS = 1.
-	 */
-	ring->cycle_state = 1;
-}
-
-/**
- * Allocates a generic ring segment from the ring pool, sets the dma address,
- * initializes the segment to zero, and sets the private next pointer to NULL.
- * Section 4.11.1.1:
- * "All components of all Command and Transfer TRBs shall be initialized to '0'"
- *
- * @param	none
- * Return: pointer to the newly allocated SEGMENT
- */
-static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
-{
-	struct xhci_segment *seg;
-
-	seg = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_segment));
-	if (!seg)
-	{
-		Kprintf("AllocVecPooled failed for size %lu\n",
-				(ULONG)sizeof(struct xhci_segment));
-		return NULL;
-	}
-
-	seg->trbs = xhci_malloc(ctrl, SEGMENT_SIZE);
-	seg->next = NULL;
-
-	return seg;
-}
-
-/**
- * Create a new ring with zero or more segments.
- * TODO: current code only uses one-time-allocated single-segment rings
- * of 1KB anyway, so we might as well get rid of all the segment and
- * linking code (and maybe increase the size a bit, e.g. 4KB).
- *
- *
- * Link each segment together into a ring.
- * Set the end flag and the cycle toggle bit on the last segment.
- * See section 4.9.2 and figures 15 and 16 of XHCI spec rev1.0.
- *
- * @param num_segs	number of segments in the ring
- * @param link_trbs	flag to indicate whether to link the trbs or NOT
- * Return: pointer to the newly created RING
- */
-struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
-								  BOOL link_trbs)
-{
-	struct xhci_ring *ring;
-	struct xhci_segment *prev;
-	unsigned int remaining = num_segs;
-
-	ring = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_ring));
-	if (!ring)
-	{
-		Kprintf("AllocVecPooled failed for size %lu\n",
-				(ULONG)sizeof(struct xhci_ring));
-		return NULL;
-	}
-	_memset(ring, 0, sizeof(struct xhci_ring));
-	ring->num_segs = num_segs;
-
-	if (remaining == 0)
-		return ring;
-
-	ring->first_seg = xhci_segment_alloc(ctrl);
-	if (!ring->first_seg)
-	{
-		Kprintf("xhci_segment_alloc failed\n");
-		FreeVecPooled(ctrl->memoryPool, ring);
-		return NULL;
-	}
-
-	remaining--;
-
-	prev = ring->first_seg;
-	while (remaining > 0)
-	{
-		struct xhci_segment *next;
-
-		next = xhci_segment_alloc(ctrl);
-		if (!next)
-		{
-			Kprintf("xhci_segment_alloc failed\n");
-			xhci_ring_free(ctrl, ring);
-			return NULL;
-		}
-
-		xhci_link_segments(prev, next, link_trbs);
-
-		prev = next;
-		remaining--;
-	}
-	xhci_link_segments(prev, ring->first_seg, link_trbs);
-	if (link_trbs)
-	{
-		/* See section 4.9.2.1 and 6.4.4.1 */
-		prev->trbs[TRBS_PER_SEGMENT - 1].link.control |=
-			LE32(LINK_TOGGLE);
-	}
-	xhci_initialize_ring_info(ring);
-
-	return ring;
 }
 
 /**
@@ -443,10 +238,7 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int 
 int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 				  struct xhci_hcor *hcor)
 {
-	uint64_t val_64;
-	uint64_t trb_64;
 	uint32_t val;
-	struct xhci_segment *seg;
 
 	/* DCBAA initialization */
 	ctrl->dcbaa = xhci_malloc(ctrl, sizeof(struct xhci_device_context_array));
@@ -460,14 +252,13 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	xhci_writeq(&hcor->or_dcbaap, (dma_addr_t)ctrl->dcbaa);
 
 	/* Command ring control pointer register initialization */
-	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, TRUE);
+	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, TRUE, FALSE);
 
 	/* Set the address in the Command Ring Control register */
-	trb_64 = (dma_addr_t)ctrl->cmd_ring->first_seg->trbs;
-	val_64 = xhci_readq(&hcor->or_crcr);
-	val_64 = (val_64 & (u64)CMD_RING_RSVD_BITS) |
-			 (trb_64 & (u64)~CMD_RING_RSVD_BITS) |
-			 ctrl->cmd_ring->cycle_state;
+	u64 trb_64 = xhci_ring_get_new_dequeue_ptr(ctrl->cmd_ring);
+	u64 val_64 = xhci_readq(&hcor->or_crcr);
+	val_64 = (val_64 & (u64)(CMD_RING_ADDR_MASK | 1)) |
+			 (trb_64 & (u64) ~(CMD_RING_ADDR_MASK));
 	xhci_writeq(&hcor->or_crcr, val_64);
 
 	/* write the address of db register */
@@ -483,43 +274,12 @@ int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	/* writting the address of ir_set structure */
 	ctrl->ir_set = &ctrl->run_regs->ir_set[0];
 
-	/* Event ring does not maintain link TRB */
-	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, FALSE);
 	ctrl->erst.entries = xhci_malloc(ctrl, sizeof(struct xhci_erst_entry) *
 											   ERST_NUM_SEGS);
+	/* Event ring does not maintain link TRB */
+	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, FALSE, TRUE);
 
-	ctrl->erst.num_entries = ERST_NUM_SEGS;
-
-	for (val = 0, seg = ctrl->event_ring->first_seg;
-		 val < ERST_NUM_SEGS;
-		 val++)
-	{
-		struct xhci_erst_entry *entry = &ctrl->erst.entries[val];
-		trb_64 = (dma_addr_t)seg->trbs;
-		entry->seg_addr = LE64(trb_64);
-		entry->seg_size = LE32(TRBS_PER_SEGMENT);
-		entry->rsvd = 0;
-		seg = seg->next;
-	}
-	xhci_flush_cache(ctrl->erst.entries,
-					 ERST_NUM_SEGS * sizeof(struct xhci_erst_entry));
-
-	/* Update HC event ring dequeue pointer */
-	xhci_writeq(&ctrl->ir_set->erst_dequeue,
-				(u64)(uintptr_t)ctrl->event_ring->dequeue & (u64)~ERST_PTR_MASK);
-
-	/* set ERST count with the number of entries in the segment table */
-	val = readl(&ctrl->ir_set->erst_size);
-	val &= ERST_SIZE_MASK;
-	val |= ERST_NUM_SEGS;
-	writel(val, &ctrl->ir_set->erst_size);
-
-	/* this is the event ring segment table pointer */
-	val_64 = xhci_readq(&ctrl->ir_set->erst_base);
-	val_64 &= ERST_PTR_MASK;
-	val_64 |= (dma_addr_t)ctrl->erst.entries & ~ERST_PTR_MASK;
-
-	xhci_writeq(&ctrl->ir_set->erst_base, val_64);
+	xhci_ring_setup_erst(ctrl->event_ring, &ctrl->erst, ctrl->ir_set);
 
 	/* set up the scratchpad buffer array and scratchpad buffers */
 	xhci_scratchpad_alloc(ctrl);
@@ -793,8 +553,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 
 	struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, 0);
 	struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
-	u64 trb_64 = (dma_addr_t)ring->first_seg->trbs;
-	ep0_ctx->deq = LE64(trb_64 | ring->cycle_state);
+	ep0_ctx->deq = LE64(xhci_ring_get_new_dequeue_ptr(ring));
 
 	/*
 	 * xHCI spec 6.2.3:

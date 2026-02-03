@@ -15,6 +15,8 @@
 
 #include <debug.h>
 
+#include <xhci/xhci-ring.h>
+
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>
@@ -31,21 +33,360 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
+struct xhci_segment
+{
+	union xhci_trb *trbs;
+	/* private to HCD */
+	struct xhci_segment *next;
+};
+
+struct xhci_ring
+{
+	struct xhci_segment *first_seg;
+	union xhci_trb *enqueue;
+	struct xhci_segment *enq_seg;
+	union xhci_trb *dequeue;
+	struct xhci_segment *deq_seg;
+	/*
+	 * Write the cycle state into the TRB cycle field to give ownership of
+	 * the TRB to the host controller (if we are the producer), or to check
+	 * if we own the TRB (if we are the consumer).  See section 4.9.1.
+	 */
+	volatile u32 cycle_state;
+	unsigned int num_segs;
+
+	BOOL is_event_ring;
+};
+
+/**
+ * frees the "segment" pointer passed
+ *
+ * @param ptr	pointer to "segement" to be freed
+ * Return: none
+ */
+static void xhci_segment_free(struct xhci_ctrl *ctrl, struct xhci_segment *seg)
+{
+	memalign_free(ctrl->memoryPool, seg->trbs);
+	seg->trbs = NULL;
+
+	FreeVecPooled(ctrl->memoryPool, seg);
+}
+
+/**
+ * frees the "ring" pointer passed
+ *
+ * @param ptr	pointer to "ring" to be freed
+ * Return: none
+ */
+void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
+{
+	struct xhci_segment *seg;
+	struct xhci_segment *first_seg;
+
+	if (!ring)
+	{
+		Kprintf("Ring is NULL, nothing to free\n");
+		return;
+	}
+
+	first_seg = ring->first_seg;
+	seg = first_seg->next;
+	while (seg != first_seg)
+	{
+		struct xhci_segment *next = seg->next;
+		xhci_segment_free(ctrl, seg);
+		seg = next;
+	}
+	xhci_segment_free(ctrl, first_seg);
+
+	FreeVecPooled(ctrl->memoryPool, ring);
+}
+
+/**
+ * Make the prev segment point to the next segment.
+ * Change the last TRB in the prev segment to be a Link TRB which points to the
+ * address of the next segment.  The caller needs to set any Link TRB
+ * related flags, such as End TRB, Toggle Cycle, and no snoop.
+ *
+ * @param prev	pointer to the previous segment
+ * @param next	pointer to the next segment
+ * @param link_trbs	flag to indicate whether to link the trbs or NOT
+ * Return: none
+ */
+static void xhci_link_segments(struct xhci_segment *prev,
+							   struct xhci_segment *next, BOOL link_trbs)
+{
+	u32 val;
+
+	if (!prev || !next)
+		return;
+	prev->next = next;
+	if (link_trbs)
+	{
+		prev->trbs[TRBS_PER_SEGMENT - 1].link.segment_ptr =
+			LE64((dma_addr_t)next->trbs);
+
+		/*
+		 * Set the last TRB in the segment to
+		 * have a TRB type ID of Link TRB
+		 */
+		val = LE32(prev->trbs[TRBS_PER_SEGMENT - 1].link.control);
+		val &= ~TRB_TYPE_BITMASK;
+		val |= TRB_TYPE(TRB_LINK);
+		prev->trbs[TRBS_PER_SEGMENT - 1].link.control = LE32(val);
+	}
+}
+
+/**
+ * Initialises the Ring's enqueue,dequeue,enq_seg pointers
+ *
+ * @param ring	pointer to the RING to be intialised
+ * Return: none
+ */
+static void xhci_initialize_ring_info(struct xhci_ring *ring)
+{
+	/*
+	 * The ring is empty, so the enqueue pointer == dequeue pointer
+	 */
+	ring->enqueue = ring->first_seg->trbs;
+	ring->enq_seg = ring->first_seg;
+	ring->dequeue = ring->enqueue;
+	ring->deq_seg = ring->first_seg;
+
+	/*
+	 * The ring is initialized to 0. The producer must write 1 to the
+	 * cycle bit to handover ownership of the TRB, so PCS = 1.
+	 * The consumer must compare CCS to the cycle bit to
+	 * check ownership, so CCS = 1.
+	 */
+	ring->cycle_state = 1;
+}
+
+/**
+ * Allocates a generic ring segment from the ring pool, sets the dma address,
+ * initializes the segment to zero, and sets the private next pointer to NULL.
+ * Section 4.11.1.1:
+ * "All components of all Command and Transfer TRBs shall be initialized to '0'"
+ *
+ * @param	none
+ * Return: pointer to the newly allocated SEGMENT
+ */
+static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
+{
+	struct xhci_segment *seg;
+
+	seg = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_segment));
+	if (!seg)
+	{
+		Kprintf("AllocVecPooled failed for size %lu\n",
+				(ULONG)sizeof(struct xhci_segment));
+		return NULL;
+	}
+
+	seg->trbs = xhci_malloc(ctrl, SEGMENT_SIZE);
+	seg->next = NULL;
+
+	return seg;
+}
+
+/**
+ * Create a new ring with zero or more segments.
+ * TODO: current code only uses one-time-allocated single-segment rings
+ * of 1KB anyway, so we might as well get rid of all the segment and
+ * linking code (and maybe increase the size a bit, e.g. 4KB).
+ *
+ *
+ * Link each segment together into a ring.
+ * Set the end flag and the cycle toggle bit on the last segment.
+ * See section 4.9.2 and figures 15 and 16 of XHCI spec rev1.0.
+ *
+ * @param num_segs	number of segments in the ring
+ * @param link_trbs	flag to indicate whether to link the trbs or NOT
+ * Return: pointer to the newly created RING
+ */
+struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
+								  BOOL link_trbs, BOOL is_event_ring)
+{
+	struct xhci_ring *ring;
+	struct xhci_segment *prev;
+	unsigned int remaining = num_segs;
+
+	ring = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_ring));
+	if (!ring)
+	{
+		Kprintf("AllocVecPooled failed for size %lu\n",
+				(ULONG)sizeof(struct xhci_ring));
+		return NULL;
+	}
+	_memset(ring, 0, sizeof(struct xhci_ring));
+	ring->num_segs = num_segs;
+
+	if (remaining == 0)
+		return ring;
+
+	ring->first_seg = xhci_segment_alloc(ctrl);
+	if (!ring->first_seg)
+	{
+		Kprintf("xhci_segment_alloc failed\n");
+		FreeVecPooled(ctrl->memoryPool, ring);
+		return NULL;
+	}
+
+	remaining--;
+
+	prev = ring->first_seg;
+	while (remaining > 0)
+	{
+		struct xhci_segment *next;
+
+		next = xhci_segment_alloc(ctrl);
+		if (!next)
+		{
+			Kprintf("xhci_segment_alloc failed\n");
+			xhci_ring_free(ctrl, ring);
+			return NULL;
+		}
+
+		xhci_link_segments(prev, next, link_trbs);
+
+		prev = next;
+		remaining--;
+	}
+	xhci_link_segments(prev, ring->first_seg, link_trbs);
+	if (link_trbs)
+	{
+		/* See section 4.9.2.1 and 6.4.4.1 */
+		prev->trbs[TRBS_PER_SEGMENT - 1].link.control |=
+			LE32(LINK_TOGGLE);
+	}
+	xhci_initialize_ring_info(ring);
+	ring->is_event_ring = is_event_ring;
+
+	return ring;
+}
+
+void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct xhci_intr_reg *ir_set)
+{
+	uint32_t val;
+	struct xhci_segment *seg;
+	erst->num_entries = ERST_NUM_SEGS;
+
+	for (val = 0, seg = ring->first_seg;
+		 val < ERST_NUM_SEGS;
+		 val++)
+	{
+		struct xhci_erst_entry *entry = &erst->entries[val];
+		entry->seg_addr = LE64((dma_addr_t)seg->trbs);
+		entry->seg_size = LE32(TRBS_PER_SEGMENT);
+		entry->rsvd = 0;
+		seg = seg->next;
+	}
+	xhci_flush_cache(erst->entries, ERST_NUM_SEGS * sizeof(struct xhci_erst_entry));
+
+	/* Update HC event ring dequeue pointer */
+	xhci_writeq(&ir_set->erst_dequeue,
+				(u64)(uintptr_t)ring->dequeue & (u64)~ERST_PTR_MASK);
+
+	/* set ERST count with the number of entries in the segment table */
+	val = readl(&ir_set->erst_size);
+	val &= ERST_SIZE_MASK;
+	val |= ERST_NUM_SEGS;
+	writel(val, &ir_set->erst_size);
+
+	/* this is the event ring segment table pointer */
+	u64 val_64 = xhci_readq(&ir_set->erst_base);
+	val_64 &= ERST_PTR_MASK;
+	val_64 |= (dma_addr_t)erst->entries & ~ERST_PTR_MASK;
+
+	xhci_writeq(&ir_set->erst_base, val_64);
+}
+
+/**
+ * Checks if there is a new event to handle on the event ring.
+ *
+ * @param ctrl	Host controller data structure
+ * Return: 0 if failure else 1 on success
+ */
+inline static BOOL event_ready(struct xhci_ring *ring)
+{
+	xhci_inval_cache(ring->dequeue,
+					 sizeof(union xhci_trb));
+
+	union xhci_trb *event = ring->dequeue;
+
+	/* Does the HC or OS own the TRB? */
+	if ((LE32(event->event_cmd.flags) & TRB_CYCLE) != ring->cycle_state)
+		return FALSE;
+
+	return TRUE;
+}
+
+union xhci_trb *get_event_trb(struct xhci_ring *ring)
+{
+	union xhci_trb *event = ring->dequeue;
+	if (!event_ready(ring))
+		return NULL;
+	return event;
+}
+
+/**
+ * Finalizes a handled event TRB by advancing our dequeue pointer and giving
+ * the TRB back to the hardware for recycling. Must call this exactly once at
+ * the end of each event handler, and not touch the TRB again afterwards.
+ *
+ * @param ctrl	Host controller data structure
+ * Return: none
+ */
+void xhci_acknowledge_event(struct xhci_ctrl *ctrl)
+{
+	/* Advance our dequeue pointer to the next event */
+	inc_deq(ctrl->event_ring);
+
+	/* Inform the hardware */
+	xhci_writeq(&ctrl->ir_set->erst_dequeue, (dma_addr_t)ctrl->event_ring->dequeue | ERST_EHB);
+}
+
+u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring)
+{
+	return (u32)ring->enqueue | ring->cycle_state;
+}
+
+dma_addr_t xhci_ring_queue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u32 ep_index, trb_type cmd)
+{
+	u32 fields[4];
+
+	prepare_ring(ring);
+
+	fields[0] = lower_32_bits(address);
+	fields[1] = upper_32_bits(address);
+	fields[2] = 0;
+	fields[3] = TRB_TYPE(cmd) | SLOT_ID_FOR_TRB(slot_id) | ring->cycle_state;
+
+	/*
+	 * Only 'reset endpoint', 'stop endpoint' and 'set TR dequeue pointer'
+	 * commands need endpoint id encoded.
+	 */
+	if (cmd >= TRB_RESET_EP && cmd <= TRB_SET_DEQ)
+		fields[3] |= EP_ID_FOR_TRB(ep_index);
+
+	dma_addr_t trb_dma = queue_trb(ring, FALSE, fields);
+	return trb_dma;
+}
+
 /**
  * Is this TRB a link TRB or was the last TRB the last TRB in this event ring
  * segment?  I.e. would the updated event TRB pointer step off the end of the
  * event seg ?
  *
- * @param ctrl	Host controller data structure
  * @param ring	pointer to the ring
  * @param seg	poniter to the segment to which TRB belongs
  * @param trb	poniter to the ring trb
  * Return: 1 if this TRB a link TRB else 0
  */
-static int last_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
+static int last_trb(struct xhci_ring *ring,
 					struct xhci_segment *seg, union xhci_trb *trb)
 {
-	if (ring == ctrl->event_ring)
+	if (ring->is_event_ring)
 		return trb == &seg->trbs[TRBS_PER_SEGMENT];
 	else
 		return TRB_TYPE_LINK_LE32(trb->link.control);
@@ -55,18 +396,16 @@ static int last_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
  * Does this link TRB point to the first segment in a ring,
  * or was the previous TRB the last TRB on the last segment in the ERST?
  *
- * @param ctrl	Host controller data structure
  * @param ring	pointer to the ring
  * @param seg	poniter to the segment to which TRB belongs
  * @param trb	poniter to the ring trb
  * Return: 1 if this TRB is the last TRB on the last segment else 0
  */
-static BOOL last_trb_on_last_seg(struct xhci_ctrl *ctrl,
-								 struct xhci_ring *ring,
+static BOOL last_trb_on_last_seg(struct xhci_ring *ring,
 								 struct xhci_segment *seg,
 								 union xhci_trb *trb)
 {
-	if (ring == ctrl->event_ring)
+	if (ring->is_event_ring)
 		return ((trb == &seg->trbs[TRBS_PER_SEGMENT]) &&
 				(seg->next == ring->first_seg));
 	else
@@ -87,7 +426,6 @@ static BOOL last_trb_on_last_seg(struct xhci_ctrl *ctrl,
  * fixed in the 0.96 specification errata, but we have to assume that all 0.95
  * xHCI hardware can't handle the chain bit being cleared on a link TRB.
  *
- * @param ctrl	Host controller data structure
  * @param ring	pointer to the ring
  * @param more_trbs_coming	flag to indicate whether more trbs
  *				are expected or NOT.
@@ -95,8 +433,7 @@ static BOOL last_trb_on_last_seg(struct xhci_ctrl *ctrl,
  *				prepare_ring()?
  * Return: none
  */
-static void inc_enq(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
-					BOOL more_trbs_coming)
+static void inc_enq(struct xhci_ring *ring, BOOL more_trbs_coming)
 {
 	u32 chain;
 	union xhci_trb *next;
@@ -108,9 +445,9 @@ static void inc_enq(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
 	 * Update the dequeue pointer further if that was a link TRB or we're at
 	 * the end of an event ring segment (which doesn't have link TRBS)
 	 */
-	while (last_trb(ctrl, ring, ring->enq_seg, next))
+	while (last_trb(ring, ring->enq_seg, next))
 	{
-		if (ring != ctrl->event_ring)
+		if (!ring->is_event_ring)
 		{
 			/*
 			 * If the caller doesn't plan on enqueueing more
@@ -137,7 +474,7 @@ static void inc_enq(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
 							 sizeof(union xhci_trb));
 		}
 		/* Toggle the cycle bit after the last ring segment. */
-		if (last_trb_on_last_seg(ctrl, ring,
+		if (last_trb_on_last_seg(ring,
 								 ring->enq_seg, next))
 			ring->cycle_state = (ring->cycle_state ? 0 : 1);
 
@@ -151,11 +488,10 @@ static void inc_enq(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
  * See Cycle bit rules. SW is the consumer for the event ring only.
  * Don't make a ring full of link TRBs.  That would be dumb and this would loop.
  *
- * @param ctrl	Host controller data structure
  * @param ring	Ring whose Dequeue TRB pointer needs to be incremented.
  * return none
  */
-void inc_deq(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
+void inc_deq(struct xhci_ring *ring)
 {
 	do
 	{
@@ -164,10 +500,10 @@ void inc_deq(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
 		 * we're at the end of an event ring segment (which doesn't have
 		 * link TRBS)
 		 */
-		if (last_trb(ctrl, ring, ring->deq_seg, ring->dequeue))
+		if (last_trb(ring, ring->deq_seg, ring->dequeue))
 		{
-			if (ring == ctrl->event_ring &&
-				last_trb_on_last_seg(ctrl, ring,
+			if (ring->is_event_ring &&
+				last_trb_on_last_seg(ring,
 									 ring->deq_seg, ring->dequeue))
 			{
 				ring->cycle_state = (ring->cycle_state ? 0 : 1);
@@ -179,7 +515,7 @@ void inc_deq(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
 		{
 			ring->dequeue++;
 		}
-	} while (last_trb(ctrl, ring, ring->deq_seg, ring->dequeue));
+	} while (last_trb(ring, ring->deq_seg, ring->dequeue));
 }
 
 /**
@@ -188,13 +524,12 @@ void inc_deq(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
  *
  * @param	more_trbs_coming:   Will you enqueue more TRBs before calling
  *				prepare_ring()?
- * @param ctrl	Host controller data structure
  * @param ring	pointer to the ring
  * @param more_trbs_coming	flag to indicate whether more trbs
  * @param trb_fields	pointer to trb field array containing TRB contents
  * Return: pointer to the enqueued trb
  */
-dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
+dma_addr_t queue_trb(struct xhci_ring *ring,
 					 BOOL more_trbs_coming, unsigned int *trb_fields)
 {
 	struct xhci_generic_trb *trb;
@@ -207,7 +542,7 @@ dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
 
 	xhci_flush_cache(trb, sizeof(struct xhci_generic_trb));
 
-	inc_enq(ctrl, ring, more_trbs_coming);
+	inc_enq(ring, more_trbs_coming);
 
 	return (dma_addr_t)trb;
 }
@@ -216,41 +551,14 @@ dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
  * Does various checks on the endpoint ring, and makes it ready
  * to queue num_trbs.
  *
- * @param ctrl		Host controller data structure
  * @param ep_ring	pointer to the EP Transfer Ring
- * @param ep_state	State of the End Point
- * Return: error code in case of invalid ep_state, 0 on success
+ * Return: none
  */
-int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
-				 u32 ep_state)
+void prepare_ring(struct xhci_ring *ep_ring)
 {
 	union xhci_trb *next = ep_ring->enqueue;
 
-	/* Make sure the endpoint has been added to xHC schedule */
-	switch (ep_state)
-	{
-	case EP_STATE_DISABLED:
-		/*
-		 * USB core changed config/interfaces without notifying us,
-		 * or hardware is reporting the wrong state.
-		 */
-		Kprintf("WARN urb submitted to disabled ep\n");
-		return UHIOERR_BADPARAMS;
-	case EP_STATE_ERROR:
-		Kprintf("WARN waiting for error on ep to be cleared\n");
-		return UHIOERR_HOSTERROR;
-	case EP_STATE_HALTED:
-		Kprintf("WARN endpoint is halted\n");
-		return UHIOERR_HOSTERROR; /* should not happen, we're tracking state on our end as well */
-	case EP_STATE_STOPPED:
-	case EP_STATE_RUNNING:
-		break;
-	default:
-		Kprintf("ERROR unknown endpoint state for ep state=%ld\n", (LONG)ep_state);
-		return UHIOERR_BADPARAMS;
-	}
-
-	while (last_trb(ctrl, ep_ring, ep_ring->enq_seg, next))
+	while (last_trb(ep_ring, ep_ring->enq_seg, next))
 	{
 		/*
 		 * If we're not dealing with 0.95 hardware or isoc rings
@@ -263,14 +571,12 @@ int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
 		xhci_flush_cache(next, sizeof(union xhci_trb));
 
 		/* Toggle the cycle bit after the last ring segment. */
-		if (last_trb_on_last_seg(ctrl, ep_ring, ep_ring->enq_seg, next))
+		if (last_trb_on_last_seg(ep_ring, ep_ring->enq_seg, next))
 			ep_ring->cycle_state = (ep_ring->cycle_state ? 0 : 1);
 		ep_ring->enq_seg = ep_ring->enq_seg->next;
 		ep_ring->enqueue = ep_ring->enq_seg->trbs;
 		next = ep_ring->enqueue;
 	}
-
-	return UHIOERR_NO_ERROR;
 }
 
 /*
@@ -400,7 +706,6 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	int running_total, trb_buff_len;
 	BOOL more_trbs_coming = TRUE;
 	u64 addr;
-	int ret;
 	u32 trb_fields[4];
 	dma_addr_t *td_trb_addrs = NULL;
 	unsigned int td_trb_index = 0;
@@ -440,11 +745,11 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		deferred_giveback->start_cycle = 0;
 	}
 
+#ifdef DEBUG_HIGH
 	xhci_inval_cache(udev->out_ctx->bytes,
 					 udev->out_ctx->size);
 
 	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, ep_index);
-#ifdef DEBUG_HIGH
 	xhci_dump_slot_ctx("[xhci-ring] xhci_stream_tx:", xhci_get_slot_ctx(ctrl, udev->out_ctx));
 	xhci_dump_ep_ctx("[xhci-ring] xhci_stream_tx:", io->iouh_Endpoint, xep_ctx);
 #endif
@@ -497,12 +802,7 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 	}
 
 	/* Prepare the ring (resumes from stopped state, sets dequeue pointers, etc.). */
-	ret = prepare_ring(ctrl, ring, LE32(xep_ctx->ep_info) & EP_STATE_MASK);
-	if (ret < 0)
-	{
-		FreeVecPooled(ctrl->memoryPool, td_trb_addrs);
-		return ret;
-	}
+	prepare_ring(ring);
 
 	/* Defer toggling the cycle bit on the first TRB until the full TD is ready. */
 	start_trb = &ring->enqueue->generic;
@@ -581,7 +881,7 @@ int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 		KprintfH("queue TRB addr=%08lx%08lx lenf=%08lx flags=%08lx num_trbs=%ld\n",
 				 (ULONG)trb_fields[1], (ULONG)trb_fields[0], (ULONG)trb_fields[2], (ULONG)trb_fields[3], (LONG)num_trbs);
 
-		last_transfer_trb_addr = queue_trb(ctrl, ring, (num_trbs > 1), trb_fields);
+		last_transfer_trb_addr = queue_trb(ring, (num_trbs > 1), trb_fields);
 		td_trb_addrs[td_trb_index++] = last_transfer_trb_addr;
 
 		--num_trbs;
@@ -631,7 +931,6 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	KprintfH("slot=%ld ep=%ld length=%ld dir=%s\n",
 			 (LONG)udev->slot_id, io->iouh_Endpoint, io->iouh_Length,
 			 (io->iouh_SetupData.bmRequestType & USB_DIR_IN) ? "IN" : "OUT");
-	int ret;
 	int start_cycle;
 	int num_trbs;
 	u32 field;
@@ -685,10 +984,6 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		}
 	}
 
-	xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
-
-	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, ep_index);
-
 	/* 1 TRB for setup, 1 for status */
 	num_trbs = 2;
 	/*
@@ -720,13 +1015,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 		io->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
 		return UHIOERR_OUTOFMEMORY;
 	}
-	ret = prepare_ring(ctrl, ep_ring, LE32(xep_ctx->ep_info) & EP_STATE_MASK);
-
-	if (ret != UHIOERR_NO_ERROR)
-	{
-		FreeVecPooled(ctrl->memoryPool, td_trb_addrs);
-		return ret;
-	}
+	prepare_ring(ep_ring);
 
 	/*
 	 * Don't give the first TRB to the hardware (by toggling the cycle bit)
@@ -766,7 +1055,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 	trb_fields[3] = field;
 	KprintfH("setup TRB fields: %08lx %08lx %08lx %08lx\n",
 			 (ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
-	ULONG setup_trb = queue_trb(ctrl, ep_ring, TRUE, trb_fields);
+	ULONG setup_trb = queue_trb(ep_ring, TRUE, trb_fields);
 	KprintfH("setup TRB addr: %lx\n", (ULONG)setup_trb);
 	td_trb_addrs[td_trb_index++] = setup_trb;
 
@@ -801,7 +1090,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 
 		KprintfH("data TRB fields: %08lx %08lx %08lx %08lx\n",
 				 (ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
-		ULONG data_trb = queue_trb(ctrl, ep_ring, TRUE, trb_fields);
+		ULONG data_trb = queue_trb(ep_ring, TRUE, trb_fields);
 		KprintfH("data TRB addr: %lx\n", (ULONG)data_trb);
 		td_trb_addrs[td_trb_index++] = data_trb;
 	}
@@ -827,7 +1116,7 @@ int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int ti
 
 	KprintfH("status TRB fields: %08lx %08lx %08lx %08lx\n",
 			 (ULONG)trb_fields[0], (ULONG)trb_fields[1], (ULONG)trb_fields[2], (ULONG)trb_fields[3]);
-	dma_addr_t event_trb = queue_trb(ctrl, ep_ring, FALSE, trb_fields);
+	dma_addr_t event_trb = queue_trb(ep_ring, FALSE, trb_fields);
 	KprintfH("status TRB addr: %lx\n", (ULONG)event_trb);
 	td_trb_addrs[td_trb_index++] = event_trb;
 

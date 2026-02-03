@@ -7,6 +7,7 @@
 #include <xhci/xhci-usb.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-udev.h>
+#include <xhci/xhci-ring.h>
 #include <devices/usbhardware.h>
 
 #ifdef DEBUG
@@ -37,7 +38,6 @@ struct pending_command
 
 static const command_handler command_handlers[];
 
-#ifdef DEBUG_HIGH
 static const char *xhci_command_type_name(trb_type type)
 {
     switch (type)
@@ -64,7 +64,6 @@ static const char *xhci_command_type_name(trb_type type)
         return "UNKNOWN";
     }
 }
-#endif
 
 /**
  * Generic function for queueing a command TRB on the command ring.
@@ -81,29 +80,13 @@ static const char *xhci_command_type_name(trb_type type)
  */
 static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u32 ep_index, trb_type cmd, struct IOUsbHWReq *req, struct usb_device *udev)
 {
-    u32 fields[4];
 
-    int ret = prepare_ring(ctrl, ctrl->cmd_ring, EP_STATE_RUNNING);
-    if (ret)
+    dma_addr_t trb_dma = xhci_ring_queue_command(ctrl->cmd_ring, addr, slot_id, ep_index, cmd);
+    if(trb_dma == NULL)
     {
-        Kprintf("FATAL ERROR command ring not ready: cmd %ld, ret=%ld\n", cmd, ret);
+        Kprintf("Failed to queue command TRB for cmd %s\n", xhci_command_type_name(cmd));
         return;
     }
-
-    fields[0] = lower_32_bits(addr);
-    fields[1] = upper_32_bits(addr);
-    fields[2] = 0;
-    fields[3] = TRB_TYPE(cmd) | SLOT_ID_FOR_TRB(slot_id) |
-                ctrl->cmd_ring->cycle_state;
-
-    /*
-     * Only 'reset endpoint', 'stop endpoint' and 'set TR dequeue pointer'
-     * commands need endpoint id encoded.
-     */
-    if (cmd >= TRB_RESET_EP && cmd <= TRB_SET_DEQ)
-        fields[3] |= EP_ID_FOR_TRB(ep_index);
-
-    dma_addr_t trb_dma = queue_trb(ctrl, ctrl->cmd_ring, FALSE, fields);
 
     /* Add command handler to pending list */
     struct pending_command *pending_cmd = AllocVecPooled(ctrl->memoryPool, sizeof(struct pending_command));
@@ -556,9 +539,9 @@ void xhci_set_deq_pointer(struct usb_device *udev, u32 ep_index)
         Kprintf("No ep context for addr %ld ep %ld\n", (LONG)udev->poseidon_address, (LONG)ep_index);
         return;
     }
-    struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
 
-    u64 deq_ptr = (u32)ring->enqueue | ring->cycle_state;
+    struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
+    u64 deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
 
     KprintfH("Setting DEQ pointer for EP index %ld to %lx\n", (LONG)ep_index, (ULONG)deq_ptr);
     xhci_queue_command(ctrl, deq_ptr, udev->slot_id, ep_index, TRB_SET_DEQ, NULL, udev); // handle_set_deq

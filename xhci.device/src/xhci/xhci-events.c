@@ -32,6 +32,7 @@
 #include <xhci/xhci-usb.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-udev.h>
+#include <xhci/xhci-ring.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -62,23 +63,6 @@ static const ep_state_handler ep_state_dispatch[] = {
     [USB_DEV_EP_STATE_RT_ISO_RUNNING] = ep_handle_receiving_generic,
     [USB_DEV_EP_STATE_RT_ISO_STOPPING] = ep_handle_receiving_generic};
 
-/**
- * Finalizes a handled event TRB by advancing our dequeue pointer and giving
- * the TRB back to the hardware for recycling. Must call this exactly once at
- * the end of each event handler, and not touch the TRB again afterwards.
- *
- * @param ctrl	Host controller data structure
- * Return: none
- */
-inline static void xhci_acknowledge_event(struct xhci_ctrl *ctrl)
-{
-    /* Advance our dequeue pointer to the next event */
-    inc_deq(ctrl, ctrl->event_ring);
-
-    /* Inform the hardware */
-    xhci_writeq(&ctrl->ir_set->erst_dequeue, (dma_addr_t)ctrl->event_ring->dequeue | ERST_EHB);
-}
-
 /* Endpoint event dispatcher
  * Called when a Transfer Event TRB is received
  */
@@ -106,39 +90,11 @@ static void dispatch_ep_event(struct usb_device *udev, union xhci_trb *event)
     }
 }
 
-/**
- * Checks if there is a new event to handle on the event ring.
- *
- * @param ctrl	Host controller data structure
- * Return: 0 if failure else 1 on success
- */
-static BOOL event_ready(struct xhci_ctrl *ctrl)
-{
-    xhci_inval_cache(ctrl->event_ring->dequeue,
-                     sizeof(union xhci_trb));
-
-    union xhci_trb *event = ctrl->event_ring->dequeue;
-
-    /* Does the HC or OS own the TRB? */
-    if ((LE32(event->event_cmd.flags) & TRB_CYCLE) != ctrl->event_ring->cycle_state)
-        return FALSE;
-
-    return TRUE;
-}
-
-static union xhci_trb *get_event_trb(struct xhci_ctrl *ctrl)
-{
-    union xhci_trb *event = ctrl->event_ring->dequeue;
-    if (!event_ready(ctrl))
-        return NULL;
-    return event;
-}
-
 BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
 {
     BOOL activity = FALSE;
     union xhci_trb *event;
-    while ((event = get_event_trb(ctrl)))
+    while ((event = get_event_trb(ctrl->event_ring)))
     {
         activity = TRUE;
         trb_type type = TRB_FIELD_TO_TYPE(LE32(event->event_cmd.flags));

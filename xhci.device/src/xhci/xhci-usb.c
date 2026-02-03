@@ -6,6 +6,7 @@
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-debug.h>
 #include <xhci/xhci-usb.h>
+#include <xhci/xhci-ring.h>
 
 #include <debug.h>
 
@@ -1056,7 +1057,6 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
     int ep_index;
     unsigned int dir;
     unsigned int ep_type;
-    u64 trb_64 = 0;
     u32 max_esit_payload;
     unsigned int interval;
     unsigned int mult;
@@ -1080,7 +1080,6 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 
         endpt_desc = &active_alt->ep_desc[cur_ep];
         ss_ep_comp_desc = &active_alt->ss_ep_comp_desc[cur_ep];
-        trb_64 = 0;
 
         /*
          * Get values to fill the endpoint context, mostly from ep
@@ -1119,8 +1118,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
 
         struct ep_context *ep_context = xhci_ep_get_context_for_index(udev, ep_index);
         struct xhci_ring *ring = xhci_ep_get_ring(ep_context);
-        trb_64 = (u64)(uintptr_t)ring->enqueue;
-        ep_ctx[ep_index]->deq = LE64(trb_64 | ring->cycle_state);
+        ep_ctx[ep_index]->deq = LE64(xhci_ring_get_new_dequeue_ptr(ring));
 
         /*
          * xHCI spec 6.2.3:

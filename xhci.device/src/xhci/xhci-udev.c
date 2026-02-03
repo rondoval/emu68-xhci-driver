@@ -16,6 +16,7 @@
 #include <xhci/xhci-usb.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-udev.h>
+#include <xhci/xhci-ring.h>
 
 #include <device.h>
 #include <debug.h>

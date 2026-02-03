@@ -15,6 +15,7 @@
 #include <xhci/xhci-td.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci.h>
+#include <xhci/xhci-ring.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -75,7 +76,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, APTR memoryPo
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
     _NewMinList(&ep_ctx->pending_reqs);
     ep_ctx->active_tds = xhci_td_create_list(udev->controller);
-    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, TRUE);
+    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/TRUE, /*is_event_ring*/FALSE);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
     {
         Kprintf("Failed to create resources for EP %d\n", ep_index);

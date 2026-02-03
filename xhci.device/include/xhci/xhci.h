@@ -249,8 +249,8 @@ struct xhci_hcor
 /* true: command ring is running */
 #define CMD_RING_RUNNING (1 << 3)
 /* bits 4:5 reserved and should be preserved */
-/* Command Ring pointer - bit mask for the lower 32 bits. */
-#define CMD_RING_RSVD_BITS (0x3f)
+#define CMD_RING_RSVD_BITS (3 << 4)
+#define CMD_RING_ADDR_MASK (CMD_RING_PAUSE | CMD_RING_ABORT | CMD_RING_RUNNING | CMD_RING_RSVD_BITS)
 
 /* CONFIG - Configure Register - config_reg bitmasks */
 /* bits 0:7 - maximum number of device slots enabled (NumSlotsEn) */
@@ -1022,29 +1022,6 @@ typedef enum
 #define TRB_MAX_BUFF_SHIFT 16
 #define TRB_MAX_BUFF_SIZE (1 << TRB_MAX_BUFF_SHIFT)
 
-struct xhci_segment
-{
-	union xhci_trb *trbs;
-	/* private to HCD */
-	struct xhci_segment *next;
-};
-
-struct xhci_ring
-{
-	struct xhci_segment *first_seg;
-	union xhci_trb *enqueue;
-	struct xhci_segment *enq_seg;
-	union xhci_trb *dequeue;
-	struct xhci_segment *deq_seg;
-	/*
-	 * Write the cycle state into the TRB cycle field to give ownership of
-	 * the TRB to the host controller (if we are the producer), or to check
-	 * if we own the TRB (if we are the consumer).  See section 4.9.1.
-	 */
-	volatile u32 cycle_state;
-	unsigned int num_segs;
-};
-
 struct xhci_erst_entry
 {
 	/* 64-bit event ring segment address */
@@ -1202,7 +1179,7 @@ struct xhci_ctrl
 	struct pci_device *pci_dev;
 	struct usb_device *devices_by_poseidon_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];
-	
+
 	struct usb_device *pending_parent; /* parent hub pending for next default-address child */
 	unsigned int pending_parent_port;
 	enum usb_device_speed pending_parent_speed;
@@ -1227,13 +1204,6 @@ void xhci_slot_copy(struct xhci_ctrl *ctrl,
 					struct xhci_container_ctx *out_ctx);
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
 void xhci_update_hub_tt(struct usb_device *udev);
-int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
-				   unsigned int timeout_ms,
-				   u32 trb_type_bits, BOOL enable_short_packet,
-				   BOOL defer_doorbell,
-				   struct xhci_giveback_info *deferred_giveback);
-void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info *giveback);
-int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
 
 inline void xhci_flush_cache(APTR addr, ULONG len)
 {
@@ -1248,14 +1218,11 @@ inline void xhci_inval_cache(APTR addr, ULONG len)
 void xhci_cleanup(struct xhci_ctrl *ctrl);
 dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy);
 void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy);
-struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
-								  BOOL link_trbs);
-void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
 struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int type);
 void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx);
 int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 				  struct xhci_hcor *hcor);
-
+void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size);
 /**
  * xhci_deregister() - Unregister an XHCI controller
  *
@@ -1277,9 +1244,4 @@ int xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 
 extern struct dm_usb_ops xhci_usb_ops;
 
-void inc_deq(struct xhci_ctrl *ctrl, struct xhci_ring *ring);
-int prepare_ring(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring,
-				 u32 ep_state);
-dma_addr_t queue_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ring,
-					 BOOL more_trbs_coming, unsigned int *trb_fields);
 #endif /* HOST_XHCI_H_ */
