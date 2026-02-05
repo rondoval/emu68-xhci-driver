@@ -6,21 +6,15 @@
 #include <xhci/xhci.h>
 
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
-								  BOOL link_trbs, BOOL is_event_ring);
+								  BOOL link_trbs, BOOL is_event_ring, int ep_index);
 void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
 
 int xhci_stream_tx(struct usb_device *udev, struct IOUsbHWReq *io,
 				   unsigned int timeout_ms,
 				   u32 trb_type_bits, BOOL enable_short_packet,
-				   BOOL defer_doorbell,
-				   struct xhci_giveback_info *deferred_giveback);
-void xhci_ring_giveback(struct usb_device *udev, const struct xhci_giveback_info *giveback);
+				   BOOL defer_doorbell);
+void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
 int xhci_ctrl_tx(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms);
-
-void inc_deq(struct xhci_ring *ring);
-void prepare_ring(struct xhci_ring *ring);
-dma_addr_t queue_trb(struct xhci_ring *ring,
-					 BOOL more_trbs_coming, unsigned int *trb_fields);
 
 void xhci_acknowledge_event(struct xhci_ctrl *ctrl);
 union xhci_trb *get_event_trb(struct xhci_ring *ring);

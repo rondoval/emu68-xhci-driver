@@ -909,13 +909,6 @@ union xhci_trb
 	struct xhci_generic_trb generic;
 };
 
-struct xhci_giveback_info
-{
-	int start_cycle;
-	int ep_index;
-	struct xhci_generic_trb *start_trb;
-};
-
 /* TRB bit mask */
 #define TRB_TYPE_BITMASK (0xfc00)
 #define TRB_TYPE(p) ((p) << 10)

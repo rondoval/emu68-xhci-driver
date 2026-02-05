@@ -324,13 +324,11 @@ int xhci_udev_send(struct IOUsbHWReq *req)
     case UHCMD_ISOXFER:
         return xhci_stream_tx(udev, req, timeout_ms,
                               TRB_TYPE(TRB_ISOC) | TRB_SIA, FALSE,
-                              FALSE,
-                              NULL);
+                              FALSE);
     case UHCMD_BULKXFER:
         return xhci_stream_tx(udev, req, timeout_ms,
                               TRB_TYPE(TRB_NORMAL), TRUE,
-                              FALSE,
-                              NULL);
+                              FALSE);
     case UHCMD_INTXFER:
     {
         struct xhci_ctrl *ctrl = unit->xhci_ctrl;
@@ -342,8 +340,7 @@ int xhci_udev_send(struct IOUsbHWReq *req)
 
         return xhci_stream_tx(udev, req, timeout_ms,
                               TRB_TYPE(TRB_NORMAL), TRUE,
-                              FALSE,
-                              NULL);
+                              FALSE);
     }
     default:
         Kprintf("unsupported command %ld (req=%lx, devaddr=%ld, endpoint=%ld, flags=0x%lx)\n",

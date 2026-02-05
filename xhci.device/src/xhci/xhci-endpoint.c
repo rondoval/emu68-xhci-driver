@@ -76,7 +76,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, APTR memoryPo
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
     _NewMinList(&ep_ctx->pending_reqs);
     ep_ctx->active_tds = xhci_td_create_list(udev->controller);
-    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/TRUE, /*is_event_ring*/FALSE);
+    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/TRUE, /*is_event_ring*/FALSE, ep_index);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
     {
         Kprintf("Failed to create resources for EP %d\n", ep_index);
@@ -466,10 +466,6 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
     struct IOUsbHWReq *template = ep_ctx->rt_template_req;
     ULONG prefetch_bytes = ep_ctx->rt_req->urti_OutPrefetch;
 
-    struct xhci_giveback_info giveback = {0};
-    BOOL have_giveback = FALSE;
-    BOOL first_td = TRUE;
-
     while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
     {
         ULONG frame = ep_ctx->rt_next_frame;
@@ -522,22 +518,14 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         rt_io->iouh_Length = rt_buffer_req.ubr_Length;
         rt_io->iouh_Frame = (UWORD)frame;
 
-        struct xhci_giveback_info local_giveback = {0};
         int ret = xhci_stream_tx(ep_ctx->udev, rt_io, 0,
                                  TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE,
-                                 TRUE, /* RT ISO defers doorbell to per-run giveback */
-                                 first_td ? &local_giveback : NULL);
+                                 TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != UHIOERR_NO_ERROR)
         {
             FreeVecPooled(ep_ctx->memoryPool, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
-        }
-
-        if (first_td && local_giveback.start_trb)
-        {
-            giveback = local_giveback;
-            have_giveback = TRUE;
         }
 
         ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
@@ -547,20 +535,14 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
                  (ULONG)rt_io->iouh_Length,
                  (ULONG)ep_ctx->rt_inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
-        first_td = FALSE;
     }
 
-    if (have_giveback)
-        xhci_ring_giveback(ep_ctx->udev, &giveback);
+    xhci_ring_giveback(ep_ctx->udev, ep_ctx);
 }
 
 static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 {
     struct IOUsbHWReq *template = ep_ctx->rt_template_req;
-
-    struct xhci_giveback_info giveback = {0};
-    BOOL have_giveback = FALSE;
-    BOOL first_td = TRUE;
 
     int inflight = xhci_ep_get_active_td_count(ep_ctx);
     while (inflight < RT_ISO_IN_TARGET_TDS)
@@ -590,11 +572,9 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)ep_ctx->rt_inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
-        struct xhci_giveback_info local_giveback = {0};
         int ret = xhci_stream_tx(ep_ctx->udev, rt_io, 0,
                                  TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE,
-                                 TRUE, /* RT ISO defers doorbell to per-run giveback */
-                                 first_td ? &local_giveback : NULL);
+                                 TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != UHIOERR_NO_ERROR)
         {
             FreeVecPooled(ep_ctx->memoryPool, rt_io->iouh_Data);
@@ -604,12 +584,6 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         }
         ++inflight;
 
-        if (first_td && local_giveback.start_trb)
-        {
-            giveback = local_giveback;
-            have_giveback = TRUE;
-        }
-
         ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
         ep_ctx->rt_inflight_bytes += rt_io->iouh_Length;
         KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
@@ -617,11 +591,9 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)rt_io->iouh_Length,
                  (ULONG)ep_ctx->rt_inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
-        first_td = FALSE;
     }
 
-    if (have_giveback)
-        xhci_ring_giveback(ep_ctx->udev, &giveback);
+    xhci_ring_giveback(ep_ctx->udev, ep_ctx);
 }
 
 static void xhci_ep_notify_rt_iso_stopped(struct ep_context *ep_ctx)
