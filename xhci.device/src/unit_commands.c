@@ -15,6 +15,7 @@
 #include <config.h>
 #include <device.h>
 #include <debug.h>
+#include <xhci/usb_defs.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-endpoint.h>

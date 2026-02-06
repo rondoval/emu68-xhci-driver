@@ -8,13 +8,8 @@
 
 typedef struct MinList IOReqList;
 
-typedef struct {
-    struct MinList list;
-    struct xhci_ctrl *ctrl;
-    APTR memoryPool;
-    ULONG queued_trbs;
-    ULONG queued_tds;
-} TransferDescriptorList;
+typedef struct TransferDescriptorList TransferDescriptorList;
+struct xhci_ctrl;
 
 TransferDescriptorList* xhci_td_create_list(struct xhci_ctrl *ctrl);
 void xhci_td_destroy_list(TransferDescriptorList *td_list, UBYTE error_code);

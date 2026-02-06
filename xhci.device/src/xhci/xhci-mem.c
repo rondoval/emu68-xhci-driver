@@ -22,12 +22,12 @@
 #include <compat.h>
 #include <debug.h>
 
-#include <xhci/usb.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-ring.h>
+#include <xhci/xhci-udev.h>
 
 #ifdef DEBUG
 #undef Kprintf

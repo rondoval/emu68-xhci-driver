@@ -27,8 +27,10 @@
 
 #include <debug.h>
 #include <xhci/ch9.h>
+#include <xhci/usb_defs.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
+#include <xhci/xhci-udev.h>
 
 #ifdef DEBUG
 #undef Kprintf

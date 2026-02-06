@@ -22,6 +22,7 @@
 #include <xhci/xhci-debug.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-usb.h>
+#include <xhci/xhci-udev.h>
 
 #ifdef DEBUG
 #undef Kprintf

@@ -1,7 +1,6 @@
 #ifndef __XHCI_ENDPOINT_H__
 #define __XHCI_ENDPOINT_H__
 
-#include <xhci/usb.h>
 #include <devices/usbhardware.h>
 
 enum ep_state
@@ -17,6 +16,7 @@ enum ep_state
     USB_DEV_EP_STATE_RT_ISO_STOPPING
 };
 
+struct usb_device;
 struct ep_context;
 
 BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, APTR memoryPool);

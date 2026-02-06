@@ -32,6 +32,14 @@ struct xhci_td
     dma_addr_t *trb_addrs;     /* DMA addresses for every TRB in this TD */
 };
 
+struct TransferDescriptorList {
+    struct MinList list;
+    struct xhci_ctrl *ctrl;
+    APTR memoryPool;
+    ULONG queued_trbs;
+    ULONG queued_tds;
+};
+
 TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
 {
     TransferDescriptorList *td_list = AllocVecPooled(ctrl->memoryPool, sizeof(TransferDescriptorList));

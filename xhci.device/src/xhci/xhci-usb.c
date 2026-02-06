@@ -1,5 +1,6 @@
 #include <exec/types.h>
 #include <xhci/ch9.h>
+#include <xhci/usb_defs.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-commands.h>
@@ -7,6 +8,7 @@
 #include <xhci/xhci-debug.h>
 #include <xhci/xhci-usb.h>
 #include <xhci/xhci-ring.h>
+#include <xhci/xhci-udev.h>
 
 #include <debug.h>
 

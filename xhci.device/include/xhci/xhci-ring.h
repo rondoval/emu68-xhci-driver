@@ -2,8 +2,12 @@
 #define __XHCI_RING_H
 
 #include <exec/types.h>
+#include <devices/usbhardware.h>
 #include <compat.h>
 #include <xhci/xhci.h>
+
+struct usb_device;
+struct ep_context;
 
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 								  BOOL link_trbs, BOOL is_event_ring, int ep_index);

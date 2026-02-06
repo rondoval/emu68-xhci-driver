@@ -1,6 +1,5 @@
 #include <debug.h>
 
-#include <xhci/usb.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-debug.h>

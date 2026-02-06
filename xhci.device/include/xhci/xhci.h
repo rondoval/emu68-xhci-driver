@@ -25,7 +25,7 @@
 #include <compat.h>
 #include <pci_types.h>
 #include <devices/usbhardware.h>
-#include <xhci/usb.h>
+#include <xhci/xhci-udev.h>
 
 #define XHCI_ALIGNMENT 64
 /* Generic timeout for XHCI events */
