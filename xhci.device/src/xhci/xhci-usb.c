@@ -386,6 +386,24 @@ void xhci_usb_parse_control_message(struct usb_device *udev, struct IOUsbHWReq *
         parse_config_descriptor(udev, (UBYTE *)io->iouh_Data, (UWORD)io->iouh_Actual);
     }
 
+    /* Update FS control endpoint max packet size based on device descriptor. */
+    if ((io->iouh_SetupData.bRequest == USB_REQ_GET_DESCRIPTOR) &&
+        (io->iouh_SetupData.bmRequestType & USB_DIR_IN) &&
+        (((LE16(io->iouh_SetupData.wValue)) >> 8) == USB_DT_DEVICE) &&
+        io->iouh_Actual >= 8 && io->iouh_Data)
+    {
+        struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)io->iouh_Data;
+        if (udev->speed == USB_SPEED_FULL && udev->slot_id != 0)
+        {
+            if (xhci_check_maxpacket(udev, dev_desc->bMaxPacketSize0))
+            {
+                Kprintf("Control endpoint max packet size changed, reconfiguring endpoints, addr %ld\n",
+                        (ULONG)udev->poseidon_address);
+                xhci_configure_endpoints(udev, TRUE, io);
+            }
+        }
+    }
+
     /* Record TT think time from hub descriptors so child devices can be programmed correctly. */
     if ((io->iouh_SetupData.bRequest == USB_REQ_GET_DESCRIPTOR) &&
         (io->iouh_SetupData.bmRequestType == (USB_DIR_IN | USB_RT_HUB)))
@@ -1228,15 +1246,14 @@ int xhci_check_maxpacket(struct usb_device *udev, unsigned int max_packet_size)
 
     out_ctx = udev->out_ctx;
     xhci_inval_cache(out_ctx->bytes, out_ctx->size);
-    KprintfH("Checking max packet size for ep 0\n");
+    Kprintf("Checking max packet size for ep 0 of address %ld (slot %ld)\n", (LONG)udev->poseidon_address, (LONG)udev->slot_id);
 
     ep_ctx = xhci_get_ep_ctx(ctrl, out_ctx, ep_index);
     hw_max_packet_size = MAX_PACKET_DECODED(LE32(ep_ctx->ep_info2));
     if (hw_max_packet_size != max_packet_size)
     {
-        KprintfH("Max Packet Size for ep 0 changed to %ld.\n", max_packet_size);
-        KprintfH("Max packet size in xHCI HW = %ld\n", hw_max_packet_size);
-        KprintfH("Issuing evaluate context command.\n");
+        Kprintf("Max Packet Size for ep 0 changed to %ld.\n", max_packet_size);
+        Kprintf("Max packet size in xHCI HW = %ld\n", hw_max_packet_size);
 
         /* Set up the modified control endpoint 0 */
         xhci_endpoint_copy(ctrl, udev->in_ctx,

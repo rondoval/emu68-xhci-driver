@@ -81,7 +81,7 @@ static const char *xhci_command_type_name(trb_type type)
 static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u32 ep_index, trb_type cmd, struct IOUsbHWReq *req, struct usb_device *udev)
 {
 
-    dma_addr_t trb_dma = xhci_ring_queue_command(ctrl->cmd_ring, addr, slot_id, ep_index, cmd);
+    dma_addr_t trb_dma = xhci_ring_enqueue_command(ctrl->cmd_ring, addr, slot_id, ep_index, cmd);
     if(trb_dma == NULL)
     {
         Kprintf("Failed to queue command TRB for cmd %s\n", xhci_command_type_name(cmd));
@@ -271,7 +271,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
         if (cmd->req->iouh_Flags & UHFF_NAKTIMEOUT)
             timeout = cmd->req->iouh_NakTimeout;
 
-        xhci_ctrl_tx(cmd->udev, cmd->req, timeout);
+        xhci_ring_enqueue_td(cmd->udev, cmd->req, timeout, FALSE);
     }
 }
 

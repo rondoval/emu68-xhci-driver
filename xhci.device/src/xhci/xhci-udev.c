@@ -226,7 +226,7 @@ int xhci_udev_send_ctrl(struct usb_device *udev, struct IOUsbHWReq *io)
     if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
         timeout_ms = io->iouh_NakTimeout;
 
-    int ret = xhci_ctrl_tx(udev, io, timeout_ms);
+    int ret = xhci_ring_enqueue_td(udev, io, timeout_ms, FALSE);
 
     return ret;
 }
@@ -286,7 +286,7 @@ static int xhci_udev_send_ctrl_first(struct usb_device *udev, struct IOUsbHWReq 
         return UHIOERR_NO_ERROR;
     }
 
-    int ret = xhci_ctrl_tx(udev, io, timeout_ms);
+    int ret = xhci_ring_enqueue_td(udev, io, timeout_ms, FALSE);
     return ret;
 }
 
@@ -322,13 +322,8 @@ int xhci_udev_send(struct IOUsbHWReq *req)
     case UHCMD_CONTROLXFER:
         return xhci_udev_send_ctrl_first(udev, req, timeout_ms);
     case UHCMD_ISOXFER:
-        return xhci_stream_tx(udev, req, timeout_ms,
-                              TRB_TYPE(TRB_ISOC) | TRB_SIA, FALSE,
-                              FALSE);
     case UHCMD_BULKXFER:
-        return xhci_stream_tx(udev, req, timeout_ms,
-                              TRB_TYPE(TRB_NORMAL), TRUE,
-                              FALSE);
+        return xhci_ring_enqueue_td(udev, req, timeout_ms, FALSE);
     case UHCMD_INTXFER:
     {
         struct xhci_ctrl *ctrl = unit->xhci_ctrl;
@@ -338,9 +333,7 @@ int xhci_udev_send(struct IOUsbHWReq *req)
             return result;
         }
 
-        return xhci_stream_tx(udev, req, timeout_ms,
-                              TRB_TYPE(TRB_NORMAL), TRUE,
-                              FALSE);
+        return xhci_ring_enqueue_td(udev, req, timeout_ms, FALSE);
     }
     default:
         Kprintf("unsupported command %ld (req=%lx, devaddr=%ld, endpoint=%ld, flags=0x%lx)\n",

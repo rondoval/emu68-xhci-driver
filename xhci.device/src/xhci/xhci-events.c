@@ -94,11 +94,11 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
 {
     BOOL activity = FALSE;
     union xhci_trb *event;
-    while ((event = get_event_trb(ctrl->event_ring)))
+    while ((event = xhci_ring_get_event_trb(ctrl->event_ring)))
     {
         activity = TRUE;
         trb_type type = TRB_FIELD_TO_TYPE(LE32(event->event_cmd.flags));
-        xhci_acknowledge_event(ctrl);
+        xhci_ring_acknowledge_event(ctrl);
 
         switch (type)
         {

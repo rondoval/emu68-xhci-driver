@@ -76,7 +76,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, APTR memoryPo
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
     _NewMinList(&ep_ctx->pending_reqs);
     ep_ctx->active_tds = xhci_td_create_list(udev->controller);
-    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/TRUE, /*is_event_ring*/FALSE, ep_index);
+    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
     {
         Kprintf("Failed to create resources for EP %d\n", ep_index);
@@ -518,9 +518,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         rt_io->iouh_Length = rt_buffer_req.ubr_Length;
         rt_io->iouh_Frame = (UWORD)frame;
 
-        int ret = xhci_stream_tx(ep_ctx->udev, rt_io, 0,
-                                 TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE,
-                                 TRUE /* RT ISO defers doorbell to per-run giveback */);
+        int ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != UHIOERR_NO_ERROR)
         {
             FreeVecPooled(ep_ctx->memoryPool, rt_io);
@@ -572,9 +570,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)ep_ctx->rt_inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
-        int ret = xhci_stream_tx(ep_ctx->udev, rt_io, 0,
-                                 TRB_TYPE(TRB_ISOC) | TRB_SIA | TRB_IOC, FALSE,
-                                 TRUE /* RT ISO defers doorbell to per-run giveback */);
+        int ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != UHIOERR_NO_ERROR)
         {
             FreeVecPooled(ep_ctx->memoryPool, rt_io->iouh_Data);
