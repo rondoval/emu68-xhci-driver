@@ -81,7 +81,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
 {
 
     dma_addr_t trb_dma = xhci_ring_enqueue_command(ctrl->cmd_ring, addr, slot_id, ep_index, cmd);
-    if(trb_dma == NULL)
+    if (trb_dma == NULL)
     {
         Kprintf("Failed to queue command TRB for cmd %s\n", xhci_command_type_name(cmd));
         return;
@@ -236,31 +236,21 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 #endif
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
 
-    if (comp != COMP_SUCCESS)
-    {
 #ifdef DEBUG_HIGH
-        ULONG slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
-        Kprintf("ERROR: %s command for slot %ld returned completion code 0x%lx.\n",
-                type_name, slot_id, (ULONG)comp);
-
-        if (cmd->udev)
-        {
-            xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, cmd->udev->in_ctx));
-            xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, cmd->udev->out_ctx));
-        }
-#endif
-        return;
-    }
-
-#ifdef DEBUG_HIGH
-    KprintfH("%s command for slot %ld completed successfully\n", type_name, TRB_TO_SLOT_ID(LE32(event->event_cmd.flags)));
-
     if (type == TRB_EVAL_CONTEXT && cmd->udev)
     {
         xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, cmd->udev->in_ctx));
         xhci_dump_slot_ctx("[xhci-commands] handle_config_ep:", xhci_get_slot_ctx(ctrl, cmd->udev->out_ctx));
     }
 #endif
+
+    if (comp != COMP_SUCCESS)
+    {
+        KprintfH("ERROR: %s command for slot %ld returned completion code 0x%lx.\n", type_name, TRB_TO_SLOT_ID(LE32(event->event_cmd.flags)), (ULONG)comp);
+        return;
+    }
+
+    KprintfH("%s command for slot %ld completed successfully\n", type_name, TRB_TO_SLOT_ID(LE32(event->event_cmd.flags)));
 
     cmd->udev->slot_state = USB_DEV_SLOT_STATE_CONFIGURED;
 

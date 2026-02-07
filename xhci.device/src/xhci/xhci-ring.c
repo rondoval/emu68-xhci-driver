@@ -735,19 +735,19 @@ inline static void xhci_ring_enqueue_control_trbs(struct xhci_ctrl *ctrl, struct
 	td_trb_addrs[td_trb_index++] = status_trb;
 }
 
-inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring, struct IOUsbHWReq *io, u64 addr, int num_trbs, unsigned int trb_buff_len, dma_addr_t *td_trb_addrs)
+inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring, struct IOUsbHWReq *io, u64 addr, u32 num_trbs, u32 trb_buff_len, dma_addr_t *td_trb_addrs)
 {
+	KprintfH("num_trbs = %lu, trb_buff_len = %lu\n", (ULONG)num_trbs, (ULONG)trb_buff_len);
 	const BOOL is_iso = io->iouh_Req.io_Command == UHCMD_ADDISOHANDLER ||
 						io->iouh_Req.io_Command == UHCMD_ISOXFER;
 
-	const unsigned int length = io->iouh_Length;
+	const u32 length = io->iouh_Length;
 	const u32 enable_short_packet = (!is_iso && (io->iouh_Dir == UHDIR_IN)) ? TRB_ISP : 0;
 	const u32 trb_type_bits = (is_iso) ? ((u32)TRB_TYPE(TRB_ISOC) | TRB_SIA) : (TRB_TYPE(TRB_NORMAL) | enable_short_packet);
 
-	unsigned int running_total = 0;
-	unsigned int td_trb_index = 0;
+	u32 running_total = 0;
+	u32 td_trb_index = 0;
 
-	/* How much data is in the first TRB? */
 	/*
 	 * How much data is (potentially) left before the 64KB boundary?
 	 * XHCI Spec puts restriction( TABLE 49 and 6.4.1 section of XHCI Spec)
@@ -820,12 +820,13 @@ inline static void xhci_ring_finalize_first_trb(struct usb_device *udev, int ep_
 		giveback_first_trb(udev, ep_index, start_trb);
 }
 
-inline static int xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io, int *trb_buff_len, u64 *addr)
+inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io, u32 *trb_buff_len, u64 *addr)
 {
 	if (io->iouh_Req.io_Command == UHCMD_CONTROLXFER)
 		/* 1 TRB for setup, 1 for status, 1 optional for data */
 		return (io->iouh_Length > 0) ? 3 : 2;
 
+	const u32 length = io->iouh_Length;
 	*addr = xhci_dma_map(ctrl, io, io->iouh_Dir == UHDIR_OUT);
 
 	/*
@@ -833,15 +834,15 @@ inline static int xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct IOUsbHW
 	 * XHCI Spec (Table 49 / 6.4.1) requires we avoid spanning that boundary, so
 	 * we may need several chained TRBs if the buffer crosses it.
 	 */
-	int running_total = TRB_MAX_BUFF_SIZE - (lower_32_bits(*addr) & (TRB_MAX_BUFF_SIZE - 1));
+	u32 running_total = TRB_MAX_BUFF_SIZE - (lower_32_bits(*addr) & (TRB_MAX_BUFF_SIZE - 1));
 	*trb_buff_len = running_total;
 	running_total &= TRB_MAX_BUFF_SIZE - 1;
 
-	int num_trbs = 0;
+	u32 num_trbs = 0;
 	/* If we already cover bytes in this 64KB chunk, or the transfer is zero length,
 	 * we schedule at least one TRB now.
 	 */
-	if (running_total != 0 || io->iouh_Length == 0)
+	if (running_total != 0 || length == 0)
 		num_trbs++;
 
 	/* Account for remaining 64KB windows, adding more TRBs as needed. */
@@ -851,6 +852,9 @@ inline static int xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct IOUsbHW
 
 int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms, BOOL defer_doorbell)
 {
+#ifdef DEBUG_HIGH
+	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
+#endif
 	struct xhci_ctrl *ctrl = udev->controller;
 
 	const int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
@@ -880,9 +884,10 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 	xhci_dump_ep_ctx("[xhci-ring] xhci_stream_tx:", io->iouh_Endpoint, xep_ctx);
 #endif
 
-	int trb_buff_len = 0;
-	u64 addr = 0;
-	int num_trbs = xhci_ring_calc_num_trbs(ctrl, io, &trb_buff_len, &addr);
+	u32 trb_buff_len = 0; // non-control only
+	u64 addr = 0;		  // non-control only
+	u32 num_trbs = xhci_ring_calc_num_trbs(ctrl, io, &trb_buff_len, &addr);
+	KprintfH("Calculated num_trbs=%lu trb_buff_len=%lu addr=%lx\n", (ULONG)num_trbs, (ULONG)trb_buff_len, (ULONG)addr);
 
 	struct xhci_ring *ep_ring = xhci_ep_get_ring(udev_ep_ctx);
 	if (!ep_ring)
@@ -893,7 +898,7 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 
 	if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1))
 	{
-		KprintfH("Ring full ep=%ld needed %ld TRBs\n", 0L, (LONG)num_trbs);
+		KprintfH("Ring full ep=%lu needed %lu TRBs\n", (ULONG)ep_index, (ULONG)num_trbs);
 		xhci_ep_enqueue(udev_ep_ctx, io);
 		return UHIOERR_NO_ERROR;
 	}

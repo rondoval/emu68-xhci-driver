@@ -4,6 +4,7 @@
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-debug.h>
+#include <devices/usbhardware.h>
 
 static const char *slot_state_name(ULONG state)
 {
@@ -292,4 +293,27 @@ void xhci_dump_config(const char *tag, const struct usb_config *cfg, UBYTE addr)
     Kprintf("%s  no_of_if=%lu\n", pfx, (ULONG)cfg->no_of_if);
     for (UBYTE i = 0; i < cfg->no_of_if; ++i)
         xhci_dump_interface(pfx, i, &cfg->if_desc[i]);
+}
+
+void xhci_dump_request(const char *tag, const struct IOUsbHWReq *req)
+{
+    if (!req)
+        return;
+
+    const char *pfx = tag ? tag : "";
+
+    Kprintf("%s Request dump:\n", pfx);
+    Kprintf("%s  Endpoint=0x%02lx Dir=%s Type=%s\n",
+            pfx, (ULONG)req->iouh_Endpoint,
+            (req->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+            (req->iouh_Req.io_Command == UHCMD_CONTROLXFER) ? "Control" :
+            (req->iouh_Req.io_Command == UHCMD_BULKXFER) ? "Bulk" :
+            (req->iouh_Req.io_Command == UHCMD_INTXFER) ? "Interrupt" :
+            (req->iouh_Req.io_Command == UHCMD_ISOXFER) ? "Isochronous" :
+            (req->iouh_Req.io_Command == UHCMD_ADDISOHANDLER) ? "RT Isochronous" : "Unknown");
+    if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+        Kprintf("%s  SetupData: bmRequestType=0x%02lx bRequest=0x%02lx wValue=0x%04lx wIndex=0x%04lx wLength=%lu\n",
+                pfx, (ULONG)req->iouh_SetupData.bmRequestType, (ULONG)req->iouh_SetupData.bRequest,
+                (ULONG)LE16(req->iouh_SetupData.wValue), (ULONG)LE16(req->iouh_SetupData.wIndex),
+                (ULONG)LE16(req->iouh_SetupData.wLength));
 }
