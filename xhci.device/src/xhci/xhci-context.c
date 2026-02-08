@@ -860,7 +860,7 @@ void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx)
 
     ULONG address = dev_state & DEV_ADDR_MASK;
     ULONG slot_state = GET_SLOT_STATE(dev_state);
-    Kprintf("%s Slot context @%lx\n", pfx, (ULONG)slot_ctx);
+    Kprintf("%s Slot context %s @%lx\n", pfx, (in_ctx) ? "IN" : "OUT", (ULONG)slot_ctx);
     Kprintf("%s  dev_info=0x%08lx route=0x%05lx speed=%s hub=%ld mtt=%ld last_ctx=%lu (last_ep=%ld)\n",
             pfx,
             dev_info,
