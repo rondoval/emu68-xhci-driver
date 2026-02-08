@@ -74,6 +74,9 @@
 #define InterfaceRequest \
 	((USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) << 8)
 
+#define InterfaceOutRequest \
+	((USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) << 8)
+
 #define EndpointRequest \
 	((USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_INTERFACE) << 8)
 
@@ -193,40 +196,6 @@
 #define USB_TEST_MODE_SE0_NAK       0x03
 #define USB_TEST_MODE_PACKET        0x04
 #define USB_TEST_MODE_FORCE_ENABLE  0x05
-
-/*
- * "pipe" definitions, use unsigned so we can compare reliably, since this
- * value is shifted up to bits 30/31.
- */
-#define PIPE_ISOCHRONOUS    0U
-#define PIPE_INTERRUPT      1U
-#define PIPE_CONTROL        2U
-#define PIPE_BULK           3U
-#define PIPE_DEVEP_MASK     0x0007ff00
-
-#define USB_ISOCHRONOUS    0
-#define USB_INTERRUPT      1
-#define USB_CONTROL        2
-#define USB_BULK           3
-
-#define USB_PIPE_TYPE_SHIFT	30
-#define USB_PIPE_TYPE_MASK	(3 << USB_PIPE_TYPE_SHIFT)
-
-#define USB_PIPE_DEV_SHIFT	8
-#define USB_PIPE_DEV_MASK	(0x7f << USB_PIPE_DEV_SHIFT)
-
-#define USB_PIPE_EP_SHIFT	15
-#define USB_PIPE_EP_MASK	(0xf << USB_PIPE_EP_SHIFT)
-
-/* USB-status codes: */
-#define USB_ST_ACTIVE           0x1		/* TD is active */
-#define USB_ST_STALLED          0x2		/* TD is stalled */
-#define USB_ST_BUF_ERR          0x4		/* buffer error */
-#define USB_ST_BABBLE_DET       0x8		/* Babble detected */
-#define USB_ST_NAK_REC          0x10	/* NAK Received*/
-#define USB_ST_CRC_ERR          0x20	/* CRC/timeout Error */
-#define USB_ST_BIT_ERR          0x40	/* Bitstuff error */
-#define USB_ST_NOT_PROC         0x80000000L	/* Not yet processed */
 
 /*************************************************************************
  * Hub defines

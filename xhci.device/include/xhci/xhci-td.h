@@ -1,7 +1,6 @@
 #ifndef __XHCI_TD_H
 #define __XHCI_TD_H
 
-#include <exec/lists.h>
 #include <exec/types.h>
 #include <devices/usbhardware.h>
 #include <compat.h>

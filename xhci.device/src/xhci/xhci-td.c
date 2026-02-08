@@ -230,6 +230,41 @@ static void xhci_td_free(TransferDescriptorList *td_list, struct xhci_td *td)
     FreeVecPooled(td_list->memoryPool, td);
 }
 
+inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy)
+{
+	if (!ctrl || !req)
+		return;
+
+	APTR addr = req->iouh_Data;
+	ULONG size = req->iouh_Length;
+	if (!addr || size == 0 || ((ULONG)req->iouh_DriverPrivate1 & REQ_INTERNAL))
+		return;
+
+	if (!((ULONG)req->iouh_DriverPrivate1 & REQ_DMA_MAPPED))
+	{
+		if (copy)
+			xhci_inval_cache(addr, size);
+		return;
+	}
+
+	APTR bounce = (APTR)req->iouh_DriverPrivate2;
+	if (!bounce)
+	{
+		Kprintf("No bounce buffer found for unmap of %lx len=%ld\n", (ULONG)addr, (LONG)size);
+		return;
+	}
+
+	if (copy)
+	{
+		xhci_inval_cache(bounce, size);
+		CopyMem(bounce, addr, size);
+	}
+
+	memalign_free(ctrl->memoryPool, bounce);
+	req->iouh_DriverPrivate1 = (APTR)((ULONG)req->iouh_DriverPrivate1 & ~REQ_DMA_MAPPED);
+	req->iouh_DriverPrivate2 = NULL;
+}
+
 /*
  * This is taking a Transfer Descriptor off the list.
  * If TD containing specified TRB address is found, it is removed from the list.

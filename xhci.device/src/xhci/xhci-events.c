@@ -26,12 +26,12 @@
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-events.h>
-#include <xhci/xhci-debug.h>
 #include <xhci/xhci-root-hub.h>
-#include <xhci/xhci-usb.h>
+#include <xhci/xhci-descriptors.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
+#include <xhci/xhci-context.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -256,15 +256,13 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->trans_event.transfer_len));
 
 #ifdef DEBUG_HIGH
-    struct xhci_ctrl *ctrl = udev->controller;
     KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
              (ULONG)flags,
              (ULONG)LE32(event->trans_event.transfer_len),
              (ULONG)upper_32_bits(trb_addr),
              (ULONG)lower_32_bits(trb_addr));
-    struct xhci_container_ctx *out_ctx = udev->out_ctx;
-    xhci_dump_slot_ctx("[xhci-event] ep_handle_receiving_generic:", xhci_get_slot_ctx(ctrl, out_ctx));
-    xhci_dump_ep_ctx("[xhci-event] ep_handle_receiving_generic:", ep_index, xhci_get_ep_ctx(ctrl, out_ctx, ep_index));
+    xhci_dump_slot_ctx("[xhci-event] ep_handle_receiving_generic:", udev, FALSE);
+    xhci_dump_ep_ctx("[xhci-event] ep_handle_receiving_generic:", udev, ep_index);
 #endif
 
     /* Isoch OUT rings signal underrun/overrun with null TRB pointers. Do not treat those as lost TDs. */

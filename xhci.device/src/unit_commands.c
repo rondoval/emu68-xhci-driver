@@ -20,7 +20,7 @@
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-commands.h>
-#include <xhci/xhci-usb.h>
+#include <xhci/xhci-descriptors.h>
 #include <xhci/xhci-udev.h>
 
 static const UWORD SupportedCommands[] = {

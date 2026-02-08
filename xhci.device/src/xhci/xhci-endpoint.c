@@ -311,7 +311,7 @@ int xhci_ep_get_active_trb_count(struct ep_context *ep_ctx)
     return xhci_td_get_queued_trb_count(ep_ctx->active_tds);
 }
 
-int xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
+inline static int xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
 {
     return xhci_td_get_queued_td_count(ep_ctx->active_tds);
 }

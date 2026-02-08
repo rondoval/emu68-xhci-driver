@@ -15,12 +15,11 @@ add_executable(xhci.device
     src/unit_commands.c
     src/xhci/xhci.c
     src/xhci/xhci-ring.c
-    src/xhci/xhci-debug.c
-    src/xhci/xhci-mem.c
+    src/xhci/xhci-context.c
     src/xhci/xhci-events.c
     src/xhci/xhci-commands.c
     src/xhci/xhci-td.c
-    src/xhci/xhci-usb.c
+    src/xhci/xhci-descriptors.c
     src/xhci/xhci-root-hub.c
     src/xhci/xhci-udev.c
     src/xhci/xhci-endpoint.c

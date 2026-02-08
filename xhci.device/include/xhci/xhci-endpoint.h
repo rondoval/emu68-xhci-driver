@@ -35,7 +35,6 @@ BOOL xhci_ep_is_expired(struct ep_context *ep_ctx);
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx);
 int xhci_ep_get_ep_index(struct ep_context *ep_ctx);
 int xhci_ep_get_active_trb_count(struct ep_context *ep_ctx);
-int xhci_ep_get_active_td_count(struct ep_context *ep_ctx);
 struct xhci_ring *xhci_ep_get_ring(struct ep_context *ep_ctx);
 
 struct IOUsbHWReq *xhci_ep_get_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr);

@@ -35,6 +35,8 @@
 
 #define USB_CNTL_TIMEOUT 100 /* 100ms timeout */
 
+#define EP_INDEX_TO_ENDPOINT(p) (((p) + 1) >> 1)
+
 struct usb_interface_altsetting {
 	struct usb_interface_descriptor desc;
 
@@ -194,5 +196,8 @@ void xhci_udev_io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int
 /* Send commands to device */
 void xhci_udev_clear_feature_halt(struct usb_device *udev, ULONG ep_index);
 void xhci_udev_clear_tt_buffer(struct usb_device *udev, ULONG ep_index, int ep_type);
+
+/* Descriptor access */
+int xhci_ep_type_for_index(struct usb_device *udev, u32 ep_index);
 
 #endif /* __XHCI_UDEV_H__ */

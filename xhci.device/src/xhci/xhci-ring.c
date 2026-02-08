@@ -19,10 +19,10 @@
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
-#include <xhci/xhci-debug.h>
 #include <xhci/xhci-endpoint.h>
-#include <xhci/xhci-usb.h>
+#include <xhci/xhci-descriptors.h>
 #include <xhci/xhci-udev.h>
+#include <xhci/xhci-context.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -644,6 +644,43 @@ void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx)
 	giveback_first_trb(udev, ring->ep_index, ring->deferred_giveback);
 }
 
+inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy)
+{
+	if (!req)
+		return NULL;
+
+	APTR addr = req->iouh_Data;
+	ULONG size = req->iouh_Length;
+
+	if (!ctrl || !ctrl->memoryPool || !addr || size == 0 || ((ULONG)req->iouh_DriverPrivate1 & REQ_INTERNAL))
+		return (dma_addr_t)addr;
+
+	if (((ULONG)addr & ARCH_DMA_MINALIGN_MASK) == 0)
+	{
+		xhci_flush_cache(addr, size);
+		return (dma_addr_t)addr;
+	}
+
+	ULONG alloc_len = ALIGN(size, ARCH_DMA_MINALIGN);
+	void *aligned = memalign(ctrl->memoryPool, ARCH_DMA_MINALIGN, alloc_len);
+	if (!aligned)
+	{
+		Kprintf("failed to allocate bounce buffer for %lx len=%ld\n", (ULONG)addr, (LONG)size);
+		return (dma_addr_t)addr;
+	}
+
+	req->iouh_DriverPrivate1 = (APTR)((ULONG)req->iouh_DriverPrivate1 | REQ_DMA_MAPPED);
+
+	if (copy)
+	{
+		CopyMem(addr, aligned, size);
+	}
+	xhci_flush_cache(aligned, alloc_len);
+
+	req->iouh_DriverPrivate2 = aligned;
+	return (dma_addr_t)aligned;
+}
+
 inline static dma_addr_t xhci_ring_enqueue_setup_trb(struct xhci_ring *ep_ring, struct IOUsbHWReq *io)
 {
 	/* Queue setup TRB - see section 6.4.1.2.1 */
@@ -850,6 +887,29 @@ inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct IOUsbHW
 	return num_trbs;
 }
 
+void xhci_dump_request(const char *tag, const struct IOUsbHWReq *req)
+{
+    if (!req)
+        return;
+
+    const char *pfx = tag ? tag : "";
+
+    Kprintf("%s Request dump:\n", pfx);
+    Kprintf("%s  Endpoint=0x%02lx Dir=%s Type=%s\n",
+            pfx, (ULONG)req->iouh_Endpoint,
+            (req->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+            (req->iouh_Req.io_Command == UHCMD_CONTROLXFER) ? "Control" : (req->iouh_Req.io_Command == UHCMD_BULKXFER)    ? "Bulk"
+                                                                      : (req->iouh_Req.io_Command == UHCMD_INTXFER)       ? "Interrupt"
+                                                                      : (req->iouh_Req.io_Command == UHCMD_ISOXFER)       ? "Isochronous"
+                                                                      : (req->iouh_Req.io_Command == UHCMD_ADDISOHANDLER) ? "RT Isochronous"
+                                                                                                                          : "Unknown");
+    if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+        Kprintf("%s  SetupData: bmRequestType=0x%02lx bRequest=0x%02lx wValue=0x%04lx wIndex=0x%04lx wLength=%lu\n",
+                pfx, (ULONG)req->iouh_SetupData.bmRequestType, (ULONG)req->iouh_SetupData.bRequest,
+                (ULONG)LE16(req->iouh_SetupData.wValue), (ULONG)LE16(req->iouh_SetupData.wIndex),
+                (ULONG)LE16(req->iouh_SetupData.wLength));
+}
+
 int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms, BOOL defer_doorbell)
 {
 #ifdef DEBUG_HIGH
@@ -876,12 +936,8 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 	}
 
 #ifdef DEBUG_HIGH
-	xhci_inval_cache(udev->out_ctx->bytes,
-					 udev->out_ctx->size);
-
-	struct xhci_ep_ctx *xep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, ep_index);
-	xhci_dump_slot_ctx("[xhci-ring] xhci_stream_tx:", xhci_get_slot_ctx(ctrl, udev->out_ctx));
-	xhci_dump_ep_ctx("[xhci-ring] xhci_stream_tx:", io->iouh_Endpoint, xep_ctx);
+	xhci_dump_slot_ctx("[xhci-ring] xhci_ring_enqueue_td:", udev, FALSE);
+	xhci_dump_ep_ctx("[xhci-ring] xhci_ring_enqueue_td:", udev, io->iouh_Endpoint);
 #endif
 
 	u32 trb_buff_len = 0; // non-control only
