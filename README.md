@@ -21,8 +21,9 @@ It's a Poseidon v4.5 driver. Current status is:
 well, unsure yet. What I'm using:
 - AmigaOS 3.2.3 + AmiKit 12.8.3 on an A1200
 - Poseidon 4.5
-- Pistorm with Raspberry Pi 4B (the USB controller here is Via VL805 XHCI on PCIe bus. **Note that CM4 is currently not supported**)
+- Pistorm32-lite with Raspberry Pi 4B (the USB controller here is Via VL805 XHCI on PCIe bus. **Note that CM4 is not yet supported**)
 - Emu68... 1.1 or 1.0.99 This is necessary to set up MMU mapping for the PCIe BAR window into low 4GB.
+- gic400.library - https://github.com/rondoval/emu68-gic400-library/releases
 
 ## Building
 
