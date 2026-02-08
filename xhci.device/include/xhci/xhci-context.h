@@ -221,7 +221,7 @@ u32 xhci_get_hardware_address(struct usb_device *udev);
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
 void xhci_update_hub_tt(struct usb_device *udev);
 
-int xhci_check_maxpacket(struct usb_device *udev, unsigned int max_packet_size);
+void xhci_update_maxpacket(struct usb_device *udev, unsigned int max_packet_size);
 int xhci_set_configuration(struct usb_device *udev, int config_value);
 int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsigned int alt_setting);
 

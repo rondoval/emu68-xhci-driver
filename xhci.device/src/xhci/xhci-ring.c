@@ -46,6 +46,7 @@ struct xhci_ring
 	BOOL is_event_ring;
 	int ep_index; /* for transfer rings, the endpoint index this ring is associated with. For event rings, unused and set to 0. */
 	unsigned int num_segs;
+	int max_packet_size;
 	APTR memoryPool;
 
 	struct xhci_segment *first_seg;
@@ -200,12 +201,16 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
  * Set the end flag and the cycle toggle bit on the last segment.
  * See section 4.9.2 and figures 15 and 16 of XHCI spec rev1.0.
  *
+ * @param ctrl	pointer to the xhci controller
  * @param num_segs	number of segments in the ring
  * @param link_trbs	flag to indicate whether to link the trbs or NOT
+ * @param is_event_ring	flag to indicate whether this ring is an event ring or not, which affects how we determine the last TRB in a segment
+ * @param ep_index	endpoint index for transfer rings, unused for event rings
+ * @param maxpacketsize maximum packet size for the endpoint, unused for event rings
  * Return: pointer to the newly created RING
  */
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
-								  BOOL link_trbs, BOOL is_event_ring, int ep_index)
+								  BOOL link_trbs, BOOL is_event_ring, int ep_index, int max_packet_size)
 {
 	unsigned int remaining = num_segs;
 
@@ -221,7 +226,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 	ring->is_event_ring = is_event_ring;
 	ring->memoryPool = ctrl->memoryPool;
 	ring->ep_index = ep_index;
-
+	ring->max_packet_size = max_packet_size;
 	if (remaining == 0)
 		return ring;
 
@@ -544,6 +549,16 @@ u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring)
 	return (u32)ring->enqueue | ring->cycle_state;
 }
 
+int xhci_ring_get_max_packet_size(struct xhci_ring *ring)
+{
+	return ring->max_packet_size;
+}
+
+void xhci_ring_set_max_packet_size(struct xhci_ring *ring, int max_packet_size)
+{
+	ring->max_packet_size = max_packet_size;
+}
+
 dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u32 ep_index, trb_type cmd)
 {
 	prepare_ring(ring);
@@ -714,7 +729,7 @@ inline static dma_addr_t xhci_ring_enqueue_data_trb(struct xhci_ctrl *ctrl, stru
 	/* If there's data, queue data TRBs */
 	/* Only set interrupt on short packet for IN endpoints */
 
-	u32 remainder = xhci_td_remainder(0, io->iouh_Length, io->iouh_Length, io->iouh_MaxPktSize, TRUE);
+	u32 remainder = xhci_td_remainder(0, io->iouh_Length, io->iouh_Length, ep_ring->max_packet_size, TRUE);
 	u32 length_field = TRB_LEN(io->iouh_Length) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0);
 	KprintfH("length_field = %ld, length = %ld,"
 			 "xhci_td_remainder(length) = %ld , TRB_INTR_TARGET(0) = %ld\n",
@@ -821,7 +836,7 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 
 		/* Set the TRB length, TD size, and interrupter fields. */
 		u32 remainder = xhci_td_remainder(running_total, trb_buff_len,
-										  length, (int)io->iouh_MaxPktSize,
+										  length, ep_ring->max_packet_size,
 										  num_trbs > 1);
 
 		u32 length_field = (TRB_LEN(trb_buff_len) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0));
@@ -889,25 +904,25 @@ inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct IOUsbHW
 
 void xhci_dump_request(const char *tag, const struct IOUsbHWReq *req)
 {
-    if (!req)
-        return;
+	if (!req)
+		return;
 
-    const char *pfx = tag ? tag : "";
+	const char *pfx = tag ? tag : "";
 
-    Kprintf("%s Request dump:\n", pfx);
-    Kprintf("%s  Endpoint=0x%02lx Dir=%s Type=%s\n",
-            pfx, (ULONG)req->iouh_Endpoint,
-            (req->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-            (req->iouh_Req.io_Command == UHCMD_CONTROLXFER) ? "Control" : (req->iouh_Req.io_Command == UHCMD_BULKXFER)    ? "Bulk"
-                                                                      : (req->iouh_Req.io_Command == UHCMD_INTXFER)       ? "Interrupt"
-                                                                      : (req->iouh_Req.io_Command == UHCMD_ISOXFER)       ? "Isochronous"
-                                                                      : (req->iouh_Req.io_Command == UHCMD_ADDISOHANDLER) ? "RT Isochronous"
-                                                                                                                          : "Unknown");
-    if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER)
-        Kprintf("%s  SetupData: bmRequestType=0x%02lx bRequest=0x%02lx wValue=0x%04lx wIndex=0x%04lx wLength=%lu\n",
-                pfx, (ULONG)req->iouh_SetupData.bmRequestType, (ULONG)req->iouh_SetupData.bRequest,
-                (ULONG)LE16(req->iouh_SetupData.wValue), (ULONG)LE16(req->iouh_SetupData.wIndex),
-                (ULONG)LE16(req->iouh_SetupData.wLength));
+	Kprintf("%s Request dump:\n", pfx);
+	Kprintf("%s  Endpoint=0x%02lx Dir=%s Type=%s\n",
+			pfx, (ULONG)req->iouh_Endpoint,
+			(req->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
+			(req->iouh_Req.io_Command == UHCMD_CONTROLXFER) ? "Control" : (req->iouh_Req.io_Command == UHCMD_BULKXFER)	  ? "Bulk"
+																	  : (req->iouh_Req.io_Command == UHCMD_INTXFER)		  ? "Interrupt"
+																	  : (req->iouh_Req.io_Command == UHCMD_ISOXFER)		  ? "Isochronous"
+																	  : (req->iouh_Req.io_Command == UHCMD_ADDISOHANDLER) ? "RT Isochronous"
+																														  : "Unknown");
+	if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+		Kprintf("%s  SetupData: bmRequestType=0x%02lx bRequest=0x%02lx wValue=0x%04lx wIndex=0x%04lx wLength=%lu\n",
+				pfx, (ULONG)req->iouh_SetupData.bmRequestType, (ULONG)req->iouh_SetupData.bRequest,
+				(ULONG)LE16(req->iouh_SetupData.wValue), (ULONG)LE16(req->iouh_SetupData.wIndex),
+				(ULONG)LE16(req->iouh_SetupData.wLength));
 }
 
 int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms, BOOL defer_doorbell)

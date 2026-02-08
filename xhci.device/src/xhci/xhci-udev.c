@@ -58,19 +58,13 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_addres
     udev->speed = ctrl->pending_parent_speed;
 
     _NewMinList(&udev->configurations);
-    BOOL result = xhci_ep_create_context(udev, 0, ctrl->memoryPool);
-    if (!result)
-    {
-        Kprintf("Failed to create EP0 context for addr %ld\n", (LONG)poseidon_address);
-        goto free_udev;
-    }
 
     /* Allocate the (output) device context that will be used in the HC. */
     udev->out_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_DEVICE);
     if (!udev->out_ctx)
     {
         Kprintf("Failed to allocate out context for addr %ld\n", (LONG)poseidon_address);
-        goto destroy_ep;
+        goto free_udev;
     }
     KprintfH("out_ctx bytes=%lx size=%ld\n",
              (ULONG)udev->out_ctx->bytes, (ULONG)udev->out_ctx->size);
@@ -90,8 +84,6 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_addres
 
 destroy_out_ctx:
     xhci_free_container_ctx(ctrl, udev->out_ctx);
-destroy_ep:
-    xhci_ep_destroy_contexts(udev, UHIOERR_OUTOFMEMORY);
 free_udev:
     FreeVecPooled(ctrl->memoryPool, udev);
 nothing:
@@ -859,12 +851,7 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct IOUsbHW
         return;
 
     struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)io->iouh_Data;
-    if (xhci_check_maxpacket(udev, dev_desc->bMaxPacketSize0))
-    {
-        KprintfH("Control endpoint max packet size changed, reconfiguring endpoints, addr %ld\n",
-                 (ULONG)udev->poseidon_address);
-        xhci_configure_endpoints(udev, TRUE, NULL);
-    }
+    xhci_update_maxpacket(udev, dev_desc->bMaxPacketSize0);
 }
 
 static void handle_get_hub_descriptor(struct usb_device *udev, struct IOUsbHWReq *io)

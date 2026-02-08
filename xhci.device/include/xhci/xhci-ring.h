@@ -301,7 +301,7 @@ struct usb_device;
 struct ep_context;
 
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
-								  BOOL link_trbs, BOOL is_event_ring, int ep_index);
+								  BOOL link_trbs, BOOL is_event_ring, int ep_index, int max_packet_size);
 void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
 
 int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms, BOOL defer_doorbell);
@@ -311,6 +311,9 @@ void xhci_ring_acknowledge_event(struct xhci_ctrl *ctrl);
 union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring);
 
 u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring);
+
+int xhci_ring_get_max_packet_size(struct xhci_ring *ring);
+void xhci_ring_set_max_packet_size(struct xhci_ring *ring, int max_packet_size);
 
 dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u32 ep_index, trb_type cmd);
 void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct xhci_intr_reg *ir_set);

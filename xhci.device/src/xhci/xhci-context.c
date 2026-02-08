@@ -314,20 +314,24 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     ep0_ctx->ep_info2 = LE32(EP_TYPE(CTRL_EP));
     KprintfH("xhci_setup_addressable_virt_dev: SPEED=%ld\n", (ULONG)udev->speed);
 
+    int max_packet_size = 0;
     switch (udev->speed)
     {
     case USB_SPEED_SUPER:
         ep0_ctx->ep_info2 |= LE32(MAX_PACKET(512));
+        max_packet_size = 512;
         KprintfH("xhci_setup_addressable_virt_dev: MPS=512\n");
         break;
     case USB_SPEED_HIGH:
     /* USB core guesses at a 64-byte max packet first for FS devices */
     case USB_SPEED_FULL:
         ep0_ctx->ep_info2 |= LE32(MAX_PACKET(64));
+        max_packet_size = 64;
         KprintfH("xhci_setup_addressable_virt_dev: MPS=64\n");
         break;
     case USB_SPEED_LOW:
         ep0_ctx->ep_info2 |= LE32(MAX_PACKET(8));
+        max_packet_size = 8;
         KprintfH("xhci_setup_addressable_virt_dev: MPS=8\n");
         break;
     default:
@@ -337,6 +341,10 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 
     /* EP 0 can handle "burst" sizes of 1, so Max Burst Size field is 0 */
     ep0_ctx->ep_info2 |= LE32(MAX_BURST(0) | ERROR_COUNT(3));
+
+    BOOL result = xhci_ep_create_context(udev, 0, max_packet_size, ctrl->memoryPool);
+    if (!result)
+        Kprintf("Failed to create EP0 context\n");
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, 0);
     struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
@@ -420,47 +428,48 @@ void xhci_update_hub_tt(struct usb_device *udev)
  * @param udev	pointer to the Device Data Structure
  * Return: returns the status of the xhci_configure_endpoints
  */
-int xhci_check_maxpacket(struct usb_device *udev, unsigned int max_packet_size)
+void xhci_update_maxpacket(struct usb_device *udev, unsigned int max_packet_size)
 {
     struct xhci_ctrl *ctrl = udev->controller;
     int ep_index = 0; /* control endpoint */
-    struct xhci_container_ctx *in_ctx;
-    struct xhci_container_ctx *out_ctx;
-    struct xhci_input_control_ctx *ctrl_ctx;
-    struct xhci_ep_ctx *ep_ctx;
     unsigned int hw_max_packet_size;
 
-    out_ctx = udev->out_ctx;
-    xhci_inval_cache(out_ctx->bytes, out_ctx->size);
+    xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
     KprintfH("Checking max packet size for ep 0 of address %ld (slot %ld)\n", (LONG)udev->poseidon_address, (LONG)udev->slot_id);
 
-    ep_ctx = xhci_get_ep_ctx(ctrl, out_ctx, ep_index);
+    struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, ep_index);
     hw_max_packet_size = MAX_PACKET_DECODED(LE32(ep_ctx->ep_info2));
-    if (hw_max_packet_size != max_packet_size)
+
+    if (hw_max_packet_size == max_packet_size)
     {
-        KprintfH("Max Packet Size for ep 0 changed to %ld.\n", max_packet_size);
-        KprintfH("Max packet size in xHCI HW = %ld\n", hw_max_packet_size);
-
-        /* Set up the modified control endpoint 0 */
-        xhci_endpoint_copy(ctrl, udev->in_ctx,
-                           udev->out_ctx, ep_index);
-        in_ctx = udev->in_ctx;
-        ep_ctx = xhci_get_ep_ctx(ctrl, in_ctx, ep_index);
-        ep_ctx->ep_info2 &= LE32(~MAX_PACKET(MAX_PACKET_MASK));
-        ep_ctx->ep_info2 |= LE32(MAX_PACKET(max_packet_size));
-
-        /*
-         * Set up the input context flags for the command
-         * FIXME: This won't work if a non-default control endpoint
-         * changes max packet sizes.
-         */
-        ctrl_ctx = xhci_get_input_control_ctx(in_ctx);
-        ctrl_ctx->add_flags = LE32(EP0_FLAG);
-        ctrl_ctx->drop_flags = 0;
-
-        return 1;
+        KprintfH("Max Packet Size for ep 0 is already correct at %ld.\n", max_packet_size);
+        return;
     }
-    return 0;
+
+    KprintfH("Max Packet Size for ep 0 changed to %ld.\n", max_packet_size);
+    KprintfH("Max packet size in xHCI HW = %ld\n", hw_max_packet_size);
+
+    // Update the EP context's max packet size as well
+    struct ep_context *ep_context = xhci_ep_get_context_for_index(udev, ep_index);
+    xhci_ep_set_max_packet_size(ep_context, max_packet_size);
+
+    /* Set up the modified control endpoint 0 */
+    xhci_endpoint_copy(ctrl, udev->in_ctx,
+                       udev->out_ctx, ep_index);
+    ep_ctx = xhci_get_ep_ctx(ctrl, udev->in_ctx, ep_index);
+    ep_ctx->ep_info2 &= LE32(~MAX_PACKET(MAX_PACKET_MASK));
+    ep_ctx->ep_info2 |= LE32(MAX_PACKET(max_packet_size));
+
+    /*
+     * Set up the input context flags for the command
+     * FIXME: This won't work if a non-default control endpoint
+     * changes max packet sizes.
+     */
+    struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
+    ctrl_ctx->add_flags = LE32(EP0_FLAG);
+    ctrl_ctx->drop_flags = 0;
+
+    xhci_configure_endpoints(udev, TRUE, NULL);
 }
 
 /**
@@ -522,8 +531,9 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
         ep_index = xhci_get_ep_index(endpt_desc);
         ep_ctx[ep_index] = xhci_get_ep_ctx(ctrl, udev->in_ctx, ep_index);
 
+        int max_packet_size = usb_endpoint_maxp(endpt_desc);
         /* Allocate the ep rings */
-        BOOL result = xhci_ep_create_context(udev, ep_index, ctrl->memoryPool);
+        BOOL result = xhci_ep_create_context(udev, ep_index, max_packet_size, ctrl->memoryPool);
         if (!result)
             return UHIOERR_OUTOFMEMORY;
 
@@ -534,7 +544,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
         ep_ctx[ep_index]->ep_info = LE32(EP_MAX_ESIT_PAYLOAD_HI(max_esit_payload) | EP_INTERVAL(interval) | EP_MULT(mult));
 
         ep_ctx[ep_index]->ep_info2 = LE32(EP_TYPE(ep_type));
-        ep_ctx[ep_index]->ep_info2 |= LE32(MAX_PACKET(LE16(get_unaligned(&endpt_desc->wMaxPacketSize))));
+        ep_ctx[ep_index]->ep_info2 |= LE32(MAX_PACKET(max_packet_size));
 
         /* Allow 3 retries for everything but isoc, set CErr = 3 */
         if (!usb_endpoint_xfer_isoc(endpt_desc))

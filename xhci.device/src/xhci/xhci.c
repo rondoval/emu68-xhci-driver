@@ -179,7 +179,7 @@ static int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	xhci_writeq(&hcor->or_dcbaap, (dma_addr_t)ctrl->dcbaa);
 
 	/* Command ring control pointer register initialization */
-	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, TRUE, FALSE, 0);
+	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, TRUE, FALSE, 0, 0);
 
 	/* Set the address in the Command Ring Control register */
 	u64 trb_64 = xhci_ring_get_new_dequeue_ptr(ctrl->cmd_ring);
@@ -204,7 +204,7 @@ static int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	ctrl->erst.entries = xhci_malloc(ctrl, sizeof(struct xhci_erst_entry) *
 											   ERST_NUM_SEGS);
 	/* Event ring does not maintain link TRB */
-	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, FALSE, TRUE, 0);
+	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, FALSE, TRUE, 0, 0);
 
 	xhci_ring_setup_erst(ctrl->event_ring, &ctrl->erst, ctrl->ir_set);
 

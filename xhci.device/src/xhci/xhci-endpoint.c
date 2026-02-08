@@ -32,6 +32,7 @@ struct ep_context
     struct usb_device *udev; /* back reference to device */
     int ep_index;            /* Endpoint context index (0-30) */
     enum ep_state state;     /* Current endpoint state */
+    int max_packet_size;     /* Cached max packet size for this endpoint */
     APTR memoryPool;         /* Memory pool for this endpoint */
 
     IOReqList pending_reqs;             /* list of pending requests */
@@ -62,7 +63,7 @@ struct ep_context
     ULONG rt_inflight_bytes;
 };
 
-BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, APTR memoryPool)
+BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packet_size, APTR memoryPool)
 {
     struct ep_context *ep_ctx = AllocVecPooled(memoryPool, sizeof(struct ep_context));
     if (!ep_ctx)
@@ -74,9 +75,10 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, APTR memoryPo
     ep_ctx->ep_index = ep_index;
     ep_ctx->memoryPool = memoryPool;
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
+    ep_ctx->max_packet_size = max_packet_size;
     _NewMinList(&ep_ctx->pending_reqs);
     ep_ctx->active_tds = xhci_td_create_list(udev->controller);
-    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index);
+    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
     {
         Kprintf("Failed to create resources for EP %d\n", ep_index);
@@ -140,6 +142,15 @@ struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, int ep
     }
 
     return udev->ep_context[ep_index];
+}
+
+void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, int max_packet_size)
+{
+    if (!ep_ctx || !ep_ctx->ring)
+        return;
+
+    xhci_ring_set_max_packet_size(ep_ctx->ring, max_packet_size);
+    ep_ctx->max_packet_size = max_packet_size;
 }
 
 /*
@@ -554,14 +565,14 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         }
         CopyMem(template, rt_io, sizeof(struct IOUsbHWReq));
 
-        rt_io->iouh_Data = AllocVecPooled(ep_ctx->memoryPool, template->iouh_MaxPktSize);
+        rt_io->iouh_Data = AllocVecPooled(ep_ctx->memoryPool, ep_ctx->max_packet_size);
         if (!rt_io->iouh_Data)
         {
             Kprintf("Failed to alloc RT ISO staging buffer\n");
             FreeVecPooled(ep_ctx->memoryPool, rt_io);
             break;
         }
-        rt_io->iouh_Length = template->iouh_MaxPktSize;
+        rt_io->iouh_Length = ep_ctx->max_packet_size;
         rt_io->iouh_Frame = (UWORD)frame;
 
         KprintfH("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
