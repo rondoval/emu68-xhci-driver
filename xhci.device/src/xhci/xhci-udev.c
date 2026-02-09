@@ -905,6 +905,9 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct IOUsbHW
         KprintfH("clamping SS bMaxPacketSize0 from %ld to 64 for Poseidon\n", (LONG)dev_desc->bMaxPacketSize0);
         dev_desc->bMaxPacketSize0 = 64;
     }
+
+    if (io->iouh_Actual >= sizeof(struct usb_device_descriptor))
+        udev->product_string_index = dev_desc->iProduct;
 }
 
 static void handle_get_hub_descriptor(struct usb_device *udev, struct IOUsbHWReq *io)
@@ -922,6 +925,57 @@ static void handle_get_hub_descriptor(struct usb_device *udev, struct IOUsbHWReq
         KprintfH("hub addr %ld TT think time code=%ld (bit-times=%ld)\n",
                  (LONG)udev->poseidon_address, (LONG)tt_think, (LONG)((tt_think + 1) * 8));
     }
+}
+
+static void xhci_trim_string_descriptor(struct IOUsbHWReq *io)
+{
+    if (!io || !io->iouh_Data || io->iouh_Actual < 2)
+        return;
+
+    struct usb_string_descriptor *str_desc = (struct usb_string_descriptor *)io->iouh_Data;
+    if (str_desc->bDescriptorType != USB_DT_STRING || io->iouh_Actual < str_desc->bLength || str_desc->bLength < 2)
+        return;
+
+    const u8 length = str_desc->bLength - 2;
+    for (u8 i = 0; i < length; i += 2)
+    {
+        if (str_desc->bString[i] == 0 && str_desc->bString[i + 1] == 0)
+            str_desc->bString[i] = 0x20; // replace embedded nulls with space
+    }
+}
+
+static void xhci_append_ss_suffix(struct usb_device *udev, struct IOUsbHWReq *io)
+{
+    if (!udev || !io || !io->iouh_Data || io->iouh_Actual < 2)
+        return;
+
+    if (udev->speed < USB_SPEED_SUPER)
+        return;
+
+    struct usb_string_descriptor *str_desc = (struct usb_string_descriptor *)io->iouh_Data;
+    if (str_desc->bDescriptorType != USB_DT_STRING)
+        return;
+
+    static const char suffix[] = " \0(\0S\0S\0)\0";
+    static const int suffix_len = sizeof(suffix) - 1;
+
+    if (str_desc->bLength > io->iouh_Actual)
+    {
+        // the descriptor is actually larger than the buffer used to receive it, just mock the length
+        str_desc->bLength += suffix_len;
+        return;
+    }
+
+    int length = str_desc->bLength;
+    if (length < 2)
+        return;
+    length -= 2;
+
+    for (int i = 0; i < suffix_len && length + i + 2 < (int)io->iouh_Length; ++i)
+        str_desc->bString[length + i] = (u8)suffix[i];
+
+    str_desc->bLength += suffix_len;
+    io->iouh_Actual = min(str_desc->bLength, io->iouh_Length);
 }
 
 static void handle_get_port_status(struct usb_device *udev, struct IOUsbHWReq *io)
@@ -1110,6 +1164,17 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct IOUs
             /* Update FS control endpoint max packet size based on device descriptor. */
             handle_get_device_descriptor(udev, io);
             break;
+        case USB_DT_STRING:
+        {
+            const u16 string_index = LE16(io->iouh_SetupData.wValue) & 0xFF;
+            if (string_index && string_index == udev->product_string_index)
+            {
+                Kprintf("rewriting string index %ld for device addr %ld\n", (LONG)string_index, (LONG)udev->poseidon_address);
+                xhci_trim_string_descriptor(io);
+                xhci_append_ss_suffix(udev, io);
+            }
+            break;
+        }
         }
         break;
     case GetHubDescriptor:

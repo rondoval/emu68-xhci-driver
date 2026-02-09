@@ -295,6 +295,16 @@ struct usb_config_descriptor {
 
 /*-------------------------------------------------------------------------*/
 
+/* USB_DT_STRING: String descriptor information. */
+struct usb_string_descriptor {
+	__u8  bLength;
+	__u8  bDescriptorType;
+
+	__u8  bString[];	/* UTF-16LE encoded string */
+} __attribute__ ((packed));
+
+/*-------------------------------------------------------------------------*/
+
 /* USB_DT_INTERFACE: Interface descriptor */
 struct usb_interface_descriptor {
 	__u8  bLength;

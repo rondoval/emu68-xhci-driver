@@ -152,6 +152,7 @@ struct usb_device {
 
 	struct MinList configurations; /* configurations captured from GET_CONFIGURATION replies */
 	struct usb_config *active_config;
+	u8 product_string_index; /* iProduct from device descriptor */
 
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
