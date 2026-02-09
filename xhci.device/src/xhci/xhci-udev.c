@@ -746,6 +746,50 @@ error:
     FreeVecPooled(udev->controller->memoryPool, conf);
 }
 
+static void xhci_filter_ss_ep_companion_desc(struct IOUsbHWReq *io)
+{
+    if (!io->iouh_Data || io->iouh_Actual < sizeof(struct usb_config_descriptor))
+        return;
+
+    struct usb_config_descriptor *desc = (struct usb_config_descriptor *)io->iouh_Data;
+    if (desc->bDescriptorType != USB_DT_CONFIG)
+        return;
+
+    UWORD total_len = LE16(desc->wTotalLength);
+    if (total_len > io->iouh_Actual)
+        total_len = io->iouh_Actual;
+
+    UBYTE *read = io->iouh_Data + desc->bLength;
+    UBYTE *write = read;
+    UBYTE *end = io->iouh_Data + total_len;
+
+    while (read + 2 <= end)
+    {
+        UBYTE dlen = read[0];
+        UBYTE dtype = read[1];
+        if (dlen == 0 || read + dlen > end)
+            break;
+
+        if (dtype != USB_DT_SS_ENDPOINT_COMP)
+        {
+            if (write != read)
+            {
+                for (UBYTE i = 0; i < dlen; ++i)
+                    write[i] = read[i];
+            }
+            write += dlen;
+        }
+
+        read += dlen;
+    }
+
+    UWORD new_total = (UWORD)(write - (UBYTE *)io->iouh_Data);
+    if (new_total != total_len)
+        desc->wTotalLength = LE16(new_total);
+
+    io->iouh_Actual = new_total;
+}
+
 static BOOL xhci_udev_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number)
 {
     if (!udev || !udev->active_config)
@@ -812,14 +856,17 @@ static void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive)
 
 static enum usb_device_speed xhci_udev_speed_from_port_status(UWORD status)
 {
-    if (status & USB_PORT_STAT_SUPER_SPEED)
+    switch (status & USB_PORT_STAT_SPEED_MASK)
+    {
+    case USB_PORT_STAT_SUPER_SPEED:
+        return USB_SPEED_SUPER;
+    case USB_PORT_STAT_HIGH_SPEED:
         return USB_SPEED_HIGH;
-    // return USB_SPEED_SUPER; TODO capped speed... for now - fix context
-    if (status & USB_PORT_STAT_HIGH_SPEED)
-        return USB_SPEED_HIGH;
-    if (status & USB_PORT_STAT_LOW_SPEED)
+    case USB_PORT_STAT_LOW_SPEED:
         return USB_SPEED_LOW;
-    return USB_SPEED_FULL;
+    default:
+        return USB_SPEED_FULL;
+    }
 }
 
 static struct usb_device *xhci_udev_find_child_on_port(struct usb_device *hub, unsigned int port)
@@ -847,11 +894,17 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct IOUsbHW
     if (!io->iouh_Data || io->iouh_Actual < 8)
         return;
 
-    if (udev->speed != USB_SPEED_FULL)
-        return;
-
     struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)io->iouh_Data;
-    xhci_update_maxpacket(udev, dev_desc->bMaxPacketSize0);
+
+    // For full speed devices, max packet size may change once we read the device descriptor
+    if (udev->speed == USB_SPEED_FULL)
+        xhci_update_maxpacket(udev, dev_desc->bMaxPacketSize0);
+
+    if (udev->speed == USB_SPEED_SUPER && dev_desc->bMaxPacketSize0 != 64)
+    {
+        KprintfH("clamping SS bMaxPacketSize0 from %ld to 64 for Poseidon\n", (LONG)dev_desc->bMaxPacketSize0);
+        dev_desc->bMaxPacketSize0 = 64;
+    }
 }
 
 static void handle_get_hub_descriptor(struct usb_device *udev, struct IOUsbHWReq *io)
@@ -883,6 +936,8 @@ static void handle_get_port_status(struct usb_device *udev, struct IOUsbHWReq *i
     const u16 status = LE16(((u16 *)io->iouh_Data)[0]);
     const u16 change = LE16(((u16 *)io->iouh_Data)[1]);
 
+    const enum usb_device_speed speed = xhci_udev_speed_from_port_status(status);
+
     KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->poseidon_address, (LONG)port, (ULONG)status, (ULONG)change);
 
     /* Drop children immediately if port power is off or disabled, regardless of change bits. */
@@ -908,7 +963,7 @@ static void handle_get_port_status(struct usb_device *udev, struct IOUsbHWReq *i
                      (LONG)udev->poseidon_address, (LONG)port, (ULONG)status);
             ctrl->pending_parent = udev;
             ctrl->pending_parent_port = port;
-            ctrl->pending_parent_speed = xhci_udev_speed_from_port_status(status);
+            ctrl->pending_parent_speed = speed;
         }
 
         if ((status & USB_PORT_STAT_CONNECTION) == 0)
@@ -933,7 +988,15 @@ static void handle_get_port_status(struct usb_device *udev, struct IOUsbHWReq *i
                  (LONG)udev->poseidon_address, (LONG)port, (ULONG)status);
         ctrl->pending_parent = udev;
         ctrl->pending_parent_port = port;
-        ctrl->pending_parent_speed = xhci_udev_speed_from_port_status(status);
+        ctrl->pending_parent_speed = speed;
+    }
+
+    /* Poseidon expects USB2 speed bits; keep SS internally but report HS to Poseidon. */
+    if (speed == USB_SPEED_SUPER)
+    {
+        u16 new_status = status & ~USB_PORT_STAT_SUPER_SPEED;
+        new_status |= USB_PORT_STAT_HIGH_SPEED;
+        ((u16 *)io->iouh_Data)[0] = LE16(new_status);
     }
 }
 
@@ -967,7 +1030,7 @@ static void handle_set_address(struct usb_device *udev, struct IOUsbHWReq *io)
         return;
 
     if (old_addr == xhci_roothub_get_address(ctrl->root_hub))
-        udev->speed = USB_SPEED_HIGH;
+        udev->speed = USB_SPEED_SUPER;
 
     struct usb_device *current = ctrl->devices_by_poseidon_address[old_addr];
     if (!current)
@@ -1039,6 +1102,9 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct IOUs
              * cache the configuration descriptor for later use.
              */
             parse_config_descriptor(udev, (UBYTE *)io->iouh_Data, (UWORD)io->iouh_Actual);
+
+            /* Poseidon doesn't like seeing SS companion descriptors */
+            xhci_filter_ss_ep_companion_desc(io);
             break;
         case USB_DT_DEVICE:
             /* Update FS control endpoint max packet size based on device descriptor. */
