@@ -1169,7 +1169,6 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct IOUs
             const u16 string_index = LE16(io->iouh_SetupData.wValue) & 0xFF;
             if (string_index && string_index == udev->product_string_index)
             {
-                Kprintf("rewriting string index %ld for device addr %ld\n", (LONG)string_index, (LONG)udev->poseidon_address);
                 xhci_trim_string_descriptor(io);
                 xhci_append_ss_suffix(udev, io);
             }

@@ -471,6 +471,8 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 			tmpbuf[0] |= USB_PORT_STAT_OVERCURRENT;
 		if (reg & (PORT_RESET | PORT_WR))
 			tmpbuf[0] |= USB_PORT_STAT_RESET;
+		if ((reg & DEV_SPEED_MASK) == XDEV_SS && (reg & PORT_CONNECT) && (reg & PORT_PE) == 0)
+			tmpbuf[0] |= USB_PORT_STAT_RESET;
 		if (reg & PORT_POWER)
 			/*
 			 * XXX: This Port power bit (for USB 3.0 hub)

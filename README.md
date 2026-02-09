@@ -9,12 +9,13 @@ It's a Poseidon v4.5 driver. Current status is:
 - external hubs work
 - control, bulk, interrupt and RT isochronous (both directions) transfers seem to be working
 - HID devices, thumb drives, audio cards are useable
+- experimental support for SuperSpeed devices connected directly to root hub port
 
 ## Unimplemented / Planned Features
 
 - the non-RT isochronous is not tested
 - support for CM4 and OTG port on Pi4
-- SuperSpeed support
+- SuperSpeed support - hub devices
 
 ## Requirements
 
