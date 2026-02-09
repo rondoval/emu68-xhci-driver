@@ -66,14 +66,14 @@ static struct descriptor
 	.device = {
 		.bLength = sizeof(struct usb_device_descriptor), /* size of device descriptor */
 		.bDescriptorType = USB_DT_DEVICE,				 /* device descriptor */
-		.bcdUSB = cpu_to_le16(0x0200),					 /* advertise as USB 2.0 */
+		.bcdUSB = cpu_to_le16(0x0320),					 /* advertise as USB 3.2 */
 		.bDeviceClass = USB_CLASS_HUB,					 /* hub */
 		.bDeviceSubClass = 0,							 /* no subclass */
 		.bDeviceProtocol = USB_HUB_PR_HS_SINGLE_TT,		 /* single-TT */
 		.bMaxPacketSize0 = 64,							 /* control endpoint max packet */
 		.idVendor = 0x0000,								 /* virtual root hub: leave VID zero */
 		.idProduct = 0x0000,							 /* virtual root hub: leave PID zero */
-		.bcdDevice = cpu_to_le16(0x0100),				 /* device revision */
+		.bcdDevice = cpu_to_le16(0x0101),				 /* device revision */
 		.iManufacturer = 1,								 /* string index */
 		.iProduct = 2,									 /* string index */
 		.iSerialNumber = 0,								 /* no serial */
@@ -131,7 +131,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 		return NULL;
 
 	rh->udev = udev;
-	rh->udev->speed = USB_SPEED_HIGH;
+	rh->udev->speed = USB_SPEED_SUPER;
 	rh->io_reply_data = io_reply_data;
 
 	CopyMem(&prototype_descriptor, &rh->descriptor, sizeof(prototype_descriptor));
@@ -226,7 +226,7 @@ static void xhci_roothub_clear_port_change_bit(u16 wValue, u16 wIndex, volatile 
 	switch (wValue)
 	{
 	case USB_PORT_FEAT_C_RESET:
-		status = PORT_RC;
+		status = PORT_RC | PORT_WRC;
 		port_change_bit = "reset";
 		break;
 	case USB_PORT_FEAT_C_CONNECTION:
@@ -403,8 +403,8 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 		break;
 	case DeviceRequest | USB_REQ_GET_STATUS:
 		/* Device GET_STATUS: bit0=self-powered, bit1=remote-wakeup */
-		tmpbuf[0] = 1; /* self-powered */
-		tmpbuf[1] = 0; /* remote-wakeup disabled */
+		tmpbuf[0] = 0;
+		tmpbuf[1] = 1; /* self-powered, remote-wakeup disabled */
 		srcptr = tmpbuf;
 		srclen = 2;
 		KprintfH("USB_REQ_GET_STATUS\n");
@@ -432,8 +432,8 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 		/* Do nothing */
 		break;
 	case USB_REQ_GET_STATUS | ((USB_DIR_IN | USB_RT_HUB) << 8):
-		tmpbuf[0] = 1; /* USB_STATUS_SELFPOWERED */
-		tmpbuf[1] = 0;
+		tmpbuf[0] = 0;
+		tmpbuf[1] = 1; /* self-powered, remote-wakeup disabled */
 		srcptr = tmpbuf;
 		srclen = 2;
 		KprintfH("USB_REQ_GET_STATUS HUB\n");
@@ -469,7 +469,9 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 			tmpbuf[0] |= USB_PORT_STAT_SUSPEND;
 		if (reg & PORT_OC)
 			tmpbuf[0] |= USB_PORT_STAT_OVERCURRENT;
-		if (reg & PORT_RESET)
+		if (reg & (PORT_RESET | PORT_WR))
+			tmpbuf[0] |= USB_PORT_STAT_RESET;
+		if ((reg & DEV_SPEED_MASK) == XDEV_SS && (reg & PORT_CONNECT) && (reg & PORT_PE) == 0)
 			tmpbuf[0] |= USB_PORT_STAT_RESET;
 		if (reg & PORT_POWER)
 			/*
@@ -488,7 +490,7 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 			tmpbuf[2] |= USB_PORT_STAT_C_ENABLE;
 		if (reg & PORT_OCC)
 			tmpbuf[2] |= USB_PORT_STAT_C_OVERCURRENT;
-		if (reg & PORT_RC)
+		if (reg & (PORT_RC | PORT_WRC))
 			tmpbuf[2] |= USB_PORT_STAT_C_RESET;
 
 		srcptr = tmpbuf;
@@ -514,8 +516,16 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWRe
 			writel(reg, status_reg);
 			break;
 		case USB_PORT_FEAT_RESET:
-			KprintfH("Set PORT_RESET\n");
-			reg |= PORT_RESET;
+			if ((reg & DEV_SPEED_MASK) == XDEV_SS)
+			{
+				KprintfH("Set PORT_WR (warm reset)\n");
+				reg |= PORT_WR;
+			}
+			else
+			{
+				KprintfH("Set PORT_RESET\n");
+				reg |= PORT_RESET;
+			}
 			writel(reg, status_reg);
 			break;
 		case USB_PORT_FEAT_SUSPEND:
