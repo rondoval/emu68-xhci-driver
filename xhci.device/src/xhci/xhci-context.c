@@ -137,7 +137,7 @@ u32 xhci_get_hardware_address(struct usb_device *udev)
 {
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(udev->controller, udev->out_ctx);
     xhci_inval_cache(slot_ctx, sizeof(struct xhci_slot_ctx));
-    return LE32(slot_ctx->dev_state & DEV_ADDR_MASK);
+    return LE32(slot_ctx->dev_state) & DEV_ADDR_MASK;
 }
 
 /**
