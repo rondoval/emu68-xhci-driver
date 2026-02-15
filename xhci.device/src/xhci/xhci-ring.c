@@ -950,7 +950,7 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 		return UHIOERR_NO_ERROR;
 	}
 
-#ifdef DEBUG_HIGH
+#ifdef DEBUG_CONTEXT
 	xhci_dump_slot_ctx("[xhci-ring] xhci_ring_enqueue_td:", udev, FALSE);
 	xhci_dump_ep_ctx("[xhci-ring] xhci_ring_enqueue_td:", udev, io->iouh_Endpoint);
 #endif

@@ -575,10 +575,7 @@ void xhci_enable_slot(struct usb_device *udev, struct IOUsbHWReq *req)
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
-    KprintfH("queue ENABLE_SLOT addr=%lu route=0x%lx parent_port=%lu\n",
-             (ULONG)udev->poseidon_address,
-             (ULONG)udev->route,
-             (ULONG)udev->parent_port);
+    KprintfH("queue ENABLE_SLOT addr=%lu\n", (ULONG)udev->poseidon_address);
     xhci_queue_command(ctrl, 0, 0, 0, TRB_ENABLE_SLOT, req, udev);
 }
 

@@ -255,7 +255,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     u64 trb_addr = LE64(event->trans_event.buffer);
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->trans_event.transfer_len));
 
-#ifdef DEBUG_HIGH
+#ifdef DEBUG_CONTEXT
     KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
              (ULONG)flags,
              (ULONG)LE32(event->trans_event.transfer_len),

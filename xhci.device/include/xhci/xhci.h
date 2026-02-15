@@ -47,7 +47,7 @@
  * connect status and port speed are also sticky - meaning they're in
  * the AUX well and they aren't changed by a hot, warm, or cold reset.
  */
-#define XHCI_PORT_RO ((1 << 0) | (1 << 3) | (0xf << 10) | (1 << 30))
+#define XHCI_PORT_RO ((1 << 0) | (1 << 3) | (0xf << 10) | (1 << 24) | (1 << 30))
 /*
  * These bits are RW; writing a 0 clears the bit, writing a 1 sets the bit:
  * bits 5:8, 9, 14:15, 25:27
@@ -58,7 +58,7 @@
  * These bits are RW; writing a 1 sets the bit, writing a 0 has no effect:
  * bit 4 (port reset)
  */
-#define XHCI_PORT_RW1S ((1 << 4))
+#define XHCI_PORT_RW1S ((1 << 4) | (1 << 31))
 /*
  * These bits are RW; writing a 1 clears the bit, writing a 0 has no effect:
  * bits 1, 17, 18, 19, 20, 21, 22, 23
@@ -77,7 +77,7 @@
  * These bits are Reserved Zero (RsvdZ) and zero should be written to them:
  * bits 2, 24, 28:31
  */
-#define XHCI_PORT_RZ ((1 << 2) | (1 << 24) | (0xf << 28))
+#define XHCI_PORT_RZ ((1 << 2) | (0x3 << 28))
 
 /*
  * XHCI Register Space.
@@ -88,9 +88,10 @@ struct xhci_hccr
 	uint32_t cr_hcsparams1;
 	uint32_t cr_hcsparams2;
 	uint32_t cr_hcsparams3;
-	uint32_t cr_hccparams;
+	uint32_t cr_hccparams1;
 	uint32_t cr_dboff;
 	uint32_t cr_rtsoff;
+	uint32_t cr_hccparams2;
 
 /* hc_capbase bitmasks */
 /* bits 7:0 - how long is the Capabilities register */
@@ -124,7 +125,7 @@ struct xhci_hccr
 /* bits 16:31, Max U2 to U0 latency for the roothub ports */
 #define HCS_U2_LATENCY(p) (((p) >> 16) & 0xffff)
 
-/* HCCPARAMS - hcc_params - bitmasks */
+/* HCCPARAMS1 - hcc_params1 - bitmasks */
 /* true: HC can use 64-bit address pointers */
 #define HCC_64BIT_ADDR(p) ((p) & (1 << 0))
 /* true: HC can do bandwidth negotiation */
@@ -146,7 +147,29 @@ struct xhci_hccr
 /* Max size for Primary Stream Arrays - 2^(n+1), where n is bits 12:15 */
 #define HCC_MAX_PSA(p) (1 << ((((p) >> 12) & 0xf) + 1))
 /* Extended Capabilities pointer from PCI base - section 5.3.6 */
-#define HCC_EXT_CAPS(p) XHCI_HCC_EXT_CAPS(p)
+#define HCC_EXT_CAPS(p) (((p) >> 16) & 0xffff)
+
+/* HCCPARAMS2 - hcc_params2 - bitmasks */
+/* U3 Entry Capability */
+#define HCC_U3C(p) ((p) & (1 << 0))
+/* Configure Endpoint Command Max Exit Latency Too Large Capability (CMC) */
+#define HCC_CMC(p) ((p) & (1 << 1))
+/* Force Save Context Capability (FSC) */
+#define HCC_FSC(p) ((p) & (1 << 2))
+/* Compliance Transition Capability (CTC) */
+#define HCC_CTC(p) ((p) & (1 << 3))
+/* Large ESIT Payload Capability (LEC) */
+#define HCC_LEC(p) ((p) & (1 << 4))
+/* Configuration Information Capability (CIC) */
+#define HCC_CIC(p) ((p) & (1 << 5))
+/* Extended TBC Capability (ETC) */
+#define HCC_ETC(p) ((p) & (1 << 6))
+/* Extended TBC TRB Status Capability (ETC_TSC) */
+#define HCC_ETC_TSC(p) ((p) & (1 << 7))
+/* Get/Set Extended Property Capability (GSC) */
+#define HCC_GSC(p) ((p) & (1 << 8))
+/* Virtualization Based Trusted I/O Capability (VTC) */
+#define HCC_VTC(p) ((p) & (1 << 9))
 
 /* db_off bitmask - bits 0:1 reserved */
 #define DBOFF_MASK (~0x3)
@@ -208,7 +231,7 @@ struct xhci_hcor
 
 /* USBSTS - USB status - status bitmasks */
 /* HC not running - set to 1 when run/stop bit is cleared. */
-#define STS_HALT XHCI_STS_HALT
+#define STS_HALT (1 << 0)
 /* serious error, e.g. PCI parity error.  The HC will clear the run/stop bit. */
 #define STS_FATAL (1 << 2)
 /* event interrupt - clear this prior to clearing any IP flags in IR set*/
@@ -273,8 +296,17 @@ struct xhci_hcor
  */
 #define PORT_PLS_MASK (0xf << 5)
 #define XDEV_U0 (0x0 << 5)
+#define XDEV_U1 (0x1 << 5)
 #define XDEV_U2 (0x2 << 5)
 #define XDEV_U3 (0x3 << 5)
+#define XDEV_DISABLED (0x4 << 5)
+#define XDEV_RXDETECT (0x5 << 5)
+#define XDEV_INACTIVE (0x6 << 5)
+#define XDEV_POLLING (0x7 << 5)
+#define XDEV_RECOVERY (0x8 << 5)
+#define XDEV_HOTRESET (0x9 << 5)
+#define XDEV_COMPLIANCE (0xa << 5)
+#define XDEV_TESTMODE (0xb << 5)
 #define XDEV_RESUME (0xf << 5)
 /* true: port has power (see HCC_PPC) */
 #define PORT_POWER (1 << 9)
@@ -465,25 +497,6 @@ struct xhci_doorbell_array
 #define DB_VALUE_HOST 0x00000000
 
 /**
- * struct xhci_protocol_caps
- * @revision:		major revision, minor revision, capability ID,
- *			and next capability pointer.
- * @name_string:	Four ASCII characters to say which spec this xHC
- *			follows, typically "USB ".
- * @port_info:		Port offset, count, and protocol-defined information.
- */
-struct xhci_protocol_caps
-{
-	u32 revision;
-	u32 name_string;
-	u32 port_info;
-};
-
-#define XHCI_EXT_PORT_MAJOR(x) (((x) >> 24) & 0xff)
-#define XHCI_EXT_PORT_OFF(x) ((x) & 0xff)
-#define XHCI_EXT_PORT_COUNT(x) (((x) >> 8) & 0xff)
-
-/**
  * struct xhci_device_context_array
  * @dev_context_ptr	array of 64-bit DMA addresses for device contexts
  */
@@ -580,55 +593,83 @@ static inline void xhci_writeq(__le64 volatile *regs, const u64 val)
 /*************************************************************
 	EXTENDED CAPABILITY DEFINITIONS
 *************************************************************/
-/* HC not running - set to 1 when run/stop bit is cleared. */
-#define XHCI_STS_HALT (1 << 0)
-
-/* HCCPARAMS offset from PCI base address */
-#define XHCI_HCC_PARAMS_OFFSET 0x10
-/* HCCPARAMS contains the first extended capability pointer */
-#define XHCI_HCC_EXT_CAPS(p) (((p) >> 16) & 0xffff)
-
-/* Command and Status registers offset from the Operational Registers address */
-#define XHCI_CMD_OFFSET 0x00
-#define XHCI_STS_OFFSET 0x04
-
-#define XHCI_MAX_EXT_CAPS 50
-
-/* Capability Register */
-/* bits 7:0 - how long is the Capabilities register */
-#define XHCI_HC_LENGTH(p) (((p) >> 00) & 0x00ff)
 
 /* Extended capability register fields */
 #define XHCI_EXT_CAPS_ID(p) (((p) >> 0) & 0xff)
-#define XHCI_EXT_CAPS_NEXT(p) (((p) >> 8) & 0xff)
+#define XHCI_EXT_CAPS_NEXT(p) (((p) >> 8) & 0xff) // relative offset, in dwords, from this dword, to the next extended capability
 #define XHCI_EXT_CAPS_VAL(p) ((p) >> 16)
+
 /* Extended capability IDs - ID 0 reserved */
 #define XHCI_EXT_CAPS_LEGACY 1
 #define XHCI_EXT_CAPS_PROTOCOL 2
 #define XHCI_EXT_CAPS_PM 3
 #define XHCI_EXT_CAPS_VIRT 4
-#define XHCI_EXT_CAPS_ROUTE 5
+#define XHCI_EXT_CAPS_MSI 5
 /* IDs 6-9 reserved */
+#define XHCI_EXT_CAPS_LOCAL_MEMORY 9
 #define XHCI_EXT_CAPS_DEBUG 10
-/* USB Legacy Support Capability - section 7.1.1 */
-#define XHCI_HC_BIOS_OWNED (1 << 16)
-#define XHCI_HC_OS_OWNED (1 << 24)
+#define XHCI_EXT_CAPS_MSIX 17
 
 /* USB Legacy Support Capability - section 7.1.1 */
 /* Add this offset, plus the value of xECP in HCCPARAMS to the base address */
 #define XHCI_LEGACY_SUPPORT_OFFSET (0x00)
-
+/* USB Legacy Support Capability - section 7.1.1 */
+#define XHCI_HC_BIOS_OWNED (1 << 16)
+#define XHCI_HC_OS_OWNED (1 << 24)
 /* USB Legacy Support Control and Status Register  - section 7.1.2 */
 /* Add this offset, plus the value of xECP in HCCPARAMS to the base address */
 #define XHCI_LEGACY_CONTROL_OFFSET (0x04)
 /* bits 1:2, 5:12, and 17:19 need to be preserved; bits 21:28 should be zero */
 #define XHCI_LEGACY_DISABLE_SMI ((0x3 << 1) + (0xff << 5) + (0x7 << 17))
 
+/* Supported Protocol Capability - section 7.2 */
+struct xhci_protocol_caps
+{
+	u8 major_revision;
+	u8 minor_revision;
+	u8 port_offset;
+	u8 port_count;
+	u8 protocol_speed_id_count;
+	u8 protocol_slot_type;
+
+	u8 max_hub_depth;
+	BOOL usb3_lsecc; /* Link Soft Error Count Capability */
+	BOOL usb2_integrated_hub; /* Integrated Hub Implemented */
+	BOOL usb2_hs_only; /* High-Speed Only Capability */
+	BOOL usb2_hw_lpm; /* Hardware LPM Capability */
+	BOOL usb2_besl_lpm; /* BESL LPM Capability */
+};
+
+/* Offset +00h */
+#define XHCI_PROTOCOL_CAP_MINOR_REV(p) (((p) >> 16) & 0xff)
+#define XHCI_PROTOCOL_CAP_MAJOR_REV(p) (((p) >> 24) & 0xff)
+
+/* Offset +08h */
+#define XHCI_PROTOCOL_CAP_PORT_OFFSET(p) (((p) >> 0) & 0xff)
+#define XHCI_PROTOCOL_CAP_PORT_COUNT(p) (((p) >> 8) & 0xff)
+#define XHCI_PROTOCOL_CAP_USB3_LSECC(p) (((p) >> 24) & 0x1) // Link Soft Error Count Capability
+#define XHCI_PROTOCOL_CAP_USB3_MHD(p) (((p) >> 25) & 0x7) // Maximum Hub Depth
+#define XHCI_PROTOCOL_CAP_USB2_HSO(p) (((p) >> 17) & 0x1) // High-Speed Only Capability
+#define XHCI_PROTOCOL_CAP_USB2_IHI(p) (((p) >> 18) & 0x1) // Integrated Hub Implemented
+#define XHCI_PROTOCOL_CAP_USB2_HLC(p) (((p) >> 19) & 0x1) // Hardware LPM Capability
+#define XHCI_PROTOCOL_CAP_USB2_BLC(p) (((p) >> 20) & 0x1) // BESL LPM Capability
+#define XHCI_PROTOCOL_CAP_USB2_MHD(p) (((p) >> 25) & 0x7) // Maximum Hub Depth
+#define XHCI_PROTOCOL_CAP_SPEED_ID_COUNT(p) (((p) >> 28) & 0xf)
+
+/* Offset +0Ch */
+#define XHCI_PROTOCOL_CAP_SLOT_TYPE(p) (((p) >> 0) & 0xf)
+
+/* Capability Register */
+/* bits 7:0 - how long is the Capabilities register */
+#define XHCI_HC_LENGTH(p) (((p) >> 00) & 0x00ff)
+
 /* USB 2.0 xHCI 0.96 L1C capability - section 7.2.2.1.3.2 */
 #define XHCI_L1C (1 << 16)
 
 /* USB 2.0 xHCI 1.0 hardware LMP capability - section 7.2.2.1.3.2 */
 #define XHCI_HLC (1 << 19)
+
+/* End of extended capability definitions */
 
 /* command register values to disable interrupts and halt the HC */
 /* start/stop HC execution - do not write unless HC is halted*/
@@ -684,6 +725,9 @@ inline void xhci_inval_cache(APTR addr, ULONG len)
 }
 
 void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size);
+
+u32 *xhci_find_next_capability(struct xhci_ctrl *ctrl, u32 cap_id, u32 *init_offset);
+struct xhci_protocol_caps xhci_get_protocol_caps(u32* base_address);
 
 /**
  * xhci_deregister() - Unregister an XHCI controller
