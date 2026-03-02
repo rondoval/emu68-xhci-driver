@@ -315,7 +315,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     BOOL halted = (comp == COMP_STALL || comp == COMP_BABBLE || comp == COMP_SPLIT_ERR || comp == COMP_TX_ERR);
     if (halted)
     {
-        xhci_udev_io_reply_failed(req, status);
+        xhci_udev_io_reply_failed(udev->controller, req, status);
         xhci_reset_ep(udev, ep_index);
         return;
     }

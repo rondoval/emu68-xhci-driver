@@ -667,7 +667,7 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq 
 	APTR addr = req->iouh_Data;
 	ULONG size = req->iouh_Length;
 
-	if (!ctrl || !ctrl->memoryPool || !addr || size == 0 || ((ULONG)req->iouh_DriverPrivate1 & REQ_INTERNAL))
+	if (!ctrl || !ctrl->memoryPool || !addr || size == 0)
 		return (dma_addr_t)addr;
 
 	if (((ULONG)addr & ARCH_DMA_MINALIGN_MASK) == 0)

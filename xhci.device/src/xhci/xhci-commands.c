@@ -270,7 +270,7 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
     if (GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
     {
         Kprintf("ERROR: Enable Slot command failed.\n");
-        xhci_udev_io_reply_failed(cmd->req, UHIOERR_HOSTERROR);
+        xhci_udev_io_reply_failed(ctrl, cmd->req, UHIOERR_HOSTERROR);
         return;
     }
 
@@ -355,7 +355,7 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
          */
         xhci_disable_slot(cmd->udev);
         if (cmd->req)
-            xhci_udev_io_reply_failed(cmd->req, err);
+            xhci_udev_io_reply_failed(ctrl, cmd->req, err);
         return;
     }
 
@@ -380,7 +380,7 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
         {
             int ret = xhci_udev_send_ctrl(cmd->udev, cmd->req);
             if (ret != UHIOERR_NO_ERROR)
-                xhci_udev_io_reply_failed(cmd->req, ret);
+                xhci_udev_io_reply_failed(ctrl, cmd->req, ret);
         }
     }
 }
@@ -622,13 +622,21 @@ static void xhci_set_address(struct usb_device *udev, struct IOUsbHWReq *req)
     KprintfH("Setting up addressable device (slot %ld)\n", (ULONG)slot_id);
     xhci_setup_addressable_virt_dev(ctrl, udev);
 
-    KprintfH("queue ADDR_DEV cmd, in_ctx->bytes=%lx addr=%lu slot=%lu parent_addr=%lu parent_port=%lu route=0x%lx\n",
+    KprintfH("queue ADDR_DEV cmd, in_ctx->bytes=%lx addr=%lu slot=%lu parent_addr=%lu parent_port=%lu route=0x%lx, depth=%ld\n",
              (ULONG)udev->in_ctx->bytes,
              (ULONG)udev->poseidon_address,
              (ULONG)slot_id,
              (ULONG)(udev->parent ? udev->parent->poseidon_address : 0),
              (ULONG)udev->parent_port,
-             (ULONG)udev->route);
+             (ULONG)udev->route,
+             (ULONG)udev->route_depth);
+
+#ifdef DEBUG_HIGH
+    /* Dump parent hub's slot context so we can verify DEV_HUB is set */
+    if (udev->parent && udev->parent->out_ctx && udev->parent->slot_id != 0)
+        xhci_dump_slot_ctx("[xhci-commands] ADDR_DEV parent hub:", udev->parent, FALSE);
+#endif
+
     xhci_queue_command(ctrl, (dma_addr_t)udev->in_ctx->bytes, slot_id, 0, TRB_ADDR_DEV, req, udev);
 }
 

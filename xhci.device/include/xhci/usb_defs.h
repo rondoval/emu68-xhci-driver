@@ -101,8 +101,12 @@
 								   USB_REQ_GET_STATUS)
 #define GetPortStatus HUB_CLASS_REQ(USB_DIR_IN, USB_RT_PORT, \
 									USB_REQ_GET_STATUS)
+#define GetPortErrorCount HUB_CLASS_REQ(USB_DIR_IN, USB_RT_PORT, \
+									   USB_REQ_GET_PORT_ERR_COUNT)
 #define SetHubFeature HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_HUB, \
 									USB_REQ_SET_FEATURE)
+#define SetHubDepth HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_HUB, \
+									USB_REQ_SET_HUB_DEPTH)
 #define SetPortFeature HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_PORT, \
 									 USB_REQ_SET_FEATURE)
 #define ClearTTBuffer HUB_CLASS_REQ(USB_DIR_OUT, USB_RT_PORT, \
@@ -255,7 +259,6 @@
 #define USB_PORT_STAT_POWER 0x0100
 #define USB_PORT_STAT_LOW_SPEED 0x0200
 #define USB_PORT_STAT_HIGH_SPEED 0x0400	 /* support for EHCI */
-#define USB_PORT_STAT_SUPER_SPEED 0x0600 /* faking support to XHCI */
 #define USB_PORT_STAT_SPEED_MASK \
 	(USB_PORT_STAT_LOW_SPEED | USB_PORT_STAT_HIGH_SPEED)
 
@@ -266,7 +269,12 @@
 #define USB_SS_PORT_STAT_LINK_STATE 0x01e0
 #define USB_SS_PORT_STAT_POWER 0x0200
 #define USB_SS_PORT_STAT_SPEED 0x1c00
-#define USB_SS_PORT_STAT_SPEED_5GBPS 0x0000
+#define USB_SS_PORT_STAT_SPEED_5GBPS (0 << 10)
+/* hack for USB2.0 ports */
+#define USB_SS_PORT_STAT_SPEED_LOW (2 << 10)
+#define USB_SS_PORT_STAT_SPEED_FULL (4 << 10)
+#define USB_SS_PORT_STAT_SPEED_HIGH (5 << 10)
+
 /* Bits that are the same from USB 2.0 */
 #define USB_SS_PORT_STAT_MASK (USB_PORT_STAT_CONNECTION |  \
 							   USB_PORT_STAT_ENABLE |      \
@@ -314,5 +322,6 @@
 
 /* Hub class request codes */
 #define USB_REQ_SET_HUB_DEPTH 0x0c
+#define USB_REQ_GET_PORT_ERR_COUNT 0x0d
 
 #endif /*_USB_DEFS_H_ */

@@ -94,12 +94,12 @@ enum {
 
 /* Hub descriptor */
 struct usb_hub_descriptor {
-	unsigned char  bLength;
-	unsigned char  bDescriptorType;
-	unsigned char  bNbrPorts;
-	unsigned short wHubCharacteristics;
-	unsigned char  bPwrOn2PwrGood;
-	unsigned char  bHubContrCurrent;
+	__u8  bLength;
+	__u8  bDescriptorType;
+	__u8  bNbrPorts;
+	__u16 wHubCharacteristics;
+	__u8  bPwrOn2PwrGood;
+	__u8  bHubContrCurrent;
 	/* 2.0 and 3.0 hubs differ here */
 	union {
 		struct {
@@ -117,10 +117,11 @@ struct usb_hub_descriptor {
 } __attribute__ ((packed));
 
 /* Flags for use in DriverPrivate1 */
-#define REQ_INTERNAL 0x1 /* Internal request, free instead of reply */
-#define REQ_ENQUEUED 0x2 /* Request was already enqueued to EP */
-#define REQ_ON_RING 0x4  /* Request is currently on the transfer ring */
-#define REQ_DMA_MAPPED 0x8 /* Request data buffer is DMA mapped */
+#define REQ_INTERNAL 0x1       /* Internal request, free instead of reply */
+#define REQ_ENQUEUED 0x2       /* Request was already enqueued to EP */
+#define REQ_ON_RING 0x4        /* Request is currently on the transfer ring */
+#define REQ_DMA_MAPPED 0x8     /* Request data buffer is DMA mapped */
+#define REQ_HUB_DESC_FETCH 0x10 /* Internal hub descriptor fetch before CONFIG_EP */
 
 enum slot_state {
 	USB_DEV_SLOT_STATE_DISABLED = 0,
@@ -154,10 +155,20 @@ struct usb_device {
 	struct usb_config *active_config;
 	u8 product_string_index; /* iProduct from device descriptor */
 
+	/* Hub translation support */
+	BOOL is_hub;
+	BOOL ss_hub_emulation;
+	BOOL ss_hub_depth_set;
+	struct usb_hub_descriptor ss_hub_desc;
+
+	/* Deferred CONFIG_EP: stash Poseidon IOReq while we pre-fetch hub descriptor */
+	struct IOUsbHWReq *pending_set_config_req;
+
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
 	unsigned int parent_port;     /* Parent hub downstream port (all speeds) */
 	unsigned int route;           /* xHCI route string nibble-packed */
+	u8 route_depth;
 	unsigned int tt_think_time;   /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
 
 	/* Requests state data */
@@ -191,7 +202,7 @@ int xhci_udev_send_ctrl(struct usb_device *udev, struct IOUsbHWReq *io);
 int xhci_udev_send(struct IOUsbHWReq *req);
 
 /* Track replies */
-void xhci_udev_io_reply_failed(struct IOUsbHWReq *io, int err);
+void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io, int err);
 void xhci_udev_io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual);
 
 /* Send commands to device */

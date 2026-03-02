@@ -219,7 +219,6 @@ void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *
 u32 xhci_get_hardware_address(struct usb_device *udev);
 
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
-void xhci_update_hub_tt(struct usb_device *udev);
 
 void xhci_update_maxpacket(struct usb_device *udev, unsigned int max_packet_size);
 int xhci_set_configuration(struct usb_device *udev, int config_value);

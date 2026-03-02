@@ -64,9 +64,9 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int 
     }
 
     ctx->type = type;
-    ctx->size = (USB_MAX_ENDPOINT_CONTEXTS + 1) * CTX_SIZE(readl(&ctrl->hccr->cr_hccparams));
+    ctx->size = (USB_MAX_ENDPOINT_CONTEXTS + 1) * CTX_SIZE(readl(&ctrl->hccr->cr_hccparams1));
     if (type == XHCI_CTX_TYPE_INPUT)
-        ctx->size += CTX_SIZE(readl(&ctrl->hccr->cr_hccparams));
+        ctx->size += CTX_SIZE(readl(&ctrl->hccr->cr_hccparams1));
 
     ctx->bytes = xhci_malloc(ctrl, ctx->size);
     return ctx;
@@ -112,7 +112,7 @@ static struct xhci_slot_ctx *xhci_get_slot_ctx(struct xhci_ctrl *ctrl, struct xh
     if (ctx->type == XHCI_CTX_TYPE_DEVICE)
         return (struct xhci_slot_ctx *)ctx->bytes;
 
-    return (struct xhci_slot_ctx *)(ctx->bytes + CTX_SIZE(readl(&ctrl->hccr->cr_hccparams)));
+    return (struct xhci_slot_ctx *)(ctx->bytes + CTX_SIZE(readl(&ctrl->hccr->cr_hccparams1)));
 }
 
 /**
@@ -130,7 +130,7 @@ static struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_ctrl *ctrl, struct xhci_c
     if (ctx->type == XHCI_CTX_TYPE_INPUT)
         ep_index++;
 
-    return (struct xhci_ep_ctx *)(ctx->bytes + (ep_index * CTX_SIZE(readl(&ctrl->hccr->cr_hccparams))));
+    return (struct xhci_ep_ctx *)(ctx->bytes + (ep_index * CTX_SIZE(readl(&ctrl->hccr->cr_hccparams1))));
 }
 
 u32 xhci_get_hardware_address(struct usb_device *udev)
@@ -189,31 +189,59 @@ static void xhci_slot_copy(struct xhci_ctrl *ctrl, struct xhci_container_ctx *in
     in_slot_ctx->dev_state = out_slot_ctx->dev_state;
 }
 
-static unsigned int route_depth(unsigned int route)
+static void build_route_string(struct usb_device *udev)
 {
-    unsigned int depth = 0;
-    while (route && depth < 5)
+    if (!udev)
+        return;
+
+    struct usb_device *parent = udev->parent;
+    if (!parent || !parent->parent)
     {
-        route >>= 4;
-        depth++;
+        /* root hub and the first tier hub don't need routing */
+        udev->route = 0;
+        udev->route_depth = 0;
+        return;
     }
-    return depth;
+
+    unsigned int nibble = (udev->parent_port > 15)? 0xf : udev->parent_port & 0xF;
+    udev->route_depth = parent->route_depth + 1;
+    if (parent->route_depth > 5)
+    {
+        Kprintf("Route depth %ld exceeds xHCI max of 5, not adding to route string\n", (ULONG)parent->route_depth);
+        udev->route = parent->route;
+        return;
+    }
+
+    /*
+     * xHCI route string packs hub port numbers in 4-bit nibbles where
+     * the first hub tier below root occupies bits [3:0], second tier
+     * occupies [7:4], etc.
+     *
+     * route_depth tracks tier count (1 for first tier), so the nibble
+     * shift is based on parent depth.
+     */
+    udev->route = parent->route | (nibble << (parent->route_depth << 2));
 }
 
-static unsigned int build_route_string(struct usb_device *parent, unsigned int port)
+static u32 find_root_port(struct usb_device *udev)
 {
-    if (!parent)
-        return 0;
+    u32 root_port = udev->parent_port;
+    if (udev->parent)
+    {
+        struct usb_device *ancestor = udev->parent;
 
-    unsigned int depth = route_depth(parent->route);
-    if (depth >= 5)
-        return parent->route;
+        while (ancestor)
+        {
+            if (ancestor->parent_port)
+                root_port = ancestor->parent_port;
 
-    unsigned int nibble = port & 0xF;
-    if (nibble == 0)
-        return parent->route;
+            if (!ancestor->parent)
+                break;
 
-    return parent->route | (nibble << (depth * 4));
+            ancestor = ancestor->parent;
+        }
+    }
+    return root_port;
 }
 
 /**
@@ -226,7 +254,9 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 {
     udev->parent = ctrl->pending_parent;
     udev->parent_port = ctrl->pending_parent_port;
-    udev->route = build_route_string(udev->parent, udev->parent_port);
+    KprintfH("Setting up addressable virtual device addr=%ld pending_parent_addr=%ld pending_parent_port=%ld\n",
+             (LONG)udev->poseidon_address, (LONG)(ctrl->pending_parent ? ctrl->pending_parent->poseidon_address : 0), ctrl->pending_parent_port);
+    build_route_string(udev);
 
     /* Extract the EP0 and Slot Ctrl */
     struct xhci_ep_ctx *ep0_ctx = xhci_get_ep_ctx(ctrl, udev->in_ctx, 0);
@@ -235,10 +265,10 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
              (ULONG)udev->slot_id, (ULONG)udev->in_ctx, (ULONG)udev->out_ctx,
              (ULONG)ep0_ctx, (ULONG)slot_ctx);
 
-    /* Only the control endpoint is valid - one endpoint context */
     u32 dev_info = LE32(slot_ctx->dev_info);
     dev_info &= ~(ROUTE_STRING_MASK | DEV_SPEED | DEV_MTT | LAST_CTX_MASK);
     dev_info |= (udev->route & ROUTE_STRING_MASK);
+    /* Only the control endpoint is valid - one endpoint context */
     dev_info |= LAST_CTX(1);
 
     switch (udev->speed)
@@ -261,35 +291,20 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
         Kprintf("Unknown device speed %ld\n", (ULONG)udev->speed);
     }
 
-    // Find root hub port number
-    u32 root_port = ctrl->pending_parent_port;
-    if (udev->parent)
-    {
-        struct usb_device *ancestor = udev->parent;
-
-        while (ancestor)
-        {
-            if (ancestor->parent_port)
-                root_port = ancestor->parent_port;
-
-            if (!ancestor->parent)
-                break;
-
-            ancestor = ancestor->parent;
-        }
-    }
-
-    /* Low/full-speed devices behind a high-speed hub need TT info */
-    BOOL needs_tt = (udev->speed == USB_SPEED_FULL || udev->speed == USB_SPEED_LOW) &&
-                    udev->parent &&
-                    (udev->parent->speed == USB_SPEED_HIGH ||
-                     udev->parent->speed == USB_SPEED_SUPER ||
-                     udev->parent->speed == USB_SPEED_SUPER_PLUS);
-
+    /*
+     * TODO calcualte and set max exit latency on evaluate context
+     * 4.23.5.2
+     * worst case delay to wake up links on path to root hub in U1/U2
+     * minimum interval for any isoch endpoint
+     * worst case time to transfer isoch data
+     */
     slot_ctx->dev_info = LE32(dev_info);
 
-    KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%ld port_num=%ld root_port_num=%ld speed=%ld route=%lx\n",
-             (ULONG)udev->parent->poseidon_address, udev->parent_port, root_port, (ULONG)udev->speed, (ULONG)udev->route);
+    // Find root hub port number
+    u32 root_port = find_root_port(udev);
+
+    KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%ld port_num=%ld root_port_num=%ld speed=%ld route=%lx route_depth=%ld\n",
+             (ULONG)udev->parent->poseidon_address, udev->parent_port, root_port, (ULONG)udev->speed, (ULONG)udev->route, (ULONG)udev->route_depth);
 
     u32 dev_info2 = LE32(slot_ctx->dev_info2);
     dev_info2 &= ~((ROOT_HUB_PORT_MASK) << ROOT_HUB_PORT_SHIFT);
@@ -297,16 +312,34 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     slot_ctx->dev_info2 = LE32(dev_info2);
 
     u32 tt_info = 0;
-    if (needs_tt)
+    if (udev->speed == USB_SPEED_LOW || udev->speed == USB_SPEED_FULL)
     {
-        tt_info = TT_SLOT(udev->parent->slot_id) |
-                  TT_PORT(udev->parent_port);
+        struct usb_device *tt_hub = udev->parent;
+        unsigned int parent_port = udev->parent_port;
+
+        while (tt_hub)
+        {
+            if (tt_hub->is_hub && tt_hub->speed >= USB_SPEED_HIGH)
+            {
+                // TODO set MTT if parent hub has multiple transaction translator capability enabled
+                tt_info = TT_SLOT(tt_hub->slot_id) | TT_PORT(parent_port);
+                KprintfH("xhci_setup_addressable_virt_dev: tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
+                         tt_hub->slot_id, parent_port, tt_info);
+                break;
+            }
+            parent_port = tt_hub->parent_port;
+            tt_hub = tt_hub->parent;
+        }
+
+        if (!tt_hub)
+            Kprintf("Low or full speed device addr %ld not behind a high-speed hub???\n", (ULONG)udev->poseidon_address);
     }
 
-    KprintfH("xhci_setup_addressable_virt_dev: needs_tt=%ld tt_slot=%ld tt_port=%ld tt_info=%08lx\n",
-             (int)needs_tt,
-             (int)udev->parent->slot_id, (int)udev->parent_port,
-             (ULONG)tt_info);
+    /* TODO for SS/SSP if connected by higher rank hub:
+     * - TT_SLOT shoud contain slot id of the parent hub
+     * - TT_PORT should be the port number on the parent hub that this device is connected to
+     */
+
     slot_ctx->tt_info = LE32(tt_info);
 
     /* Step 4 - ring already allocated */
@@ -371,7 +404,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     xhci_flush_cache(ctrl_ctx, sizeof(struct xhci_input_control_ctx));
 }
 
-void xhci_update_hub_tt(struct usb_device *udev)
+static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ctx *in_ctx)
 {
     if (!udev || !udev->controller)
         return;
@@ -379,44 +412,34 @@ void xhci_update_hub_tt(struct usb_device *udev)
     if (udev->slot_id == 0)
         return;
 
-    udev->route = build_route_string(udev->parent, udev->parent_port);
-
     struct xhci_ctrl *ctrl = udev->controller;
 
-    xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
 
-    /* Start from the controller's current view of the slot context */
-    xhci_slot_copy(ctrl, udev->in_ctx, udev->out_ctx);
-
-    struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, udev->in_ctx);
-    struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
-    if (!slot_ctx || !ctrl_ctx)
+    struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, in_ctx);
+    if (!slot_ctx)
         return;
 
     u32 dev_info = LE32(slot_ctx->dev_info);
+    u32 dev_info2 = LE32(slot_ctx->dev_info2);
     u32 tt_info = LE32(slot_ctx->tt_info);
 
-    dev_info |= DEV_HUB;
+    if (udev->is_hub)
+    {
+        dev_info |= DEV_HUB;
+        dev_info2 &= ~(0xff << 24);
+        dev_info2 |= XHCI_MAX_PORTS(udev->ss_hub_desc.bNbrPorts);
 
-    tt_info &= ~(TT_SLOT(0xff) | TT_PORT(0xff) | TT_THINK_TIME(0x3));
-    tt_info = TT_SLOT(udev->parent->slot_id) |
-              TT_PORT(udev->parent_port) |
-              TT_THINK_TIME(udev->tt_think_time & 0x3);
+        if (udev->speed == USB_SPEED_HIGH)
+        {
+            /* For high-speed hubs, TT think time is encoded in the hub descriptor */
+            tt_info &= ~TT_THINK_TIME(0x03);
+            tt_info |= TT_THINK_TIME(udev->tt_think_time);
+        }
+    }
 
     slot_ctx->dev_info = LE32(dev_info);
+    slot_ctx->dev_info2 = LE32(dev_info2);
     slot_ctx->tt_info = LE32(tt_info);
-
-    ctrl_ctx->add_flags = LE32(SLOT_FLAG);
-    ctrl_ctx->drop_flags = 0;
-
-    xhci_flush_cache(slot_ctx, sizeof(*slot_ctx));
-    xhci_flush_cache(ctrl_ctx, sizeof(*ctrl_ctx));
-    /* xhci_configure_endpoints will flush the full input context */
-
-    KprintfH("xhci_update_hub_tt: addr=%ld tt_code=%ld\n",
-             (ULONG)udev->poseidon_address, (LONG)udev->tt_think_time);
-
-    xhci_configure_endpoints(udev, TRUE, NULL);
 }
 
 /*
@@ -621,17 +644,14 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
     xhci_dump_config("[xhci] xhci_set_configuration:", cfg, (LONG)udev->poseidon_address);
 #endif
 
-    struct xhci_container_ctx *out_ctx;
-    struct xhci_container_ctx *in_ctx;
-    struct xhci_input_control_ctx *ctrl_ctx;
     struct xhci_ctrl *ctrl = udev->controller;
     unsigned int max_ifnum = cfg->no_of_if;
     unsigned int max_ep_flag = 0;
 
-    out_ctx = udev->out_ctx;
-    in_ctx = udev->in_ctx;
+    struct xhci_container_ctx *out_ctx = udev->out_ctx;
+    struct xhci_container_ctx *in_ctx = udev->in_ctx;
 
-    ctrl_ctx = xhci_get_input_control_ctx(in_ctx);
+    struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(in_ctx);
     u32 add_flags = SLOT_FLAG;
     u32 mask = xhci_collect_config_masks(cfg, max_ifnum, &max_ep_flag);
     add_flags |= mask;
@@ -645,6 +665,9 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
     xhci_update_slot_last_ctx(ctrl, udev, max_ep_flag);
 
     xhci_endpoint_copy(ctrl, in_ctx, out_ctx, 0);
+
+    /* update slot context hub stuff */
+    xhci_update_hub_tt(udev, in_ctx);
 
     /* filling up ep contexts */
     for (unsigned int ifnum = 0; ifnum < max_ifnum; ++ifnum)

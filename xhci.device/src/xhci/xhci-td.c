@@ -237,7 +237,7 @@ inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req
 
 	APTR addr = req->iouh_Data;
 	ULONG size = req->iouh_Length;
-	if (!addr || size == 0 || ((ULONG)req->iouh_DriverPrivate1 & REQ_INTERNAL))
+	if (!addr || size == 0)
 		return;
 
 	if (!((ULONG)req->iouh_DriverPrivate1 & REQ_DMA_MAPPED))
@@ -318,7 +318,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
             if (td->is_rt_iso)
                 FreeVecPooled(td_list->memoryPool, td->req);
             else
-                xhci_udev_io_reply_failed(td->req, io_Error);
+                xhci_udev_io_reply_failed(td_list->ctrl, td->req, io_Error);
         }
         xhci_td_free(td_list, td);
     }
@@ -344,7 +344,7 @@ ULONG xhci_td_abort_req(struct IOUsbHWReq *io)
         if (!((ULONG)(io->iouh_DriverPrivate1) & REQ_ON_RING))
         {
             Remove(&io->iouh_Req.io_Message.mn_Node);
-            xhci_udev_io_reply_failed(io, IOERR_ABORTED);
+            xhci_udev_io_reply_failed(NULL, io, IOERR_ABORTED);
             aborted = 0;
         }
     }

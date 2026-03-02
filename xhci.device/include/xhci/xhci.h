@@ -393,6 +393,7 @@ struct xhci_hcor
 #define PORT_U1_TIMEOUT(p) ((p) & 0xff)
 /* Inactivity timer value for transitions into U2 */
 #define PORT_U2_TIMEOUT(p) (((p) & 0xff) << 8)
+#define PORT_FLA (1 << 16)
 /* Bits 24:31 for port testing */
 
 /* USB2 Protocol PORTSPMSC */

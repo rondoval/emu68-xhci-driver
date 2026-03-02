@@ -106,7 +106,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
             while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
             {
                 struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-                xhci_udev_io_reply_failed(req, reply_code);
+                xhci_udev_io_reply_failed(udev->controller, req, reply_code);
             }
 
             xhci_td_destroy_list(ep_ctx->active_tds, reply_code);
@@ -118,7 +118,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
             }
             if (ep_ctx->rt_stop_pending)
             {
-                xhci_udev_io_reply_failed(ep_ctx->rt_stop_pending, reply_code);
+                xhci_udev_io_reply_failed(udev->controller, ep_ctx->rt_stop_pending, reply_code);
                 ep_ctx->rt_stop_pending = NULL;
             }
             ep_ctx->rt_req = NULL;
@@ -199,11 +199,15 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
                  (LONG)req->iouh_Req.io_Command,
                  (LONG)(req->iouh_Endpoint & 0x0F));
 
-        int err = xhci_udev_send(req);
+        int err;
+        if ((ULONG)req->iouh_DriverPrivate1 & REQ_INTERNAL)
+            err = xhci_udev_send_ctrl(ep_ctx->udev, req);
+        else
+            err = xhci_udev_send(req);
         if (err != UHIOERR_NO_ERROR)
         {
             req->iouh_Req.io_Error = err;
-            xhci_udev_io_reply_failed(req, err);
+            xhci_udev_io_reply_failed(ep_ctx->udev->controller, req, err);
             continue;
         }
 
@@ -215,9 +219,17 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
 
 void xhci_ep_set_idle(struct ep_context *ep_ctx)
 {
-    KprintfH("EP %ld state %ld -> IDLE\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
-    ep_ctx->state = USB_DEV_EP_STATE_IDLE;
-    if (!xhci_td_is_empty(ep_ctx->active_tds))
+    if(xhci_td_is_empty(ep_ctx->active_tds))
+    {
+         KprintfH("EP %ld state %ld -> IDLE\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
+        ep_ctx->state = USB_DEV_EP_STATE_IDLE;
+    }
+    else
+    {
+        KprintfH("EP %ld has active TDs but is idle? state=%ld\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
+    }
+
+    if (ep_ctx->pending_reqs.mlh_Head != (struct MinNode *)&ep_ctx->pending_reqs.mlh_Tail)
         xhci_ep_schedule_next(ep_ctx);
 }
 
@@ -333,7 +345,7 @@ void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code)
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
     {
         struct IOUsbHWReq *req = (struct IOUsbHWReq *)node;
-        xhci_udev_io_reply_failed(req, reply_code);
+        xhci_udev_io_reply_failed(ep_ctx->udev->controller, req, reply_code);
     }
 
     xhci_td_fail_all(ep_ctx->active_tds, reply_code);
