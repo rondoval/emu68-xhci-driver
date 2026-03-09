@@ -713,6 +713,7 @@ struct xhci_ctrl
 	enum usb_device_speed pending_parent_speed;
 
 	struct MinList pending_commands; /* list of pending commands */
+	BOOL cmd_abort_pending;          /* TRUE while CA bit is asserted; doorbell suppressed */
 };
 
 inline void xhci_flush_cache(APTR addr, ULONG len)

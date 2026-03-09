@@ -1,9 +1,12 @@
 #ifndef XHCI_COMMANDS_H
 #define XHCI_COMMANDS_H
 
+#include <xhci/xhci-udev.h>
+
 union xhci_trb;
 
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event);
+void xhci_process_command_timeouts(struct xhci_ctrl *ctrl);
 
 void xhci_reset_ep(struct usb_device *udev, u32 ep_index);
 void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index);

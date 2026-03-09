@@ -20,6 +20,8 @@
 #define STACK_SIZE 65535
 #define UNIT_TASK_PRIORITY 30
 #define UNIT_TASK_POLL_DELAY_MS 100
+/* Command ring timeout: 5 seconds */
+#define CMD_TIMEOUT_MS 5000
 
 #define RT_ISO_IN_TARGET_TDS 16
 #define XHCI_SEGMENTS_PER_RING 1

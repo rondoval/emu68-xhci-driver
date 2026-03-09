@@ -1,4 +1,6 @@
 #include <debug.h>
+#include <config.h>
+#include <compat.h>
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
@@ -30,9 +32,9 @@ struct pending_command
     u32 ep_index;            /* endpoint index encoded into the command */
     command_handler complete;
     struct IOUsbHWReq *req; /* to continue control transfers */
-#ifdef DEBUG
-    trb_type type; /* command type for diagnostics */
-#endif
+    trb_type type;         /* command type */
+    BOOL deadline_active;
+    ULONG deadline_us;
 };
 
 static const command_handler command_handlers[];
@@ -99,15 +101,17 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     pending_cmd->udev = udev;
     pending_cmd->ep_index = ep_index;
     pending_cmd->req = req;
-#ifdef DEBUG
     pending_cmd->type = cmd;
-#endif
+    pending_cmd->deadline_us = get_time() + CMD_TIMEOUT_MS * 1000UL;
+    pending_cmd->deadline_active = TRUE;
 
     pending_cmd->complete = command_handlers[cmd];
     AddTailMinList(&ctrl->pending_commands, (struct MinNode *)pending_cmd);
 
-    /* Ring the command ring doorbell */
-    writel(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
+    /* Ring the command ring doorbell — suppressed while an abort is in
+     * progress; COMP_CMD_STOP will restart the ring once the HC has stopped. */
+    if (!ctrl->cmd_abort_pending)
+        writel(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
 }
 
 /*
@@ -302,10 +306,11 @@ static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *
     {
         Kprintf("ERROR: Disable Slot command failed for slot %ld (comp=%ld).\n",
                 (ULONG)cmd->udev->slot_id, comp);
-        return;
     }
-
-    KprintfH("Disabled slot %ld successfully (comp=%ld).\n", cmd->udev->slot_id, comp);
+    else
+    {
+        KprintfH("Disabled slot %ld successfully (comp=%ld).\n", cmd->udev->slot_id, comp);
+    }
     cmd->udev->slot_state = USB_DEV_SLOT_STATE_DISABLED;
     xhci_udev_free(cmd->udev);
 }
@@ -414,11 +419,80 @@ static const command_handler command_handlers[] = {
     [TRB_RESET_DEV] = handle_reset_device,  /* Reset Device Command */
 };
 
+/* Command ring timeout handler
+ * Called every UNIT_TASK_POLL_DELAY_MS ticks.
+ *
+ * Only the HEAD command is ever executing; the rest queue behind it.
+ * When the head has been outstanding for CMD_TIMEOUT_TICKS without a
+ * hardware completion event, we initiate the xHCI Command Abort sequence
+ * per spec §4.6.1.2:
+ *   1. Assert CA bit in CRCR.
+ *   2. HC generates COMP_CMD_ABORT for the stuck command.
+ *   3. HC generates COMP_CMD_STOP.
+ *
+ * While cmd_abort_pending is TRUE, xhci_queue_command suppresses the
+ * doorbell so newly queued TRBs stay queued and are executed when the ring restarts.
+ */
+void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
+{
+    /* Already waiting for COMP_CMD_ABORT + COMP_CMD_STOP events — do nothing. */
+    if (ctrl->cmd_abort_pending)
+        return;
+
+    /* Only the head command is executing; ignore the rest. */
+    struct MinNode *head = ctrl->pending_commands.mlh_Head;
+    if (!head->mln_Succ)
+        return; /* empty list */
+
+    struct pending_command *cmd = (struct pending_command *)head;
+    if (!cmd->deadline_active)
+        return; /* abort already fired */
+
+    ULONG now_us = get_time();
+    if((int32_t)(now_us - cmd->deadline_us) < 0)
+        return; /* not timed out yet */
+
+    Kprintf("Command timeout: type=%s trb_dma=%lx slot=%ld — asserting Command Abort (CA)\n",
+            xhci_command_type_name(cmd->type),
+            (ULONG)cmd->cmd_trb_dma,
+            cmd->udev ? (LONG)cmd->udev->slot_id : -1L);
+
+    u64 crcr = xhci_readq(&ctrl->hcor->or_crcr);
+    if (!(crcr & CMD_RING_RUNNING))
+    {
+        Kprintf("Command ring already stopped\n");
+        //TODO restart controller?
+        return;
+    }
+
+    ctrl->cmd_abort_pending = TRUE;
+    cmd->deadline_active = FALSE;
+    /* Ring is running — assert CA and wait for hardware events. */
+    xhci_writeq(&ctrl->hcor->or_crcr, crcr | CMD_RING_ABORT);
+}
+
 /* Command event dispatcher
  * Called when a Command Completion Event TRB is received
  */
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 {
+    xhci_comp_code comp = (xhci_comp_code)GET_COMP_CODE(LE32(event->event_cmd.status));
+
+    /* ------------------------------------------------------------------ *
+     * COMP_CMD_STOP — the command ring has stopped after a CA abort.
+     * Clear the abort flag and restart the ring so that any commands that
+     * were queued during the abort (e.g. DISABLE_SLOT) can execute.
+     * ------------------------------------------------------------------ */
+    if (comp == COMP_CMD_STOP)
+    {
+        Kprintf("Command Ring Stopped; restarting\n");
+        ctrl->cmd_abort_pending = FALSE;
+        /* Restart only if there are still pending commands. */
+        if (ctrl->pending_commands.mlh_Head->mln_Succ)
+            writel(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
+        return;
+    }
+
     for (struct MinNode *node = ctrl->pending_commands.mlh_Head; node->mln_Succ; node = node->mln_Succ)
     {
         struct pending_command *cmd = (struct pending_command *)node;

@@ -9,14 +9,16 @@
 
 #include <dos/dos.h>
 
-#include <devices/usbhardware.h>
-#include <xhci/xhci-events.h>
-
 #include <compat.h>
 #include <device.h>
 #include <minlist.h>
 #include <debug.h>
 #include <config.h>
+
+#include <devices/usbhardware.h>
+#include <xhci/xhci-events.h>
+#include <xhci/xhci-commands.h>
+
 
 static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 {
@@ -100,6 +102,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
                 WaitIO(&packetTimerReq->tr_node);
             }
 
+            xhci_process_command_timeouts(unit->xhci_ctrl);
             xhci_process_event_timeouts(unit->xhci_ctrl);
 
             //TODO enable irq, just in case
