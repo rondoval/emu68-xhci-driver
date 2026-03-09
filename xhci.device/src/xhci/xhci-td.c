@@ -7,6 +7,7 @@
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-td.h>
 #include <xhci/xhci.h>
+#include <minlist.h>
 #include <debug.h>
 
 #ifdef DEBUG
@@ -49,7 +50,7 @@ TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
         return NULL;
     }
 
-    NewMinList(&td_list->list);
+    _NewMinList(&td_list->list);
     td_list->ctrl = ctrl;
     td_list->memoryPool = ctrl->memoryPool;
     td_list->queued_trbs = 0;

@@ -22,6 +22,7 @@
 #include <exec/memory.h>
 
 #include <debug.h>
+#include <minlist.h>
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
@@ -515,6 +516,8 @@ int xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 		goto err;
 	}
 	Kprintf("memory pool created: %lx\n", ctrl->memoryPool);
+
+	_NewMinList(&ctrl->pending_commands);
 
 	ctrl->hccr = hccr;
 	ctrl->hcor = hcor;
