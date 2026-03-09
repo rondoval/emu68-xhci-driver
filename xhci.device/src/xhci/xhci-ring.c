@@ -731,10 +731,10 @@ inline static dma_addr_t xhci_ring_enqueue_data_trb(struct xhci_ctrl *ctrl, stru
 
 	u32 remainder = xhci_td_remainder(0, io->iouh_Length, io->iouh_Length, ep_ring->max_packet_size, TRUE);
 	u32 length_field = TRB_LEN(io->iouh_Length) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0);
-	KprintfH("length_field = %ld, length = %ld,"
-			 "xhci_td_remainder(length) = %ld , TRB_INTR_TARGET(0) = %ld\n",
-			 length_field, TRB_LEN(io->iouh_Length),
-			 TRB_TD_SIZE(remainder), 0);
+	// KprintfH("length_field = %ld, length = %ld,"
+	// 		 "xhci_td_remainder(length) = %ld , TRB_INTR_TARGET(0) = %ld\n",
+	// 		 length_field, TRB_LEN(io->iouh_Length),
+	// 		 TRB_TD_SIZE(remainder), 0);
 
 	BOOL is_direction_in = (io->iouh_SetupData.bmRequestType & USB_DIR_IN) != 0;
 	u64 buf_64 = xhci_dma_map(ctrl, io, !is_direction_in);
@@ -789,7 +789,7 @@ inline static void xhci_ring_enqueue_control_trbs(struct xhci_ctrl *ctrl, struct
 
 inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring, struct IOUsbHWReq *io, u64 addr, u32 num_trbs, u32 trb_buff_len, dma_addr_t *td_trb_addrs)
 {
-	KprintfH("num_trbs = %lu, trb_buff_len = %lu\n", (ULONG)num_trbs, (ULONG)trb_buff_len);
+	// KprintfH("num_trbs = %lu, trb_buff_len = %lu\n", (ULONG)num_trbs, (ULONG)trb_buff_len);
 	const BOOL is_iso = io->iouh_Req.io_Command == UHCMD_ADDISOHANDLER ||
 						io->iouh_Req.io_Command == UHCMD_ISOXFER;
 
@@ -927,9 +927,9 @@ void xhci_dump_request(const char *tag, const struct IOUsbHWReq *req)
 
 int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms, BOOL defer_doorbell)
 {
-#ifdef DEBUG_HIGH
-	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
-#endif
+// #ifdef DEBUG_HIGH
+// 	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
+// #endif
 	struct xhci_ctrl *ctrl = udev->controller;
 
 	const int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
@@ -958,7 +958,7 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 	u32 trb_buff_len = 0; // non-control only
 	u64 addr = 0;		  // non-control only
 	u32 num_trbs = xhci_ring_calc_num_trbs(ctrl, io, &trb_buff_len, &addr);
-	KprintfH("Calculated num_trbs=%lu trb_buff_len=%lu addr=%lx\n", (ULONG)num_trbs, (ULONG)trb_buff_len, (ULONG)addr);
+	// KprintfH("Calculated num_trbs=%lu trb_buff_len=%lu addr=%lx\n", (ULONG)num_trbs, (ULONG)trb_buff_len, (ULONG)addr);
 
 	struct xhci_ring *ep_ring = xhci_ep_get_ring(udev_ep_ctx);
 	if (!ep_ring)

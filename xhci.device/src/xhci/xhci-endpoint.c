@@ -221,12 +221,7 @@ void xhci_ep_set_idle(struct ep_context *ep_ctx)
 {
     if(xhci_td_is_empty(ep_ctx->active_tds))
     {
-         KprintfH("EP %ld state %ld -> IDLE\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
         ep_ctx->state = USB_DEV_EP_STATE_IDLE;
-    }
-    else
-    {
-        KprintfH("EP %ld has active TDs but is idle? state=%ld\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
     }
 
     if (ep_ctx->pending_reqs.mlh_Head != (struct MinNode *)&ep_ctx->pending_reqs.mlh_Tail)
@@ -271,13 +266,13 @@ void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct IOUsbHWReq *req, dm
         return;
     }
 
-    KprintfH("EP %ld state %ld -> %ld\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state, (LONG)new_state);
+    // KprintfH("EP %ld state %ld -> %ld\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state, (LONG)new_state);
     ep_ctx->state = new_state;
 }
 
 void xhci_ep_set_receiving_control_short(struct ep_context *ep_ctx)
 {
-    KprintfH("EP %ld state %ld -> RECEIVING_CONTROL_SHORT\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
+    // KprintfH("EP %ld state %ld -> RECEIVING_CONTROL_SHORT\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
     ep_ctx->state = USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT;
 }
 

@@ -13,7 +13,6 @@ void beginIO(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6") 
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
 
-    KprintfH("[xhci] %s: Queuing %04lx\n", __func__, io->iouh_Req.io_Command);
     io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
     io->iouh_Req.io_Flags &= ~IOF_QUICK;
     PutMsg(&unit->unit.unit_MsgPort, (struct Message *)io);
