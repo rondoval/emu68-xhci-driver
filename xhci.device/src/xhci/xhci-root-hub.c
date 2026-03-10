@@ -467,7 +467,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 	}
 
 	buffer[0] = 0; /* port 1-7 status change bitmap */
-	if(need_bytes > 1)
+	if (need_bytes > 1)
 		buffer[1] = 0; /* port 8-15 status change bitmap */
 
 	const u32 change_mask = PORT_CSC | PORT_OCC | PORT_RC | PORT_WRC | PORT_PLC | PORT_CEC; /* status change bits to report in interrupt */
@@ -711,7 +711,9 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 	const u16 wValue = LE16(req->iouh_SetupData.wValue); // feature selector
 	const u16 wIndex = LE16(req->iouh_SetupData.wIndex); // selector | port
 	const u8 portNo = wIndex & 0xff;
+#ifdef DEBUG_HIGH
 	xhci_roothub_debug_port(rh, portNo - 1);
+#endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	u32 reg = readl(&port->or_portsc);
@@ -755,7 +757,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 	// USB2 specific features
 	case USB_PORT_FEAT_ENABLE:
 		KprintfH("Clear port %ld PORT_PE\n", portNo);
-		if(rh->ports[portNo - 1].major_revision >= 3)
+		if (rh->ports[portNo - 1].major_revision >= 3)
 		{
 			Kprintf("Can't disable USB 3.0 port\n");
 			xhci_roothub_stall(req);
@@ -835,16 +837,18 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 		return;
 	}
 
+#ifdef DEBUG_HIGH
 	xhci_roothub_debug_port(rh, portNo - 1);
+#endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	const u32 reg = readl(&port->or_portsc);
 
 	u16 wPortStatus = reg & 0x3ff; // bits 0-9 same as portsc
-	//bits 10-12 are speed, for USB3 it's bit 10=1 if enhanced superspeed
-	//fake low/full/high speed bits are used to convey info about USB 2.0 ports to higher layers
+	// bits 10-12 are speed, for USB3 it's bit 10=1 if enhanced superspeed
+	// fake low/full/high speed bits are used to convey info about USB 2.0 ports to higher layers
 	switch (reg & DEV_SPEED_MASK)
-	{	
+	{
 	case XDEV_FS:
 		wPortStatus |= USB_SS_PORT_STAT_SPEED_FULL;
 		break;
@@ -860,7 +864,7 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 	}
 
 	u16 wPortChange = 0;
-	if(reg & PORT_CSC)
+	if (reg & PORT_CSC)
 		wPortChange |= USB_PORT_STAT_C_CONNECTION;
 	if (reg & PORT_OCC)
 		wPortChange |= USB_PORT_STAT_C_OVERCURRENT;
@@ -912,7 +916,9 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	const u16 wIndex = LE16(req->iouh_SetupData.wIndex);
 	const u8 portNo = wIndex & 0xff;
 
+#ifdef DEBUG_HIGH
 	xhci_roothub_debug_port(rh, portNo - 1);
+#endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	u32 reg = readl(&port->or_portsc);
@@ -1002,7 +1008,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	case USB_PORT_FEAT_TEST:
 		/* No-op */
 		break;
-		
+
 	default:
 		Kprintf("Set port %ld: unknown feature %lx\n", portNo, wValue);
 		xhci_roothub_stall(req);
@@ -1021,7 +1027,9 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWReq *io)
 {
 	const u16 wIndex = LE16(io->iouh_SetupData.wIndex);
+#ifdef DEBUG_HIGH
 	const u16 wValue = LE16(io->iouh_SetupData.wValue);
+#endif
 
 	struct UsbSetupData *setup = &io->iouh_SetupData;
 
