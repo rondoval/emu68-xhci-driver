@@ -159,6 +159,7 @@ struct usb_device {
 	BOOL is_hub;
 	BOOL ss_hub_emulation;
 	BOOL ss_hub_depth_set;
+	u8 hub_num_ports;
 	struct usb_hub_descriptor ss_hub_desc;
 
 	/* Deferred CONFIG_EP: stash Poseidon IOReq while we pre-fetch hub descriptor */

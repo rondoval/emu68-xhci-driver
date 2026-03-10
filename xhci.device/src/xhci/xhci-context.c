@@ -427,7 +427,7 @@ static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ct
     {
         dev_info |= DEV_HUB;
         dev_info2 &= ~(0xff << 24);
-        dev_info2 |= XHCI_MAX_PORTS(udev->ss_hub_desc.bNbrPorts);
+        dev_info2 |= XHCI_MAX_PORTS(udev->hub_num_ports);
 
         if (udev->speed == USB_SPEED_HIGH)
         {
