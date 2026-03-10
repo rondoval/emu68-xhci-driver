@@ -7,7 +7,7 @@
 #include <proto/utility.h>
 #endif
 
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 
 #include <xhci/xhci.h>
 #include <xhci/ch9.h>
@@ -35,27 +35,27 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-udev] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-static void xhci_udev_parse_control_message(struct usb_device *udev, struct IOUsbHWReq *io);
-static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, struct IOUsbHWReq *io);
+static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBIORequest *io);
+static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, struct USBIORequest *io);
 static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev);
 
-struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_address)
+struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD virtual_address)
 {
-    if (!ctrl || poseidon_address > USB_MAX_ADDRESS)
+    if (!ctrl || virtual_address > USB_MAX_ADDRESS)
         return NULL;
 
-    if (ctrl->devices_by_poseidon_address[poseidon_address])
-        xhci_udev_free(ctrl->devices_by_poseidon_address[poseidon_address]);
+    if (ctrl->devices_by_virtual_address[virtual_address])
+        xhci_udev_free(ctrl->devices_by_virtual_address[virtual_address]);
 
     struct usb_device *udev = AllocVecPooled(ctrl->memoryPool, sizeof(*udev));
     if (!udev)
     {
-        Kprintf("Failed to allocate usb_device for addr %ld\n", (LONG)poseidon_address);
+        Kprintf("Failed to allocate usb_device for addr %ld\n", (LONG)virtual_address);
         goto nothing;
     }
 
     _memset(udev, 0, sizeof(*udev));
-    udev->poseidon_address = poseidon_address;
+    udev->virtual_address = virtual_address;
     udev->controller = ctrl;
     udev->speed = ctrl->pending_parent_speed;
 
@@ -65,7 +65,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_addres
     udev->out_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_DEVICE);
     if (!udev->out_ctx)
     {
-        Kprintf("Failed to allocate out context for addr %ld\n", (LONG)poseidon_address);
+        Kprintf("Failed to allocate out context for addr %ld\n", (LONG)virtual_address);
         goto free_udev;
     }
     KprintfH("out_ctx bytes=%lx size=%ld\n",
@@ -75,13 +75,13 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_addres
     udev->in_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_INPUT);
     if (!udev->in_ctx)
     {
-        Kprintf("Failed to allocate in context for addr %ld\n", (LONG)poseidon_address);
+        Kprintf("Failed to allocate in context for addr %ld\n", (LONG)virtual_address);
         goto destroy_out_ctx;
     }
     KprintfH("in_ctx bytes=%lx size=%ld\n",
              (ULONG)udev->in_ctx->bytes, (ULONG)udev->in_ctx->size);
 
-    ctrl->devices_by_poseidon_address[poseidon_address] = udev;
+    ctrl->devices_by_virtual_address[virtual_address] = udev;
     return udev;
 
 destroy_out_ctx:
@@ -92,20 +92,20 @@ nothing:
     return NULL;
 }
 
-struct usb_device *xhci_udev_get(struct XHCIUnit *unit, UWORD poseidon_address)
+struct usb_device *xhci_udev_get(struct XHCIUnit *unit, UWORD virtual_address)
 {
-    if (!unit || !unit->xhci_ctrl || poseidon_address > USB_MAX_ADDRESS)
+    if (!unit || !unit->xhci_ctrl || virtual_address > USB_MAX_ADDRESS)
         return NULL;
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    struct usb_device *udev = ctrl->devices_by_poseidon_address[poseidon_address];
+    struct usb_device *udev = ctrl->devices_by_virtual_address[virtual_address];
     if (!udev)
     {
         // We'll be only creating contexts for newly detected devices
-        if (poseidon_address != 0 && poseidon_address != xhci_roothub_get_address(ctrl->root_hub))
+        if (virtual_address != 0 && virtual_address != xhci_roothub_get_address(ctrl->root_hub))
             return NULL;
-        KprintfH("new device addr=%ld\n", (LONG)poseidon_address);
-        udev = xhci_udev_alloc(ctrl, poseidon_address);
+        KprintfH("new device addr=%ld\n", (LONG)virtual_address);
+        udev = xhci_udev_alloc(ctrl, virtual_address);
     }
 
     return udev;
@@ -119,11 +119,11 @@ static void xhci_udev_flush(struct usb_device *udev, UBYTE reply_code)
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
         return;
-    KprintfH("flushing device addr=%ld slot=%ld\n", (LONG)udev->poseidon_address, (LONG)udev->slot_id);
+    KprintfH("flushing device addr=%ld slot=%ld\n", (LONG)udev->virtual_address, (LONG)udev->slot_id);
 
-    if (ctrl->root_int_req && ctrl->root_int_req->iouh_DevAddr == udev->poseidon_address)
+    if (ctrl->root_int_req && ctrl->root_int_req->virtual_address == udev->virtual_address)
     {
-        struct IOUsbHWReq *req = ctrl->root_int_req;
+        struct USBIORequest *req = ctrl->root_int_req;
         ctrl->root_int_req = NULL;
         xhci_udev_io_reply_failed(ctrl, req, reply_code);
     }
@@ -140,7 +140,7 @@ void xhci_udev_free(struct usb_device *udev)
     if (!ctrl)
         return;
 
-    xhci_udev_flush(udev, UHIOERR_TIMEOUT);
+    xhci_udev_flush(udev, ERR_TIMEOUT);
 
     struct MinNode *node;
     while ((node = RemHeadMinList(&udev->configurations)) != NULL)
@@ -155,7 +155,7 @@ void xhci_udev_free(struct usb_device *udev)
         xhci_free_container_ctx(udev->controller, udev->out_ctx);
 
     ctrl->dcbaa->dev_context_ptrs[udev->slot_id] = 0;
-    ctrl->devices_by_poseidon_address[udev->poseidon_address] = NULL;
+    ctrl->devices_by_virtual_address[udev->virtual_address] = NULL;
     ctrl->devices_by_slot_id[udev->slot_id] = NULL;
     FreeVecPooled(ctrl->memoryPool, udev);
 }
@@ -185,9 +185,9 @@ static UBYTE xhci_udev_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum)
     return 0;
 }
 
-static void xhci_udev_patch_endpoint_address(struct usb_device *udev, struct IOUsbHWReq *io)
+static void xhci_udev_patch_endpoint_address(struct usb_device *udev, struct USBIORequest *io)
 {
-    struct UsbSetupData *setup = &io->iouh_SetupData;
+    struct USBSetupPacket *setup = &io->setup;
 
     /* Only patch class+endpoint recipient control requests. */
     if ((setup->bmRequestType & (USB_TYPE_MASK | USB_RECIP_MASK)) != (USB_TYPE_CLASS | USB_RECIP_ENDPOINT))
@@ -212,12 +212,12 @@ static void xhci_udev_patch_endpoint_address(struct usb_device *udev, struct IOU
              (ULONG)wIndex, (ULONG)fixed, (LONG)epnum);
 }
 
-static BOOL xhci_udev_filter_emulated_hub_ctrl_request(struct usb_device *udev, struct IOUsbHWReq *io)
+static BOOL xhci_udev_filter_emulated_hub_ctrl_request(struct usb_device *udev, struct USBIORequest *io)
 {
     if (!udev || !io || !udev->ss_hub_emulation)
         return FALSE;
 
-    struct UsbSetupData *setup = &io->iouh_SetupData;
+    struct USBSetupPacket *setup = &io->setup;
     if (setup->bRequest != USB_REQ_CLEAR_FEATURE && setup->bRequest != USB_REQ_SET_FEATURE)
         return FALSE;
 
@@ -238,9 +238,9 @@ static BOOL xhci_udev_filter_emulated_hub_ctrl_request(struct usb_device *udev, 
     case USB_PORT_FEAT_ENABLE:
         /* Can't disable USB 3.x port */
     case USB_PORT_FEAT_C_ENABLE: // this is only used for clear feature
-        io->iouh_Actual = 0;
-        io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-        if (!(io->iouh_Flags & IOF_QUICK))
+        io->actual_length = 0;
+        io->req.io_Error = ERR_NO_ERROR;
+        if (!(io->req.io_Flags & IOF_QUICK))
             ReplyMsg((struct Message *)io);
         return TRUE;
 
@@ -253,58 +253,58 @@ static BOOL xhci_udev_filter_emulated_hub_ctrl_request(struct usb_device *udev, 
     }
 }
 
-int xhci_udev_send_ctrl(struct usb_device *udev, struct IOUsbHWReq *io)
+int xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io)
 {
     if (!udev || !io)
     {
         Kprintf("no IO request provided?\n");
-        return UHIOERR_BADPARAMS;
+        return ERR_BAD_PARAMETERS;
     }
 
     unsigned int timeout_ms = 0;
-    if ((io->iouh_Flags & UHFF_NAKTIMEOUT))
-        timeout_ms = io->iouh_NakTimeout;
+    if ((io->flags & DRIVER_FLAG_TIMEOUT_DEFINED))
+        timeout_ms = io->timeout;
 
     int ret = xhci_ring_enqueue_td(udev, io, timeout_ms, FALSE);
 
     return ret;
 }
 
-static int xhci_udev_send_ctrl_first(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms)
+static int xhci_udev_send_ctrl_first(struct usb_device *udev, struct USBIORequest *io, unsigned int timeout_ms)
 {
     /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
     xhci_udev_patch_endpoint_address(udev, io);
 
     KprintfH("bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx\n",
-             (ULONG)io->iouh_SetupData.bmRequestType,
-             (ULONG)io->iouh_SetupData.bRequest,
-             LE16(io->iouh_SetupData.wValue),
-             LE16(io->iouh_SetupData.wIndex),
-             LE16(io->iouh_SetupData.wLength));
+             (ULONG)io->setup.bmRequestType,
+             (ULONG)io->setup.bRequest,
+             LE16(io->setup.wValue),
+             LE16(io->setup.wIndex),
+             LE16(io->setup.wLength));
 
     /* Translate USB 2.0 hub requests to SS format for SS hubs */
     xhci_udev_translate_hub_descriptor_request(udev, io);
 
     if (xhci_udev_filter_emulated_hub_ctrl_request(udev, io))
-        return UHIOERR_NO_ERROR;
+        return ERR_NO_ERROR;
 
     struct xhci_ctrl *ctrl = udev->controller;
-    if (io->iouh_DevAddr == xhci_roothub_get_address(ctrl->root_hub))
+    if (io->virtual_address == xhci_roothub_get_address(ctrl->root_hub))
     {
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, io);
         xhci_udev_parse_control_message(udev, io);
-        if (io->iouh_Req.io_Error != UHIOERR_NO_ERROR)
-            return io->iouh_Req.io_Error;
-        if (!(io->iouh_Flags & IOF_QUICK))
+        if (io->req.io_Error != ERR_NO_ERROR)
+            return io->req.io_Error;
+        if (!(io->req.io_Flags & IOF_QUICK))
             ReplyMsg((struct Message *)io);
-        return UHIOERR_NO_ERROR;
+        return ERR_NO_ERROR;
     }
 
-    struct UsbSetupData *setup = &io->iouh_SetupData;
+    struct USBSetupPacket *setup = &io->setup;
     if (setup->bRequest == USB_REQ_SET_ADDRESS && (setup->bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD)
     {
         xhci_address_device(udev, io);
-        return UHIOERR_NO_ERROR;
+        return ERR_NO_ERROR;
     }
 
     if (setup->bRequest == USB_REQ_SET_CONFIGURATION &&
@@ -319,11 +319,11 @@ static int xhci_udev_send_ctrl_first(struct usb_device *udev, struct IOUsbHWReq 
         {
             udev->pending_set_config_req = io;
             if (xhci_udev_fetch_hub_descriptor(udev))
-                return UHIOERR_NO_ERROR;
+                return ERR_NO_ERROR;
         }
 
         int ret = xhci_set_configuration(udev, LE16(setup->wValue) & 0xff);
-        if (ret != UHIOERR_NO_ERROR)
+        if (ret != ERR_NO_ERROR)
         {
             Kprintf("Failed to configure xHCI endpoint\n");
             return ret;
@@ -331,59 +331,59 @@ static int xhci_udev_send_ctrl_first(struct usb_device *udev, struct IOUsbHWReq 
 
         // this will trigger a chain of commands and control xfer
         xhci_configure_endpoints(udev, FALSE, io);
-        return UHIOERR_NO_ERROR;
+        return ERR_NO_ERROR;
     }
 
     /* If we don't have a slot yet, enable one and allocate Virt Dev */
-    if (udev->slot_id == 0 && udev->poseidon_address == 0)
+    if (udev->slot_id == 0 && udev->virtual_address == 0)
     {
         // this will store the req and submit it once addressed
         xhci_address_device(udev, io);
-        return UHIOERR_NO_ERROR;
+        return ERR_NO_ERROR;
     }
 
     int ret = xhci_ring_enqueue_td(udev, io, timeout_ms, FALSE);
     return ret;
 }
 
-int xhci_udev_send(struct IOUsbHWReq *req)
+int xhci_udev_send(struct USBIORequest *req)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)req->iouh_Req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)req->req.io_Unit;
     if (!unit)
     {
         Kprintf("missing unit pointer (cmd=%ld, req=%lx, devaddr=%ld)\n",
-                (LONG)req->iouh_Req.io_Command, (ULONG)req, (LONG)req->iouh_DevAddr);
-        return UHIOERR_BADPARAMS;
+                (LONG)req->req.io_Command, (ULONG)req, (LONG)req->virtual_address);
+        return ERR_BAD_PARAMETERS;
     }
 
-    struct usb_device *udev = xhci_udev_get(unit, req->iouh_DevAddr);
+    struct usb_device *udev = xhci_udev_get(unit, req->virtual_address);
     if (!udev)
     {
-        KprintfH("Device does not exist for addr %ld\n", (LONG)req->iouh_DevAddr);
-        return UHIOERR_TIMEOUT;
+        KprintfH("Device does not exist for addr %ld\n", (LONG)req->virtual_address);
+        return ERR_TIMEOUT;
     }
 
     unsigned int timeout_ms = 0;
-    if ((req->iouh_Flags & UHFF_NAKTIMEOUT))
-        timeout_ms = (unsigned int)req->iouh_NakTimeout;
+    if ((req->flags & DRIVER_FLAG_TIMEOUT_DEFINED))
+        timeout_ms = (unsigned int)req->timeout;
 
-    KprintfH("dev=%lx addr=%ld slot=%ld ep=%ld dir=%s len=%ld flags=%lx interval=%ld tmo=%lu\n",
-             (ULONG)udev, (ULONG)udev->poseidon_address, (LONG)udev->slot_id,
-             req->iouh_Endpoint & 0x0F, (req->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-             (LONG)req->iouh_Length, (ULONG)req->iouh_Flags,
-             (LONG)req->iouh_Interval, (ULONG)timeout_ms);
+    KprintfH("dev=%lx addr=%ld slot=%ld ep=%ld dir=%s len=%ld flags=%lx tmo=%lu\n",
+             (ULONG)udev, (ULONG)udev->virtual_address, (LONG)udev->slot_id,
+             req->endpoint & 0x0F, (req->direction == DIRECTION_IN) ? "IN" : "OUT",
+             (LONG)req->data_buffer_length, (ULONG)req->flags,
+             (ULONG)timeout_ms);
 
-    switch (req->iouh_Req.io_Command)
+    switch (req->req.io_Command)
     {
-    case UHCMD_CONTROLXFER:
+    case CMD_REQUEST_CONTROL:
         return xhci_udev_send_ctrl_first(udev, req, timeout_ms);
-    case UHCMD_ISOXFER:
-    case UHCMD_BULKXFER:
+    case CMD_REQUEST_ISOCHRONOUS:
+    case CMD_REQUEST_BULK:
         return xhci_ring_enqueue_td(udev, req, timeout_ms, FALSE);
-    case UHCMD_INTXFER:
+    case CMD_REQUEST_INTERRUPT:
     {
         struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-        if (udev->poseidon_address == xhci_roothub_get_address(ctrl->root_hub))
+        if (udev->virtual_address == xhci_roothub_get_address(ctrl->root_hub))
         {
             int result = xhci_roothub_submit_int_request(ctrl->root_hub, req);
             return result;
@@ -393,61 +393,61 @@ int xhci_udev_send(struct IOUsbHWReq *req)
     }
     default:
         Kprintf("unsupported command %ld (req=%lx, devaddr=%ld, endpoint=%ld, flags=0x%lx)\n",
-                (LONG)req->iouh_Req.io_Command,
+                (LONG)req->req.io_Command,
                 (ULONG)req,
-                (LONG)req->iouh_DevAddr,
-                (LONG)req->iouh_Endpoint,
-                (ULONG)req->iouh_Flags);
-        return UHIOERR_BADPARAMS;
+                (LONG)req->virtual_address,
+                (LONG)req->endpoint,
+                (ULONG)req->flags);
+        return ERR_BAD_PARAMETERS;
     }
 }
 
 /* Hooks for responding to requests for lower layer */
-void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io, int err)
+void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, int err)
 {
     if (io)
     {
-        io->iouh_Req.io_Error = err;
+        io->req.io_Error = err;
 
         /* Internal, reply-less requests (IOF_QUICK + magic tag) */
-        if ((ULONG)io->iouh_DriverPrivate1 & REQ_INTERNAL)
+        if (io->driver_private_flags & REQ_INTERNAL)
         {
             if (ctrl)
                 FreeVecPooled(ctrl->memoryPool, io);
             return;
         }
 
-        KprintfH("addr %ld EP %ld err=%ld\n", (LONG)io->iouh_DevAddr, (LONG)io->iouh_Endpoint, (LONG)err);
+        KprintfH("addr %ld EP %ld err=%ld\n", (LONG)io->virtual_address, (LONG)io->endpoint, (LONG)err);
         ReplyMsg((struct Message *)io);
     }
 }
 
-static void xhci_udev_handle_hub_prefetch(struct usb_device *udev, struct IOUsbHWReq *io)
+static void xhci_udev_handle_hub_prefetch(struct usb_device *udev, struct USBIORequest *io)
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
     KprintfH("Hub descriptor pre-fetch done for addr=%ld (ports=%ld tt=%ld)\n",
-             (LONG)udev->poseidon_address,
+             (LONG)udev->virtual_address,
              (LONG)udev->ss_hub_desc.bNbrPorts,
              (LONG)udev->tt_think_time);
 
-    if (ctrl && io->iouh_Data)
+    if (ctrl && io->data_buffer)
     {
-        memalign_free(ctrl->memoryPool, io->iouh_Data);
-        io->iouh_Data = NULL;
+        memalign_free(ctrl->memoryPool, io->data_buffer);
+        io->data_buffer = NULL;
     }
 
-    /* Retrieve the stashed Poseidon SET_CONFIGURATION IOReq */
-    struct IOUsbHWReq *orig_req = udev->pending_set_config_req;
+    /* Retrieve the stashed SET_CONFIGURATION IOReq */
+    struct USBIORequest *orig_req = udev->pending_set_config_req;
     udev->pending_set_config_req = NULL;
 
     /* Now run the deferred xhci_set_configuration — hub data is cached */
-    UWORD config_value = LE16(orig_req->iouh_SetupData.wValue) & 0xff;
+    UWORD config_value = LE16(orig_req->setup.wValue) & 0xff;
     int ret = xhci_set_configuration(udev, config_value);
-    if (ret != UHIOERR_NO_ERROR)
+    if (ret != ERR_NO_ERROR)
     {
         Kprintf("Hub SET_CONFIGURATION failed after hub desc fetch\n");
-        orig_req->iouh_Req.io_Error = ret;
+        orig_req->req.io_Error = ret;
         ReplyMsg((struct Message *)orig_req);
         return;
     }
@@ -455,27 +455,27 @@ static void xhci_udev_handle_hub_prefetch(struct usb_device *udev, struct IOUsbH
     xhci_configure_endpoints(udev, FALSE, orig_req);
 }
 
-void xhci_udev_io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual)
+void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, int err, ULONG actual)
 {
     if (!io || !udev)
         return;
 
-    io->iouh_Actual = actual;
-    io->iouh_Req.io_Error = err;
+    io->actual_length = actual;
+    io->req.io_Error = err;
 
-    if (io->iouh_Req.io_Command == UHCMD_CONTROLXFER && err == UHIOERR_NO_ERROR && io->iouh_Endpoint == 0)
+    if (io->req.io_Command == CMD_REQUEST_CONTROL && err == ERR_NO_ERROR && io->endpoint == 0)
         xhci_udev_parse_control_message(udev, io);
 
     KprintfH("err=%ld actual=%ld\n", (LONG)err, (LONG)actual);
 
     /* Internal, reply-less requests (IOF_QUICK + magic tag) */
-    if ((ULONG)io->iouh_DriverPrivate1 & REQ_INTERNAL)
+    if (io->driver_private_flags & REQ_INTERNAL)
     {
         /* Hub descriptor pre-fetch completion: now run the full
          * SET_CONFIGURATION + CONFIG_EP with real hub data available.
          * xhci_udev_parse_control_message already ran above, so
          * handle_get_hub_descriptor cached ss_hub_desc + tt_think_time. */
-        if ((ULONG)io->iouh_DriverPrivate1 & REQ_HUB_DESC_FETCH)
+        if (io->driver_private_flags & REQ_HUB_DESC_FETCH)
             xhci_udev_handle_hub_prefetch(udev, io);
 
         struct xhci_ctrl *ctrl = udev->controller;
@@ -505,7 +505,7 @@ static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
 
     const ULONG alloc_len = ALIGN(desc_len, ARCH_DMA_MINALIGN);
     UBYTE *buf = memalign(ctrl->memoryPool, ARCH_DMA_MINALIGN, alloc_len);
-    struct IOUsbHWReq *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
+    struct USBIORequest *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
     if (!io || !buf)
     {
         Kprintf("xhci_udev_fetch_hub_descriptor: alloc failed, falling back to SET_CONFIGURATION without hub data\n");
@@ -518,29 +518,29 @@ static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
     }
 
     _memset(io, 0, sizeof(*io));
-    io->iouh_Req.io_Command = UHCMD_CONTROLXFER;
-    io->iouh_Req.io_Flags = IOF_QUICK;
-    io->iouh_DriverPrivate1 = (APTR)(REQ_INTERNAL | REQ_ENQUEUED | REQ_HUB_DESC_FETCH);
+    io->req.io_Command = CMD_REQUEST_CONTROL;
+    io->req.io_Flags = IOF_QUICK;
+    io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED | REQ_HUB_DESC_FETCH;
 
-    io->iouh_SetupData.bmRequestType = USB_DIR_IN | USB_RT_HUB;
-    io->iouh_SetupData.bRequest = USB_REQ_GET_DESCRIPTOR;
-    io->iouh_SetupData.wValue = cpu_to_le16((u16)(desc_type << 8));
-    io->iouh_SetupData.wIndex = 0;
-    io->iouh_SetupData.wLength = cpu_to_le16(desc_len);
+    io->setup.bmRequestType = USB_DIR_IN | USB_RT_HUB;
+    io->setup.bRequest = USB_REQ_GET_DESCRIPTOR;
+    io->setup.wValue = cpu_to_le16((u16)(desc_type << 8));
+    io->setup.wIndex = 0;
+    io->setup.wLength = cpu_to_le16(desc_len);
 
-    io->iouh_DevAddr = udev->poseidon_address;
-    io->iouh_Data = buf;
-    io->iouh_Length = desc_len;
-    io->iouh_Dir = UHDIR_IN;
+    io->virtual_address = udev->virtual_address;
+    io->data_buffer = buf;
+    io->data_buffer_length = desc_len;
+    io->direction = DIRECTION_IN;
 
     KprintfH("Fetching hub descriptor (type=0x%02lx len=%ld) for addr=%ld before CONFIG_EP\n",
-             (ULONG)desc_type, (LONG)desc_len, (LONG)udev->poseidon_address);
+             (ULONG)desc_type, (LONG)desc_len, (LONG)udev->virtual_address);
 
     /* Submit directly to the transfer ring — xhci_ep_enqueue only queues
      * for later and requires a completion event to drain, but EP0 may be
      * idle right now so nothing would ever kick the queue. */
     int ring_ret = xhci_ring_enqueue_td(udev, io, 1000, FALSE);
-    if (ring_ret != UHIOERR_NO_ERROR)
+    if (ring_ret != ERR_NO_ERROR)
     {
         Kprintf("xhci_udev_fetch_hub_descriptor: ring_enqueue_td failed (%ld), falling back\n", (LONG)ring_ret);
         memalign_free(ctrl->memoryPool, buf);
@@ -561,22 +561,22 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, int e
         return;
 
     struct xhci_ctrl *ctrl = udev->controller;
-    struct IOUsbHWReq *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
+    struct USBIORequest *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
     if (!io)
         return;
 
     _memset(io, 0, sizeof(*io));
-    io->iouh_Req.io_Command = UHCMD_CONTROLXFER;
-    io->iouh_Req.io_Flags = IOF_QUICK;                             /* no reply port */
-    io->iouh_DriverPrivate1 = (APTR)(REQ_INTERNAL | REQ_ENQUEUED); /* magic tag to free on completion */
+    io->req.io_Command = CMD_REQUEST_CONTROL;
+    io->req.io_Flags = IOF_QUICK;                             /* no reply port */
+    io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED; /* magic tag to free on completion */
 
-    io->iouh_SetupData.bmRequestType = bmRequestType;
-    io->iouh_SetupData.bRequest = bRequest;
-    io->iouh_SetupData.wValue = cpu_to_le16(wValue);
-    io->iouh_SetupData.wIndex = cpu_to_le16(wIndex);
-    io->iouh_SetupData.wLength = cpu_to_le16(wLength);
+    io->setup.bmRequestType = bmRequestType;
+    io->setup.bRequest = bRequest;
+    io->setup.wValue = cpu_to_le16(wValue);
+    io->setup.wIndex = cpu_to_le16(wIndex);
+    io->setup.wLength = cpu_to_le16(wLength);
 
-    io->iouh_DevAddr = udev->poseidon_address;
+    io->virtual_address = udev->virtual_address;
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
@@ -915,22 +915,22 @@ error:
     FreeVecPooled(udev->controller->memoryPool, conf);
 }
 
-static void xhci_filter_ss_ep_companion_desc(struct IOUsbHWReq *io)
+static void xhci_filter_ss_ep_companion_desc(struct USBIORequest *io)
 {
-    if (!io->iouh_Data || io->iouh_Actual < sizeof(struct usb_config_descriptor))
+    if (!io->data_buffer || io->actual_length < sizeof(struct usb_config_descriptor))
         return;
 
-    struct usb_config_descriptor *desc = (struct usb_config_descriptor *)io->iouh_Data;
+    struct usb_config_descriptor *desc = (struct usb_config_descriptor *)io->data_buffer;
     if (desc->bDescriptorType != USB_DT_CONFIG)
         return;
 
     UWORD total_len = LE16(desc->wTotalLength);
-    if (total_len > io->iouh_Actual)
-        total_len = io->iouh_Actual;
+    if (total_len > io->actual_length)
+        total_len = io->actual_length;
 
-    UBYTE *read = io->iouh_Data + desc->bLength;
+    UBYTE *read = io->data_buffer + desc->bLength;
     UBYTE *write = read;
-    UBYTE *end = io->iouh_Data + total_len;
+    UBYTE *end = io->data_buffer + total_len;
 
     while (read + 2 <= end)
     {
@@ -955,11 +955,11 @@ static void xhci_filter_ss_ep_companion_desc(struct IOUsbHWReq *io)
     if (write < end)
         _memset(write, 0, end - write);
 
-    UWORD new_total = (UWORD)(write - (UBYTE *)io->iouh_Data);
+    UWORD new_total = (UWORD)(write - (UBYTE *)io->data_buffer);
     if (new_total != total_len)
         desc->wTotalLength = LE16(new_total);
 
-    io->iouh_Actual = new_total;
+    io->actual_length = new_total;
 }
 
 static BOOL xhci_udev_iface_has_active_rt_iso(struct usb_device *udev, unsigned int iface_number)
@@ -1009,7 +1009,7 @@ static void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive)
 
         for (int i = 0; i <= USB_MAX_ADDRESS; ++i)
         {
-            struct usb_device *child = ctrl->devices_by_poseidon_address[i];
+            struct usb_device *child = ctrl->devices_by_virtual_address[i];
             if (!child || child == udev)
                 continue;
 
@@ -1019,7 +1019,7 @@ static void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive)
     }
 
     KprintfH("disconnect device addr=%ld slot=%ld port=%ld\n",
-             (LONG)udev->poseidon_address,
+             (LONG)udev->virtual_address,
              (LONG)udev->slot_id,
              (LONG)udev->parent_port);
 
@@ -1062,7 +1062,7 @@ static struct usb_device *xhci_udev_find_child_on_port(struct usb_device *hub, u
     struct xhci_ctrl *ctrl = hub->controller;
     for (int i = 0; i <= USB_MAX_ADDRESS; ++i)
     {
-        struct usb_device *cand = ctrl->devices_by_poseidon_address[i];
+        struct usb_device *cand = ctrl->devices_by_virtual_address[i];
         if (!cand || cand == hub || cand->slot_id == 0)
             continue;
 
@@ -1084,7 +1084,7 @@ static void xhci_udev_cache_ss_hub_descriptor(struct usb_device *udev, struct us
 
     CopyMem(hub, &udev->ss_hub_desc, len);
     KprintfH("Cached SS hub descriptor for addr %ld with %ld ports\n",
-             (LONG)udev->poseidon_address, (LONG)hub->bNbrPorts);
+             (LONG)udev->virtual_address, (LONG)hub->bNbrPorts);
 }
 
 static void xhci_udev_set_ss_hub_depth(struct usb_device *udev)
@@ -1100,7 +1100,7 @@ static void xhci_udev_set_ss_hub_depth(struct usb_device *udev)
         return;
 
     KprintfH("SS hub addr=%ld route=0x%lx -> SET_HUB_DEPTH depth=%ld\n",
-             (LONG)udev->poseidon_address, (ULONG)udev->route, (LONG)udev->route_depth);
+             (LONG)udev->virtual_address, (ULONG)udev->route, (LONG)udev->route_depth);
 
     xhci_udev_send_control_request(udev,
                                    0,
@@ -1143,16 +1143,16 @@ static ULONG xhci_udev_build_usb2_hub_descriptor(struct usb_device *udev, UBYTE 
 
 /* Translate SS hub descriptor request: modify request to ask for SS descriptor,
  * it will be translated back to USB 2.0 in the parse handler */
-static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, struct IOUsbHWReq *io)
+static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, struct USBIORequest *io)
 {
-    if (!udev->ss_hub_emulation || !io || !io->iouh_Data || io->iouh_Length == 0)
+    if (!udev->ss_hub_emulation || !io || !io->data_buffer || io->data_buffer_length == 0)
         return;
 
-    struct UsbSetupData *setup = &io->iouh_SetupData;
+    struct USBSetupPacket *setup = &io->setup;
     const u8 descriptorType = (LE16(setup->wValue) >> 8) & 0xFF;
     const u16 typeReq = setup->bRequest | setup->bmRequestType << 8;
 
-    /* Only translate GetHubDescriptor requests for USB_DT_HUB (Poseidon asking for USB 2.0) */
+    /* Only translate GetHubDescriptor requests for USB_DT_HUB */
     if (typeReq != GetHubDescriptor || descriptorType != USB_DT_HUB)
         return;
 
@@ -1161,7 +1161,7 @@ static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, 
     setup->wValue = cpu_to_le16((USB_DT_SS_HUB << 8) | (old_value & 0xFF));
 
     KprintfH("SS hub addr=%ld: modified wValue from 0x%04lx (USB_DT_HUB) to 0x%04lx (USB_DT_SS_HUB)\n",
-             (LONG)udev->poseidon_address, (ULONG)old_value, (ULONG)LE16(setup->wValue));
+             (LONG)udev->virtual_address, (ULONG)old_value, (ULONG)LE16(setup->wValue));
 
     /* Return FALSE to let the request proceed normally - it will be translated back in parse */
     return;
@@ -1223,13 +1223,13 @@ static void xhci_udev_map_ss_port_status(u16 *wStatus, u16 *wChange, enum usb_de
     *wChange = wChangeNew;
 }
 
-static void handle_get_device_descriptor(struct usb_device *udev, struct IOUsbHWReq *io)
+static void handle_get_device_descriptor(struct usb_device *udev, struct USBIORequest *io)
 {
     // We don't need full descriptor... just the max packet size to detect changes that require endpoint reconfiguration.
-    if (!io->iouh_Data || io->iouh_Actual < 8)
+    if (!io->data_buffer || io->actual_length < 8)
         return;
 
-    struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)io->iouh_Data;
+    struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)io->data_buffer;
     KprintfH("Device Descriptor: bLength=%ld bDescriptorType=%ld bcdUSB=0x%04lx bDeviceClass=0x%02lx bDeviceSubClass=0x%02lx bDeviceProtocol=0x%02lx bMaxPacketSize0=%ld idVendor=0x%04lx idProduct=0x%04lx bcdDevice=0x%04lx iManufacturer=%ld iProduct=%ld iSerialNumber=%ld bNumConfigurations=%ld\n",
              (LONG)dev_desc->bLength,
              (LONG)dev_desc->bDescriptorType,
@@ -1252,34 +1252,34 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct IOUsbHW
 
     if (udev->speed == USB_SPEED_SUPER && dev_desc->bMaxPacketSize0 != 64)
     {
-        KprintfH("clamping SS bMaxPacketSize0 from %ld to 64 for Poseidon\n", (LONG)dev_desc->bMaxPacketSize0);
+        KprintfH("clamping SS bMaxPacketSize0 from %ld to 64\n", (LONG)dev_desc->bMaxPacketSize0);
         dev_desc->bMaxPacketSize0 = 64;
     }
 
-    if (io->iouh_Actual >= sizeof(struct usb_device_descriptor))
+    if (io->actual_length >= sizeof(struct usb_device_descriptor))
         udev->product_string_index = dev_desc->iProduct;
 
     if (dev_desc->bDeviceClass == USB_CLASS_HUB && (!udev->is_hub || !udev->ss_hub_emulation))
     {
-        KprintfH("Device at addr=%ld is a hub\n", (LONG)udev->poseidon_address);
+        KprintfH("Device at addr=%ld is a hub\n", (LONG)udev->virtual_address);
         udev->is_hub = TRUE;
 
         /* Only enable SS hub emulation for real external hubs, not the virtual root hub.
          * Root hub (parent == NULL) already provides port status in USB 2.0 format. */
         if (udev->speed >= USB_SPEED_SUPER && !udev->ss_hub_emulation)
         {
-            KprintfH("Detected USB 3.0 hub at addr=%ld, enabling translation mode\n", (LONG)udev->poseidon_address);
+            KprintfH("Detected USB 3.0 hub at addr=%ld, enabling translation mode\n", (LONG)udev->virtual_address);
             udev->ss_hub_emulation = TRUE;
         }
     }
 }
 
-static void handle_get_hub_descriptor(struct usb_device *udev, struct IOUsbHWReq *io, u8 descriptorType)
+static void handle_get_hub_descriptor(struct usb_device *udev, struct USBIORequest *io, u8 descriptorType)
 {
-    if (!io->iouh_Data || io->iouh_Actual < 5)
+    if (!io->data_buffer || io->actual_length < 5)
         return;
 
-    struct usb_hub_descriptor *hub = (struct usb_hub_descriptor *)io->iouh_Data;
+    struct usb_hub_descriptor *hub = (struct usb_hub_descriptor *)io->data_buffer;
     KprintfH("Hub Descriptor: bLength=%ld bDescriptorType=%ld bNbrPorts=%ld wHubCharacteristics=0x%04lx bPwrOn2PwrGood=%ld bHubContrCurrent=%ld\n",
              (LONG)hub->bLength,
              (LONG)hub->bDescriptorType,
@@ -1294,7 +1294,7 @@ static void handle_get_hub_descriptor(struct usb_device *udev, struct IOUsbHWReq
         const UWORD characteristics = LE16(hub->wHubCharacteristics);
         udev->tt_think_time = (u8)((characteristics >> 5) & 0x3);
         KprintfH("hub addr %ld TT think time code=%ld (bit-times=%ld)\n",
-                 (LONG)udev->poseidon_address, (LONG)udev->tt_think_time, (LONG)((udev->tt_think_time + 1) * 8));
+                 (LONG)udev->virtual_address, (LONG)udev->tt_think_time, (LONG)((udev->tt_think_time + 1) * 8));
     }
 
     udev->hub_num_ports = hub->bNbrPorts;
@@ -1302,27 +1302,27 @@ static void handle_get_hub_descriptor(struct usb_device *udev, struct IOUsbHWReq
     /* If this is an SS hub descriptor response, cache it */
     if (descriptorType == USB_DT_SS_HUB)
     {
-        KprintfH("SS hub addr=%ld: caching USB3 hub descriptor (len=%ld)\n", (LONG)udev->poseidon_address, (LONG)io->iouh_Actual);
-        xhci_udev_cache_ss_hub_descriptor(udev, hub, io->iouh_Actual);
+        KprintfH("SS hub addr=%ld: caching USB3 hub descriptor (len=%ld)\n", (LONG)udev->virtual_address, (LONG)io->actual_length);
+        xhci_udev_cache_ss_hub_descriptor(udev, hub, io->actual_length);
         xhci_udev_set_ss_hub_depth(udev);
 
-        /* If Poseidon requested USB 2.0 descriptor but we fetched SS, translate it */
+        /* If the stack requested USB 2.0 descriptor but we fetched SS, translate it */
         if (udev->ss_hub_emulation)
         {
             /* Build USB 2.0 descriptor from the SS descriptor we just cached */
-            io->iouh_Actual = xhci_udev_build_usb2_hub_descriptor(udev, (UBYTE *)io->iouh_Data, io->iouh_Length);
-            KprintfH("SS hub addr=%ld: translated USB3 descriptor to USB2 format. Size %ld bytes\n", (LONG)udev->poseidon_address, (LONG)io->iouh_Actual);
+            io->actual_length = xhci_udev_build_usb2_hub_descriptor(udev, (UBYTE *)io->data_buffer, io->data_buffer_length);
+            KprintfH("SS hub addr=%ld: translated USB3 descriptor to USB2 format. Size %ld bytes\n", (LONG)udev->virtual_address, (LONG)io->actual_length);
         }
     }
 }
 
-static void xhci_trim_string_descriptor(struct IOUsbHWReq *io)
+static void xhci_trim_string_descriptor(struct USBIORequest *io)
 {
-    if (!io || !io->iouh_Data || io->iouh_Actual < 2)
+    if (!io || !io->data_buffer || io->actual_length < 2)
         return;
 
-    struct usb_string_descriptor *str_desc = (struct usb_string_descriptor *)io->iouh_Data;
-    if (str_desc->bDescriptorType != USB_DT_STRING || io->iouh_Actual < str_desc->bLength || str_desc->bLength < 2)
+    struct usb_string_descriptor *str_desc = (struct usb_string_descriptor *)io->data_buffer;
+    if (str_desc->bDescriptorType != USB_DT_STRING || io->actual_length < str_desc->bLength || str_desc->bLength < 2)
         return;
 
     const u8 length = str_desc->bLength - 2;
@@ -1333,22 +1333,22 @@ static void xhci_trim_string_descriptor(struct IOUsbHWReq *io)
     }
 }
 
-static void xhci_append_ss_suffix(struct usb_device *udev, struct IOUsbHWReq *io)
+static void xhci_append_ss_suffix(struct usb_device *udev, struct USBIORequest *io)
 {
-    if (!udev || !io || !io->iouh_Data || io->iouh_Actual < 2)
+    if (!udev || !io || !io->data_buffer || io->actual_length < 2)
         return;
 
     if (udev->speed < USB_SPEED_SUPER)
         return;
 
-    struct usb_string_descriptor *str_desc = (struct usb_string_descriptor *)io->iouh_Data;
+    struct usb_string_descriptor *str_desc = (struct usb_string_descriptor *)io->data_buffer;
     if (str_desc->bDescriptorType != USB_DT_STRING)
         return;
 
     static const char suffix[] = " \0(\0S\0S\0)\0";
     static const int suffix_len = sizeof(suffix) - 1;
 
-    if (str_desc->bLength > io->iouh_Actual)
+    if (str_desc->bLength > io->actual_length)
     {
         // the descriptor is actually larger than the buffer used to receive it, just mock the length
         str_desc->bLength += suffix_len;
@@ -1360,46 +1360,46 @@ static void xhci_append_ss_suffix(struct usb_device *udev, struct IOUsbHWReq *io
         return;
     length -= 2;
 
-    for (int i = 0; i < suffix_len && length + i + 2 < (int)io->iouh_Length; ++i)
+    for (int i = 0; i < suffix_len && length + i + 2 < (int)io->data_buffer_length; ++i)
         str_desc->bString[length + i] = (u8)suffix[i];
 
     str_desc->bLength += suffix_len;
-    io->iouh_Actual = min(str_desc->bLength, io->iouh_Length);
+    io->actual_length = min(str_desc->bLength, io->data_buffer_length);
 }
 
-static void handle_get_port_status(struct usb_device *udev, struct IOUsbHWReq *io)
+static void handle_get_port_status(struct usb_device *udev, struct USBIORequest *io)
 {
-    if (!io->iouh_Data || io->iouh_Actual < 4)
+    if (!io->data_buffer || io->actual_length < 4)
         return;
 
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
         return;
-    const u16 port = LE16(io->iouh_SetupData.wIndex);
+    const u16 port = LE16(io->setup.wIndex);
 
-    u16 wStatus = LE16(((u16 *)io->iouh_Data)[0]);
-    u16 wChange = LE16(((u16 *)io->iouh_Data)[1]);
+    u16 wStatus = LE16(((u16 *)io->data_buffer)[0]);
+    u16 wChange = LE16(((u16 *)io->data_buffer)[1]);
     /* Extract speed from the appropriate bit positions based on hub type */
     enum usb_device_speed speed = (udev->ss_hub_emulation) ? xhci_udev_speed_from_ss_port_status(wStatus) : xhci_udev_speed_from_port_status(wStatus);
 
     if (udev->ss_hub_emulation)
     {
         xhci_udev_map_ss_port_status(&wStatus, &wChange, speed);
-        ((u16 *)io->iouh_Data)[0] = LE16(wStatus);
-        ((u16 *)io->iouh_Data)[1] = LE16(wChange);
+        ((u16 *)io->data_buffer)[0] = LE16(wStatus);
+        ((u16 *)io->data_buffer)[1] = LE16(wChange);
     }
 
-    KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->poseidon_address, (LONG)port, (ULONG)wStatus, (ULONG)wChange);
+    KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->virtual_address, (LONG)port, (ULONG)wStatus, (ULONG)wChange);
 
     /* Drop children immediately if port power is off or connection loss */
     if ((wStatus & USB_PORT_STAT_POWER) == 0 || ((wStatus & USB_PORT_STAT_CONNECTION) == 0))
     {
-        KprintfH("hub addr=%ld port=%ld lost power or disabled; removing child if any\n", (LONG)udev->poseidon_address, (LONG)port);
+        KprintfH("hub addr=%ld port=%ld lost power or disabled; removing child if any\n", (LONG)udev->virtual_address, (LONG)port);
         struct usb_device *child = xhci_udev_find_child_on_port(udev, port);
         if (child)
         {
             KprintfH("hub addr=%ld port=%ld power-off or disabled, removing child addr=%ld slot=%ld\n",
-                     (LONG)udev->poseidon_address, (LONG)port, (LONG)child->poseidon_address, (LONG)child->slot_id);
+                     (LONG)udev->virtual_address, (LONG)port, (LONG)child->virtual_address, (LONG)child->slot_id);
             xhci_udev_disconnect(child, TRUE);
         }
     }
@@ -1409,7 +1409,7 @@ static void handle_get_port_status(struct usb_device *udev, struct IOUsbHWReq *i
     {
         /* Remember parent/port for the next default-address attach without split info. */
         KprintfH("hub addr=%ld port=%ld speed=%ld connected; remembering for pending attach (status=%04lx)\n",
-                 (LONG)udev->poseidon_address, (LONG)port, (LONG)speed, (ULONG)wStatus);
+                 (LONG)udev->virtual_address, (LONG)port, (LONG)speed, (ULONG)wStatus);
         ctrl->pending_parent = udev;
         ctrl->pending_parent_port = port;
         ctrl->pending_parent_speed = speed;
@@ -1419,17 +1419,17 @@ static void handle_get_port_status(struct usb_device *udev, struct IOUsbHWReq *i
     if ((wChange & USB_PORT_STAT_C_RESET) && (wStatus & (USB_PORT_STAT_CONNECTION | USB_PORT_STAT_ENABLE)))
     {
         KprintfH("hub addr=%ld port=%ld speed=%ld reset-complete; remembering for pending attach (status=%04lx)\n",
-                 (LONG)udev->poseidon_address, (LONG)port, (LONG)speed, (ULONG)wStatus);
+                 (LONG)udev->virtual_address, (LONG)port, (LONG)speed, (ULONG)wStatus);
         ctrl->pending_parent = udev;
         ctrl->pending_parent_port = port;
         ctrl->pending_parent_speed = speed;
     }
 }
 
-static void handle_set_address(struct usb_device *udev, struct IOUsbHWReq *io)
+static void handle_set_address(struct usb_device *udev, struct USBIORequest *io)
 {
-    UWORD old_addr = io->iouh_DevAddr & 0x7F;
-    UWORD new_addr = (UWORD)(LE16(io->iouh_SetupData.wValue) & 0x7F);
+    UWORD old_addr = io->virtual_address & 0x7F;
+    UWORD new_addr = (UWORD)(LE16(io->setup.wValue) & 0x7F);
     if (new_addr == old_addr)
         return;
 
@@ -1440,30 +1440,30 @@ static void handle_set_address(struct usb_device *udev, struct IOUsbHWReq *io)
     if (old_addr == xhci_roothub_get_address(ctrl->root_hub))
         udev->speed = USB_SPEED_SUPER;
 
-    struct usb_device *current = ctrl->devices_by_poseidon_address[old_addr];
+    struct usb_device *current = ctrl->devices_by_virtual_address[old_addr];
     if (!current)
         current = udev;
 
-    if (ctrl->devices_by_poseidon_address[new_addr] && ctrl->devices_by_poseidon_address[new_addr] != current)
+    if (ctrl->devices_by_virtual_address[new_addr] && ctrl->devices_by_virtual_address[new_addr] != current)
     {
         Kprintf("overwriting existing ctx for addr %ld\n", (LONG)new_addr);
         /* If we are replacing an existing device (e.g., hub power-cycle), disconnect it (and children) first. */
-        xhci_udev_disconnect(ctrl->devices_by_poseidon_address[new_addr], TRUE);
+        xhci_udev_disconnect(ctrl->devices_by_virtual_address[new_addr], TRUE);
     }
 
-    ctrl->devices_by_poseidon_address[new_addr] = current;
-    if (ctrl->devices_by_poseidon_address[old_addr] == current)
-        ctrl->devices_by_poseidon_address[old_addr] = NULL;
+    ctrl->devices_by_virtual_address[new_addr] = current;
+    if (ctrl->devices_by_virtual_address[old_addr] == current)
+        ctrl->devices_by_virtual_address[old_addr] = NULL;
 
-    current->poseidon_address = new_addr;
+    current->virtual_address = new_addr;
 
     KprintfH("migrated ctx from addr %ld to %ld\n", (LONG)old_addr, (LONG)new_addr);
 }
 
-static void handle_set_interface(struct usb_device *udev, struct IOUsbHWReq *io)
+static void handle_set_interface(struct usb_device *udev, struct USBIORequest *io)
 {
-    unsigned int iface = (unsigned int)(LE16(io->iouh_SetupData.wIndex) & 0xFF);
-    unsigned int alt = (unsigned int)(LE16(io->iouh_SetupData.wValue) & 0xFF);
+    unsigned int iface = (unsigned int)(LE16(io->setup.wIndex) & 0xFF);
+    unsigned int alt = (unsigned int)(LE16(io->setup.wValue) & 0xFF);
     /*
      * This is a workaround for Poseidon issue.
      * Poseidon issues SET_INTERFACE for all devices after connecting a new one.
@@ -1473,7 +1473,7 @@ static void handle_set_interface(struct usb_device *udev, struct IOUsbHWReq *io)
     if (!xhci_udev_iface_has_active_rt_iso(udev, iface))
     {
         int err = xhci_set_interface(udev, iface, alt);
-        if (err != UHIOERR_NO_ERROR)
+        if (err != ERR_NO_ERROR)
         {
             Kprintf("SET_INTERFACE iface=%ld alt=%ld failed err=%ld\n",
                     (LONG)iface, (LONG)alt, (LONG)err);
@@ -1486,19 +1486,19 @@ static void handle_set_interface(struct usb_device *udev, struct IOUsbHWReq *io)
     }
 }
 
-static void xhci_udev_parse_control_message(struct usb_device *udev, struct IOUsbHWReq *io)
+static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBIORequest *io)
 {
     KprintfH("dev=%lx addr=%ld bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx actual=%ld\n",
-             (ULONG)udev, (ULONG)udev->poseidon_address,
-             (ULONG)io->iouh_SetupData.bmRequestType,
-             (ULONG)io->iouh_SetupData.bRequest,
-             LE16(io->iouh_SetupData.wValue),
-             LE16(io->iouh_SetupData.wIndex),
-             LE16(io->iouh_SetupData.wLength),
-             (LONG)io->iouh_Actual);
+             (ULONG)udev, (ULONG)udev->virtual_address,
+             (ULONG)io->setup.bmRequestType,
+             (ULONG)io->setup.bRequest,
+             LE16(io->setup.wValue),
+             LE16(io->setup.wIndex),
+             LE16(io->setup.wLength),
+             (LONG)io->actual_length);
 
-    const u8 descriptorType = (LE16(io->iouh_SetupData.wValue) >> 8) & 0xFF;
-    const u16 typeReq = io->iouh_SetupData.bRequest | io->iouh_SetupData.bmRequestType << 8;
+    const u8 descriptorType = (LE16(io->setup.wValue) >> 8) & 0xFF;
+    const u16 typeReq = io->setup.bRequest | io->setup.bmRequestType << 8;
 
     switch (typeReq)
     {
@@ -1509,9 +1509,9 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct IOUs
             /* If this was a successful GET_DESCRIPTOR(CONFIGURATION),
              * cache the configuration descriptor for later use.
              */
-            parse_config_descriptor(udev, (UBYTE *)io->iouh_Data, (UWORD)io->iouh_Actual);
+            parse_config_descriptor(udev, (UBYTE *)io->data_buffer, (UWORD)io->actual_length);
 
-            /* Poseidon doesn't like seeing SS companion descriptors */
+            /* USB 2.0 stacks  don't like seeing SS companion descriptors */
             xhci_filter_ss_ep_companion_desc(io);
             break;
         case USB_DT_DEVICE:
@@ -1520,7 +1520,7 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct IOUs
             break;
         case USB_DT_STRING:
         {
-            const u16 string_index = LE16(io->iouh_SetupData.wValue) & 0xFF;
+            const u16 string_index = LE16(io->setup.wValue) & 0xFF;
             if (string_index && string_index == udev->product_string_index)
             {
                 xhci_trim_string_descriptor(io);
@@ -1545,9 +1545,9 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct IOUs
         /* If this was a successful standard SET_ADDRESS, migrate the glue context
          * from the old devaddr to the new one so subsequent transfers reuse the
          * same slot and endpoint state.
-         * Note that this containt the address Poseidon _thinks_ it set on the interface.
+         * Note that the API assumes it is the stack that assigns USB address.
          * In reality, XHCI selects the address.
-         * Hence poseidon_address is what Poseidon uses; xhci_address is the real one.
+         * Hence virtual_address is what the stack uses; xhci_address is the real one.
          */
         handle_set_address(udev, io);
         break;

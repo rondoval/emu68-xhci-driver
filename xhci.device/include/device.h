@@ -12,7 +12,7 @@
 #include <exec/semaphores.h>
 #include <exec/interrupts.h>
 
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 
 #define LIB_MIN_VERSION 39 /* we use memory pools */
 #define DEVICE_PRIORITY 90
@@ -54,7 +54,7 @@ void UnitTaskStop(struct XHCIUnit *unit);
 int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
 int UnitClose(struct XHCIUnit *unit);
 
-void ProcessCommand(struct IOUsbHWReq *io);
+void ProcessCommand(struct USBIORequest *io);
 
 int xhci_intx_enable(struct XHCIUnit *unit);
 void xhci_intx_shutdown(struct XHCIUnit *unit);

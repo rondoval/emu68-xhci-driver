@@ -12,7 +12,7 @@
 #define __XHCI_UDEV_H__
 
 #include <exec/types.h>
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 #include <xhci/ch9.h>
 /*
  * The EHCI spec says that we must align to at least 32 bytes.  However,
@@ -145,7 +145,7 @@ enum slot_state {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
-	unsigned int	poseidon_address;			/* Device address as seen by Poseidon */
+	unsigned int	virtual_address;			/* Device address as seen by the driver user */
 	unsigned int    xhci_address;				/* Device address as seen by xHCI */
 	unsigned int	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */
@@ -162,8 +162,8 @@ struct usb_device {
 	u8 hub_num_ports;
 	struct usb_hub_descriptor ss_hub_desc;
 
-	/* Deferred CONFIG_EP: stash Poseidon IOReq while we pre-fetch hub descriptor */
-	struct IOUsbHWReq *pending_set_config_req;
+	/* Deferred CONFIG_EP: stash IOReq while we pre-fetch hub descriptor */
+	struct USBIORequest *pending_set_config_req;
 
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
@@ -194,17 +194,17 @@ struct XHCIUnit;
 struct xhci_ctrl;
 
 /* Access udev */
-struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD poseidon_address);
-struct usb_device *xhci_udev_get(struct XHCIUnit *unit, UWORD poseidon_address);
+struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD virtual_address);
+struct usb_device *xhci_udev_get(struct XHCIUnit *unit, UWORD virtual_address);
 void xhci_udev_free(struct usb_device *udev);
 
 /* Dispatch */
-int xhci_udev_send_ctrl(struct usb_device *udev, struct IOUsbHWReq *io);
-int xhci_udev_send(struct IOUsbHWReq *req);
+int xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io);
+int xhci_udev_send(struct USBIORequest *req);
 
 /* Track replies */
-void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io, int err);
-void xhci_udev_io_reply_data(struct usb_device *udev, struct IOUsbHWReq *io, int err, ULONG actual);
+void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, int err);
+void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, int err, ULONG actual);
 
 /* Send commands to device */
 void xhci_udev_clear_feature_halt(struct usb_device *udev, ULONG ep_index);

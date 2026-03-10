@@ -1,16 +1,16 @@
 #ifndef __XHCI_DESCRIPTORS_H__
 #define __XHCI_DESCRIPTORS_H___
 
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 #include <compat.h>
 #include <xhci/ch9.h>
 
-inline int xhci_ep_index_from_parts(UWORD iouh_endpoint, UWORD iouh_dir)
+inline int xhci_ep_index_from_parts(UWORD endpoint, UWORD direction)
 {
-    UBYTE ep = iouh_endpoint & 0x0F;
+    UBYTE ep = endpoint & 0x0F;
     if (ep == 0)
         return 0;
-    BOOL dir_in = (iouh_dir == UHDIR_IN);
+    BOOL dir_in = (direction == DIRECTION_IN);
     return (ep << 1) - (dir_in ? 0 : 1);
 }
 

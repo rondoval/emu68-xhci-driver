@@ -181,7 +181,7 @@ struct xhci_root_hub
 	struct descriptor descriptor;
 
 	/* INT endpoint request */
-	struct IOUsbHWReq *int_req;
+	struct USBIORequest *int_req;
 
 	struct xhci_root_hub_port *ports;
 };
@@ -423,7 +423,7 @@ unsigned int xhci_roothub_get_address(struct xhci_root_hub *rh)
 	if (!rh || !rh->udev)
 		return 0;
 
-	return rh->udev->poseidon_address;
+	return rh->udev->virtual_address;
 }
 
 UBYTE xhci_roothub_get_num_ports(struct xhci_root_hub *rh)
@@ -434,17 +434,17 @@ UBYTE xhci_roothub_get_num_ports(struct xhci_root_hub *rh)
 	return rh->descriptor.hub.bNbrPorts;
 }
 
-int xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+int xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	if (rh->int_req)
 	{
 		Kprintf("root hub interrupt request already pending\n");
-		return UHIOERR_HOSTERROR;
+		return ERR_HCI_ERROR;
 	}
 
 	rh->int_req = req;
 	xhci_roothub_complete_int_request(rh);
-	return UHIOERR_NO_ERROR;
+	return ERR_NO_ERROR;
 }
 
 void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
@@ -454,14 +454,14 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 
 	struct xhci_ctrl *ctrl = rh->udev->controller;
 
-	u8 *buffer = (u8 *)rh->int_req->iouh_Data;
+	u8 *buffer = (u8 *)rh->int_req->data_buffer;
 
 	const u8 num_ports = rh->descriptor.hub.bNbrPorts;
 	/* USB 3.0 spec is always two bytes, however the stack may request fewer bytes */
 	const u8 need_bytes = (num_ports + 7) / 8;
-	if (!buffer || rh->int_req->iouh_Length < need_bytes)
+	if (!buffer || rh->int_req->data_buffer_length < need_bytes)
 	{
-		rh->io_reply_data(rh->udev, rh->int_req, UHIOERR_STALL, 0);
+		rh->io_reply_data(rh->udev, rh->int_req, ERR_DEVICE_STALL, 0);
 		rh->int_req = NULL;
 		return;
 	}
@@ -494,39 +494,39 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 		return;
 	}
 
-	rh->io_reply_data(rh->udev, rh->int_req, UHIOERR_NO_ERROR, need_bytes);
+	rh->io_reply_data(rh->udev, rh->int_req, ERR_NO_ERROR, need_bytes);
 	rh->int_req = NULL;
 }
 
-inline static void xhci_roothub_stall(struct IOUsbHWReq *req)
+inline static void xhci_roothub_stall(struct USBIORequest *req)
 {
 	if (req)
 	{
 		KprintfH("stall\n");
-		req->iouh_Actual = 0;
-		req->iouh_Req.io_Error = UHIOERR_STALL;
+		req->actual_length = 0;
+		req->req.io_Error = ERR_DEVICE_STALL;
 	}
 }
 
-inline static void xhci_roothub_no_error(struct IOUsbHWReq *req)
+inline static void xhci_roothub_no_error(struct USBIORequest *req)
 {
 	if (req)
 	{
-		req->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+		req->req.io_Error = ERR_NO_ERROR;
 	}
 }
 
-inline static void xhci_roothub_reply(struct IOUsbHWReq *req, void *data, u32 length)
+inline static void xhci_roothub_reply(struct USBIORequest *req, void *data, u32 length)
 {
 	if (!req)
 		return;
 
-	length = min(length, LE16(req->iouh_SetupData.wLength));
+	length = min(length, LE16(req->setup.wLength));
 	if (data && length > 0)
-		CopyMem(data, req->iouh_Data, length);
+		CopyMem(data, req->data_buffer, length);
 
-	req->iouh_Actual = length;
-	req->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+	req->actual_length = length;
+	req->req.io_Error = ERR_NO_ERROR;
 }
 
 inline static void xhci_roothub_delay_ms(ULONG milliseconds)
@@ -558,15 +558,15 @@ inline static void xhci_roothub_delay_ms(ULONG milliseconds)
 	DeleteMsgPort(timer_port);
 }
 
-static void xhci_roothub_handle_device_get_configuration(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_device_get_configuration(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	KprintfH("USB_REQ_GET_CONFIGURATION\n");
 	xhci_roothub_reply(req, &rh->descriptor.config.bConfigurationValue, 1);
 }
 
-static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	struct UsbSetupData *setup = &req->iouh_SetupData;
+	struct USBSetupPacket *setup = &req->setup;
 
 	switch (LE16(setup->wValue) >> 8)
 	{
@@ -606,7 +606,7 @@ static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, 
 	}
 }
 
-static void xhci_roothub_handle_device_get_status(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_device_get_status(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	(void)rh;
 	KprintfH("USB_REQ_GET_STATUS\n");
@@ -695,10 +695,10 @@ inline static void xhci_roothub_clear_port_change_bit(u16 wValue, u8 portNo, vol
 #endif
 }
 
-inline static struct xhci_hcor_port_regs *xhci_roothub_get_port(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+inline static struct xhci_hcor_port_regs *xhci_roothub_get_port(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	struct xhci_ctrl *ctrl = rh->udev->controller;
-	u8 port = LE16(req->iouh_SetupData.wIndex) & 0xff; // port number is in low byte of wIndex;
+	u8 port = LE16(req->setup.wIndex) & 0xff; // port number is in low byte of wIndex;
 
 	if (port == 0 || port > rh->descriptor.hub.bNbrPorts)
 		return NULL;
@@ -706,10 +706,10 @@ inline static struct xhci_hcor_port_regs *xhci_roothub_get_port(struct xhci_root
 	return &ctrl->hcor->portregs[port - 1];
 }
 
-static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	const u16 wValue = LE16(req->iouh_SetupData.wValue); // feature selector
-	const u16 wIndex = LE16(req->iouh_SetupData.wIndex); // selector | port
+	const u16 wValue = LE16(req->setup.wValue); // feature selector
+	const u16 wIndex = LE16(req->setup.wIndex); // selector | port
 	const u8 portNo = wIndex & 0xff;
 #ifdef DEBUG_HIGH
 	xhci_roothub_debug_port(rh, portNo - 1);
@@ -799,11 +799,11 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 	xhci_roothub_no_error(req);
 }
 
-static void xhci_roothub_handle_hub_get_descriptor(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_hub_get_descriptor(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	(void)rh;
 	KprintfH("USB_REQ_GET_DESCRIPTOR HUB\n");
-	const u16 wValue = LE16(req->iouh_SetupData.wValue);
+	const u16 wValue = LE16(req->setup.wValue);
 	if (wValue >> 8 != USB_DT_SS_HUB)
 	{
 		Kprintf("get unknown value %lx\n", wValue);
@@ -813,7 +813,7 @@ static void xhci_roothub_handle_hub_get_descriptor(struct xhci_root_hub *rh, str
 	xhci_roothub_reply(req, &rh->descriptor.hub, rh->descriptor.hub.bLength);
 }
 
-static void xhci_roothub_handle_hub_get_status(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_hub_get_status(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	(void)rh;
 	KprintfH("USB_REQ_GET_STATUS HUB\n");
@@ -822,11 +822,11 @@ static void xhci_roothub_handle_hub_get_status(struct xhci_root_hub *rh, struct 
 	xhci_roothub_reply(req, status, 4);
 }
 
-static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	const u16 wIndex = LE16(req->iouh_SetupData.wIndex);
-	const u16 wValue = LE16(req->iouh_SetupData.wValue);
-	const u16 wLength = LE16(req->iouh_SetupData.wLength);
+	const u16 wIndex = LE16(req->setup.wIndex);
+	const u16 wValue = LE16(req->setup.wValue);
+	const u16 wLength = LE16(req->setup.wLength);
 	const u8 portNo = wIndex & 0xff;
 	const u8 portStatusType = wValue & 0xff;
 
@@ -884,9 +884,9 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 	xhci_roothub_reply(req, tmpbuf, 4);
 }
 
-static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	const u16 wIndex = LE16(req->iouh_SetupData.wIndex);
+	const u16 wIndex = LE16(req->setup.wIndex);
 	const u8 portNo = wIndex & 0xff;
 
 	if (rh->ports[portNo - 1].major_revision < 3)
@@ -895,9 +895,9 @@ static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, s
 		xhci_roothub_stall(req);
 		return;
 	}
-	if (req->iouh_SetupData.wValue != 0 || LE16(req->iouh_SetupData.wLength) < 2)
+	if (req->setup.wValue != 0 || LE16(req->setup.wLength) < 2)
 	{
-		Kprintf("invalid get port error count request value 0x%lx length %ld\n", LE16(req->iouh_SetupData.wValue), LE16(req->iouh_SetupData.wLength));
+		Kprintf("invalid get port error count request value 0x%lx length %ld\n", LE16(req->setup.wValue), LE16(req->setup.wLength));
 		xhci_roothub_stall(req);
 		return;
 	}
@@ -910,10 +910,10 @@ static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, s
 	xhci_roothub_reply(req, tmpbuf, 2);
 }
 
-static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struct IOUsbHWReq *req)
+static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	const u16 wValue = LE16(req->iouh_SetupData.wValue);
-	const u16 wIndex = LE16(req->iouh_SetupData.wIndex);
+	const u16 wValue = LE16(req->setup.wValue);
+	const u16 wIndex = LE16(req->setup.wIndex);
 	const u8 portNo = wIndex & 0xff;
 
 #ifdef DEBUG_HIGH
@@ -1024,14 +1024,14 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
  * @param udev pointer to the USB device structure
  * @param io  pointer to the IOUsbHWReq structure
  */
-void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct IOUsbHWReq *io)
+void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequest *io)
 {
-	const u16 wIndex = LE16(io->iouh_SetupData.wIndex);
+	const u16 wIndex = LE16(io->setup.wIndex);
 #ifdef DEBUG_HIGH
-	const u16 wValue = LE16(io->iouh_SetupData.wValue);
+	const u16 wValue = LE16(io->setup.wValue);
 #endif
 
-	struct UsbSetupData *setup = &io->iouh_SetupData;
+	struct USBSetupPacket *setup = &io->setup;
 
 	if ((setup->bmRequestType & USB_RT_PORT) && (wIndex & 0xff) > rh->descriptor.hub.bNbrPorts)
 	{

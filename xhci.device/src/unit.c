@@ -20,7 +20,7 @@
 
 #include <mbox.h>
 #include <msg.h>
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 #include <pci_types.h>
 #include <pci.h>
 #include <xhci/xhci.h>
@@ -178,7 +178,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	{
 		unit->unit.unit_OpenCnt++;
 		Kprintf("[xhci] %s: Unit opened successfully, current open count: %ld\n", __func__, unit->unit.unit_OpenCnt);
-		return UHIOERR_NO_ERROR;
+		return ERR_NO_ERROR;
 	}
 
 	unit->flags = flags;
@@ -189,7 +189,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	if (unit->memoryPool == NULL)
 	{
 		Kprintf("[xhci] %s: Failed to create memory pool\n", __func__);
-		return UHIOERR_OUTOFMEMORY;
+		return ERR_ALLOC_ERROR;
 	}
 
 	int result = pcie_init();
@@ -204,7 +204,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	if (xhci_dev == NULL)
 	{
 		Kprintf("[xhci] %s: Failed to find XHCI PCI device\n", __func__);
-		result = UHIOERR_BADPARAMS;
+		result = ERR_BAD_PARAMETERS;
 		goto err_del_pool;
 	}
 
@@ -222,7 +222,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	if(!is_supported(xhci_dev))
 	{
 		Kprintf("[xhci] %s: Unsupported XHCI controller\n", __func__);
-		result = UHIOERR_BADPARAMS;
+		result = ERR_BAD_PARAMETERS;
 		goto err_del_pool;
 	}
 
@@ -238,7 +238,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	struct xhci_ctrl *xhci_ctrl = AllocMem(sizeof(struct xhci_ctrl), MEMF_CLEAR | MEMF_PUBLIC);
 	if (!xhci_ctrl) {
 		Kprintf("[xhci] %s: Failed to allocate memory for xhci_ctrl\n", __func__);
-		result = UHIOERR_OUTOFMEMORY;
+		result = ERR_ALLOC_ERROR;
 		goto err_del_pool;
 	}
 
@@ -252,7 +252,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	unit->xhci_ctrl = xhci_ctrl;
 
 	result = UnitTaskStart(unit);
-	if (result != UHIOERR_NO_ERROR)
+	if (result != ERR_NO_ERROR)
 	{
 		Kprintf("[xhci] %s: Failed to start unit task: %ld\n", __func__, result);
 		goto err_dereg;
@@ -265,7 +265,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 		Kprintf("[xhci] %s: Failed to enable INTx (%ld)\n", __func__, (LONG)result);
 		goto err_int_shutdown;
 	}
-	return UHIOERR_NO_ERROR;
+	return ERR_NO_ERROR;
 
 err_int_shutdown:
 	// xhci_intx_shutdown(unit);

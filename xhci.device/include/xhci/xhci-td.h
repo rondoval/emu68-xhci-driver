@@ -2,7 +2,7 @@
 #define __XHCI_TD_H
 
 #include <exec/types.h>
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 #include <compat.h>
 
 typedef struct MinList IOReqList;
@@ -19,15 +19,15 @@ ULONG xhci_td_get_queued_trb_count(TransferDescriptorList *td_list);
 ULONG xhci_td_get_queued_td_count(TransferDescriptorList *td_list);
 
 BOOL xhci_td_add(TransferDescriptorList *td_list,
-    struct IOUsbHWReq *io_req,
+    struct USBIORequest *io_req,
     ULONG timeout_ms,
     BOOL is_rt_iso,
     dma_addr_t *trb_addresses,
     ULONG trb_count);
 
-struct IOUsbHWReq *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr);
+struct USBIORequest *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr);
 
-ULONG xhci_td_abort_req(struct IOUsbHWReq *io);
+ULONG xhci_td_abort_req(struct USBIORequest *io);
 void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error);
 
 #endif

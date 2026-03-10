@@ -2,7 +2,7 @@
 #define __XHCI_RING_H
 
 #include <exec/types.h>
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 #include <compat.h>
 
 struct xhci_transfer_event
@@ -304,7 +304,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 								  BOOL link_trbs, BOOL is_event_ring, int ep_index, int max_packet_size);
 void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
 
-int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms, BOOL defer_doorbell);
+int xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, unsigned int timeout_ms, BOOL defer_doorbell);
 void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
 
 void xhci_ring_acknowledge_event(struct xhci_ctrl *ctrl);

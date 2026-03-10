@@ -14,7 +14,7 @@
 #include <exec/errors.h>
 #include <dos/dosextens.h>
 
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 
 #include <device.h>
 #include <config.h>
@@ -77,12 +77,12 @@ static const APTR initTable[4] = {
     NULL,
     (APTR)initFunction};
 
-void openLib(struct IOUsbHWReq *io asm("a1"), LONG unitNumber asm("d0"), ULONG flags asm("d1"), struct XHCIDevice *base asm("a6"));
-ULONG closeLib(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6"));
+void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"), ULONG flags asm("d1"), struct XHCIDevice *base asm("a6"));
+ULONG closeLib(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
 ULONG expungeLib(struct XHCIDevice *base asm("a6"));
 APTR extFunc(struct XHCIDevice *base asm("a6"));
-void beginIO(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6"));
-LONG abortIO(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6"));
+void beginIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+LONG abortIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
 
 static const APTR funcTable[] = {
     (APTR)openLib,
@@ -122,21 +122,21 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
     return base;
 }
 
-void openLib(struct IOUsbHWReq *io asm("a1"), LONG unitNumber asm("d0"),
+void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
              ULONG flags asm("d1"), struct XHCIDevice *base asm("a6"))
 {
     Kprintf("[xhci] %s: Opening device with unit number %ld and flags %lx\n", __func__, unitNumber, flags);
     if (unitNumber != 0)
     {
         Kprintf("[xhci] %s: Invalid unit number %ld\n", __func__, unitNumber);
-        io->iouh_Req.io_Error = IOERR_OPENFAIL;
+        io->req.io_Error = IOERR_OPENFAIL;
         return;
     }
 
-    if (io->iouh_Req.io_Message.mn_Length < sizeof(struct IOStdReq))
+    if (io->req.io_Message.mn_Length < sizeof(struct IOStdReq))
     {
-        Kprintf("[xhci] %s: Invalid request length %ld\n", __func__, io->iouh_Req.io_Message.mn_Length);
-        io->iouh_Req.io_Error = IOERR_OPENFAIL;
+        Kprintf("[xhci] %s: Invalid request length %ld\n", __func__, io->req.io_Message.mn_Length);
+        io->req.io_Error = IOERR_OPENFAIL;
         return;
     }
 
@@ -159,7 +159,7 @@ void openLib(struct IOUsbHWReq *io asm("a1"), LONG unitNumber asm("d0"),
         if (unit == NULL)
         {
             Kprintf("[xhci]%s: Failed to allocate unit\n", __func__);
-            io->iouh_Req.io_Error = IOERR_OPENFAIL;
+            io->req.io_Error = IOERR_OPENFAIL;
             return;
         }
         AddTailMinList(&base->units, (struct MinNode *)unit);
@@ -168,24 +168,24 @@ void openLib(struct IOUsbHWReq *io asm("a1"), LONG unitNumber asm("d0"),
     if (unit->unit.unit_OpenCnt > 0)
     {
         Kprintf("[xhci] %s: Unit is already open, we only support exclusive access\n", __func__);
-        io->iouh_Req.io_Error = IOERR_UNITBUSY;
+        io->req.io_Error = IOERR_UNITBUSY;
         return;
     }
 
     int result = UnitOpen(unit, unitNumber, flags);
 
-    if (result == UHIOERR_NO_ERROR)
+    if (result == ERR_NO_ERROR)
     {
         Kprintf("[xhci] %s: Unit opened successfully\n", __func__);
-        io->iouh_Req.io_Unit = (struct Unit *)unit;
+        io->req.io_Unit = (struct Unit *)unit;
         base->device.dd_Library.lib_OpenCnt++;
         base->device.dd_Library.lib_Flags &= ~LIBF_DELEXP;
-        io->iouh_Req.io_Message.mn_Node.ln_Type = NT_REPLYMSG;
+        io->req.io_Message.mn_Node.ln_Type = NT_REPLYMSG;
     }
     else
     {
         Kprintf("[xhci] %s: Failed to open unit, error code %ld\n", __func__, result);
-        io->iouh_Req.io_Error = IOERR_OPENFAIL;
+        io->req.io_Error = IOERR_OPENFAIL;
 
         // Remove the failed unit from the list and free its memory
         RemoveMinNode((struct MinNode *)unit);
@@ -196,9 +196,9 @@ void openLib(struct IOUsbHWReq *io asm("a1"), LONG unitNumber asm("d0"),
     return;
 }
 
-ULONG closeLib(struct IOUsbHWReq *io asm("a1"), struct XHCIDevice *base asm("a6"))
+ULONG closeLib(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"))
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
     Kprintf("[xhci] %s: Closing device\n", __func__);
 
     int result = UnitClose(unit);

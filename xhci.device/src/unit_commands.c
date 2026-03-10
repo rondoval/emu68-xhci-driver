@@ -7,10 +7,11 @@
 #include <proto/utility.h>
 #endif
 
+#include <exec/errors.h>
 #include <utility/tagitem.h>
 
 #include <devices/newstyle.h>
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 
 #include <config.h>
 #include <device.h>
@@ -26,15 +27,15 @@
 static const UWORD SupportedCommands[] = {
     CMD_FLUSH,
     CMD_RESET,
-    UHCMD_QUERYDEVICE,
-    UHCMD_USBRESET,
-    UHCMD_USBRESUME,
-    UHCMD_USBSUSPEND,
-    UHCMD_USBOPER,
-    UHCMD_CONTROLXFER,
-    UHCMD_ISOXFER,
-    UHCMD_INTXFER,
-    UHCMD_BULKXFER,
+    CMD_DEVICE_QUERY,
+    CMD_DEVICE_RESET,
+    CMD_DEVICE_RESUME,
+    CMD_STOP,
+    CMD_START,
+    CMD_REQUEST_CONTROL,
+    CMD_REQUEST_ISOCHRONOUS,
+    CMD_REQUEST_INTERRUPT,
+    CMD_REQUEST_BULK,
 
     NSCMD_DEVICEQUERY,
     0};
@@ -63,16 +64,16 @@ static int Do_NSCMD_DEVICEQUERY(struct IOStdReq *io)
 /*
  * Abort all UHCMD_CONTROLXFER, UHCMD_ISOXFER, UHCMD_INTXFER and UHCMD_BULKXFER requests in progress or queued
  */
-static int Do_CMD_FLUSH(struct IOUsbHWReq *io)
+static int Do_CMD_FLUSH(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
     KprintfH("[xhci] %s: CMD_FLUSH\n", __func__);
 
-    struct IOUsbHWReq *req;
+    struct USBIORequest *req;
     /* Flush and cancel all requests */
-    while ((req = (struct IOUsbHWReq *)GetMsg(&unit->unit.unit_MsgPort)))
+    while ((req = (struct USBIORequest *)GetMsg(&unit->unit.unit_MsgPort)))
     {
-        req->iouh_Req.io_Error = IOERR_ABORTED;
+        req->req.io_Error = IOERR_ABORTED;
         ReplyMsg((struct Message *)req);
     }
 
@@ -81,7 +82,7 @@ static int Do_CMD_FLUSH(struct IOUsbHWReq *io)
 
     for (unsigned int addr = 0; addr <= USB_MAX_ADDRESS; ++addr)
     {
-        struct usb_device *udev = ctrl->devices_by_poseidon_address[addr];
+        struct usb_device *udev = ctrl->devices_by_virtual_address[addr];
         if (!udev || addr == xhci_roothub_get_address(ctrl->root_hub))
             continue;
 
@@ -113,19 +114,19 @@ static void uword_to_hex(UWORD value, UBYTE *buf)
 static char vendor_str[5];
 static char device_str[5];
 
-static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
+static inline int Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
 {
-    KprintfH("[xhci] %s: UHCMD_QUERYDEVICE\n", __func__);
+    KprintfH("[xhci] %s: CMD_DEVICE_QUERY\n", __func__);
 
-    if (!io->iouh_Data)
+    if (!io->data_buffer)
     {
-        io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+        io->req.io_Error = ERR_BAD_PARAMETERS;
         return COMMAND_PROCESSED;
     }
 
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
 
-    struct TagItem *tag, *tagList = (struct TagItem *)io->iouh_Data;
+    struct TagItem *tag, *tagList = (struct TagItem *)io->data_buffer;
     int filled = 0;
     KprintfH("[xhci] %s: Processing tag list at 0x%lx\n", __func__, tagList);
     while ((tag = NextTagItem(&tagList)))
@@ -137,45 +138,45 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
         ULONG *out = (ULONG *)tag->ti_Data;
         switch (tag->ti_Tag)
         {
-        case UHA_State:
+        case TAG_DRIVER_STATE:
             // TODO: derive from internal unit state
-            *out = UHSF_OPERATIONAL;
-            io->iouh_State = UHSF_OPERATIONAL;
+            *out = DRIVER_STATE_OPERATIONAL;
+            io->state = DRIVER_STATE_OPERATIONAL;
             filled++;
             break;
-        case UHA_Manufacturer:
+        case TAG_DEVICE_VENDOR:
             uword_to_hex(unit->xhci_ctrl->pci_dev->vendor, (UBYTE *)vendor_str);
             *out = (ULONG)(APTR)vendor_str;
             filled++;
             break;
-        case UHA_ProductName:
+        case TAG_DEVICE_PRODUCT:
             uword_to_hex(unit->xhci_ctrl->pci_dev->device, (UBYTE *)device_str);
             *out = (ULONG)(APTR)device_str;
             filled++;
             break;
-        case UHA_Version:
+        case TAG_DEVICE_VERSION:
             *out = DEVICE_VERSION;
             filled++;
             break;
-        case UHA_Revision:
+        case TAG_DEVICE_REVISION:
             *out = DEVICE_REVISION;
             filled++;
             break;
-        case UHA_Description:
+        case TAG_DRIVER_DESCRIPTION:
             *out = (ULONG)(APTR) "Generic xHCI USB Controller Driver";
             filled++;
             break;
-        case UHA_Copyright:
+        case TAG_DRIVER_LICENSE:
             *out = (ULONG)(APTR) "GPLv2";
             filled++;
             break;
-        case UHA_DriverVersion:
+        case TAG_DRIVER_VERSION:
             // BCD of IO request structure version: support V2
             *out = 0x0200;
             filled++;
             break;
-        case UHA_Capabilities:
-            *out = UHCF_USB20 | UHCF_ISO | UHCF_RT_ISO | UHCF_USB30; // | UHCF_QUICKIO;
+        case TAG_DRIVER_FEATURES:
+            *out = DRIVER_FEAT_USB2 | DRIVER_FEAT_USB3 | DRIVER_FEAT_ISOCHRONOUS | DRIVER_FEAT_ISOCHRONOUS_HOOKS; // | DRIVER_FEAT_QUICK_IO;
             filled++;
             break;
         default:
@@ -187,114 +188,114 @@ static inline int Do_UHCMD_QUERYDEVICE(struct IOUsbHWReq *io)
     }
 
     KprintfH("[xhci] %s: Completed UHCMD_QUERYDEVICE\n", __func__);
-    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-    io->iouh_Actual = filled;
+    io->req.io_Error = ERR_NO_ERROR;
+    io->actual_length = filled;
     return COMMAND_PROCESSED;
 }
 
 /*
  * reset USB bus
  */
-static inline int Do_UHCMD_USBRESET(struct IOUsbHWReq *io)
+static inline int Do_CMD_DEVICE_RESET(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: UHCMD_USBRESET\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    Kprintf("[xhci] %s: CMD_DEVICE_RESET\n", __func__);
 
     /* Issue SET_FEATURE(RESET) on all root hub ports */
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     int maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
     for (int p = 1; p <= maxp; ++p)
     {
-        struct IOUsbHWReq req;
+        struct USBIORequest req;
         _memset(&req, 0, sizeof(req));
-        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
-        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
-        req.iouh_SetupData.wValue = LE16(USB_PORT_FEAT_RESET);
-        req.iouh_SetupData.wIndex = LE16(p);
-        req.iouh_SetupData.wLength = LE16(0);
-        req.iouh_DevAddr = xhci_roothub_get_address(ctrl->root_hub);
+        req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
+        req.setup.bRequest = USB_REQ_SET_FEATURE;
+        req.setup.wValue = LE16(USB_PORT_FEAT_RESET);
+        req.setup.wIndex = LE16(p);
+        req.setup.wLength = LE16(0);
+        req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
 
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
     }
 
-    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-    io->iouh_State = (io->iouh_Req.io_Error == UHIOERR_NO_ERROR) ? UHSF_RESET : 0;
+    io->req.io_Error = ERR_NO_ERROR;
+    io->state = (io->req.io_Error == ERR_NO_ERROR) ? DRIVER_STATE_RESETING : 0;
 
     return COMMAND_PROCESSED;
 }
 
-static int Do_CMD_RESET(struct IOUsbHWReq *io)
+static int Do_CMD_RESET(struct USBIORequest *io)
 {
-    // struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
+    // struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
     Kprintf("[xhci] %s: CMD_RESET\n", __func__);
     // TODO should reset entire controller...
-    return Do_UHCMD_USBRESET(io);
+    return Do_CMD_DEVICE_RESET(io);
 }
 
 /*
  * resume from sleep mode
  */
-static inline int Do_UHCMD_USBRESUME(struct IOUsbHWReq *io)
+static inline int Do_CMD_DEVICE_RESUME(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: UHCMD_USBRESUME\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    Kprintf("[xhci] %s: CMD_DEVICE_RESUME - resuming USB\n", __func__);
 
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     int maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
     for (int p = 1; p <= maxp; ++p)
     {
-        struct IOUsbHWReq req;
+        struct USBIORequest req;
         _memset(&req, 0, sizeof(req));
-        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.iouh_SetupData.bRequest = USB_REQ_CLEAR_FEATURE;
-        req.iouh_SetupData.wValue = LE16(USB_PORT_FEAT_SUSPEND);
-        req.iouh_SetupData.wIndex = LE16(p);
-        req.iouh_DevAddr = xhci_roothub_get_address(ctrl->root_hub);
+        req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.setup.bRequest = USB_REQ_CLEAR_FEATURE;
+        req.setup.wValue = LE16(USB_PORT_FEAT_SUSPEND);
+        req.setup.wIndex = LE16(p);
+        req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
 
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
     }
 
-    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-    io->iouh_State = UHSF_OPERATIONAL;
+    io->req.io_Error = ERR_NO_ERROR;
+    io->state = DRIVER_STATE_OPERATIONAL;
     return COMMAND_PROCESSED;
 }
 
 /*
  * enter sleep mode
  */
-static inline int Do_UHCMD_USBSUSPEND(struct IOUsbHWReq *io)
+static inline int Do_CMD_STOP(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: UHCMD_USBSUSPEND\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    Kprintf("[xhci] %s: CMD_STOP - suspending USB\n", __func__);
 
     // TODO check if there is a controller level suspend/resume
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     int maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
     for (int p = 1; p <= maxp; ++p)
     {
-        struct IOUsbHWReq req;
+        struct USBIORequest req;
         _memset(&req, 0, sizeof(req));
-        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
-        req.iouh_SetupData.wValue = LE16(USB_PORT_FEAT_SUSPEND);
-        req.iouh_SetupData.wIndex = LE16(p);
-        req.iouh_DevAddr = xhci_roothub_get_address(ctrl->root_hub);
+        req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.setup.bRequest = USB_REQ_SET_FEATURE;
+        req.setup.wValue = LE16(USB_PORT_FEAT_SUSPEND);
+        req.setup.wIndex = LE16(p);
+        req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
 
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
     }
 
-    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-    io->iouh_State = UHSF_SUSPENDED;
+    io->req.io_Error = ERR_NO_ERROR;
+    io->state = DRIVER_STATE_SUSPENDED;
     return COMMAND_PROCESSED;
 }
 
 /*
  * enter operational state
  */
-static inline int Do_UHCMD_USBOPER(struct IOUsbHWReq *io)
+static inline int Do_CMD_START(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    Kprintf("[xhci] %s: UHCMD_USBOPER\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    Kprintf("[xhci] %s: CMD_START - making USB operational\n", __func__);
 
     // TODO should likely also resume and perhaps reset the ports
     /* Ensure port power is on for all ports */
@@ -302,51 +303,51 @@ static inline int Do_UHCMD_USBOPER(struct IOUsbHWReq *io)
     int maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
     for (int p = 1; p <= maxp; ++p)
     {
-        struct IOUsbHWReq req;
+        struct USBIORequest req;
         _memset(&req, 0, sizeof(req));
-        req.iouh_SetupData.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.iouh_SetupData.bRequest = USB_REQ_SET_FEATURE;
-        req.iouh_SetupData.wValue = LE16(USB_PORT_FEAT_POWER);
-        req.iouh_SetupData.wIndex = LE16(p);
-        req.iouh_DevAddr = xhci_roothub_get_address(ctrl->root_hub);
+        req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
+        req.setup.bRequest = USB_REQ_SET_FEATURE;
+        req.setup.wValue = LE16(USB_PORT_FEAT_POWER);
+        req.setup.wIndex = LE16(p);
+        req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
 
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
     }
 
-    io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
-    io->iouh_State = UHSF_OPERATIONAL;
+    io->req.io_Error = ERR_NO_ERROR;
+    io->state = DRIVER_STATE_OPERATIONAL;
     return COMMAND_PROCESSED;
 }
 
 /*
  * start a generic transfer
  */
-static inline int Do_UHCMD_XFER(struct IOUsbHWReq *io)
+static inline int Do_CMD_XFER(struct USBIORequest *io)
 {
-    io->iouh_DriverPrivate1 = 0; // clear any flags, just in case
+    io->driver_private_flags = 0; // clear any flags, just in case
     int result = xhci_udev_send(io);
-    if (result != UHIOERR_NO_ERROR)
+    if (result != ERR_NO_ERROR)
     {
-        io->iouh_Req.io_Error = result;
+        io->req.io_Error = result;
         return COMMAND_PROCESSED;
     }
     return COMMAND_SCHEDULED;
 }
 
-static inline int Do_UHCMD_ADDISOHANDLER(struct IOUsbHWReq *io)
+static inline int Do_CMD_REGISTER_ISO_HANDLER(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_ADDISOHANDLER\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    KprintfH("[xhci] %s: CMD_REGISTER_ISO_HANDLER\n", __func__);
 
-    // TODO check if UHSF_OPERATIONAL
-    if (!io->iouh_Data)
+    // TODO check if state is operational
+    if (!io->data_buffer)
         goto badparams;
 
-    struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
+    struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
     if (!udev)
         goto badparams;
 
-    int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
+    int ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
@@ -354,98 +355,97 @@ static inline int Do_UHCMD_ADDISOHANDLER(struct IOUsbHWReq *io)
 
     BYTE result = xhci_ep_rt_iso_add_handler(ep_ctx, io);
 
-    io->iouh_Actual = 0;
-    io->iouh_Req.io_Error = result;
+    io->actual_length = 0;
+    io->req.io_Error = result;
     return COMMAND_PROCESSED;
 
 badparams:
     Kprintf("Bad params\n");
-    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    io->req.io_Error = ERR_BAD_PARAMETERS;
     return COMMAND_PROCESSED;
 }
 
-static inline int Do_UHCMD_REMISOHANDLER(struct IOUsbHWReq *io)
+static inline int Do_CMD_UNREGISTER_ISO_HANDLER(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_REMISOHANDLER\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    KprintfH("[xhci] %s: CMD_UNREGISTER_ISO_HANDLER\n", __func__);
 
-    if (!io->iouh_Data)
+    if (!io->data_buffer)
         goto badparams;
 
-    struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
+    struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
     if (!udev)
         goto badparams;
 
-    int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
+    int ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
         goto badparams;
 
     BYTE result = xhci_ep_rt_iso_rem_handler(ep_ctx, io);
-    io->iouh_Req.io_Error = result;
+    io->req.io_Error = result;
     return COMMAND_PROCESSED;
 
 badparams:
     Kprintf("Bad parameters while removing ISO handler\n");
-    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    io->req.io_Error = ERR_BAD_PARAMETERS;
     return COMMAND_PROCESSED;
 }
 
-static inline int Do_UHCMD_STARTRTISO(struct IOUsbHWReq *io)
+static inline int Do_CMD_STARTRTISO(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_STARTRTISO\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    KprintfH("[xhci] %s: CMD_STOP_REALTIME_ISOCHRONOUS\n", __func__);
 
-    KprintfH("RT ISO start addr=%ld ep=%ld dir=%s frame=%lu interval=%lu len=%lu\n",
-             (LONG)io->iouh_DevAddr,
-             (LONG)(io->iouh_Endpoint & 0x0F),
-             (io->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-             (ULONG)io->iouh_Frame,
-             (ULONG)io->iouh_Interval,
-             (ULONG)io->iouh_Length);
-    struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
+    KprintfH("RT ISO start addr=%ld ep=%ld dir=%s frame=%lu len=%lu\n",
+             (LONG)io->virtual_address,
+             (LONG)(io->endpoint & 0x0F),
+             (io->direction == DIRECTION_IN) ? "IN" : "OUT",
+             (ULONG)io->usb_frame,
+             (ULONG)io->data_buffer_length);
+    struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
     if (!udev)
         goto badparams;
 
-    int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
+    int ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
         goto badparams;
 
     BYTE result = xhci_ep_rt_iso_start(ep_ctx);
 
-    io->iouh_Actual = 0;
-    io->iouh_Req.io_Error = result;
+    io->actual_length = 0;
+    io->req.io_Error = result;
     return COMMAND_PROCESSED;
 
 badparams:
     Kprintf("Bad params\n");
-    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    io->req.io_Error = ERR_BAD_PARAMETERS;
     return COMMAND_PROCESSED;
 }
 
-static inline int Do_UHCMD_STOPRTISO(struct IOUsbHWReq *io)
+static inline int Do_CMD_STOPRTISO(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->iouh_Req.io_Unit;
-    KprintfH("[xhci] %s: UHCMD_STOPRTISO\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    KprintfH("[xhci] %s: CMD_STOP_REALTIME_ISOCHRONOUS\n", __func__);
 
     KprintfH("RT ISO stop requested addr=%ld ep=%ld\n",
-             (LONG)io->iouh_DevAddr, (LONG)(io->iouh_Endpoint & 0x0F));
-    struct usb_device *udev = xhci_udev_get(unit, io->iouh_DevAddr);
+             (LONG)io->virtual_address, (LONG)(io->endpoint & 0x0F));
+    struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
     if (!udev)
         goto badparams;
 
-    int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
+    int ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
         goto badparams;
 
     BYTE result = xhci_ep_rt_iso_stop(ep_ctx, io);
-    io->iouh_Req.io_Error = result;
-    if (result != UHIOERR_NO_ERROR)
+    io->req.io_Error = result;
+    if (result != ERR_NO_ERROR)
     {
-        io->iouh_Actual = 0;
+        io->actual_length = 0;
         return COMMAND_PROCESSED;
     }
 
@@ -453,11 +453,11 @@ static inline int Do_UHCMD_STOPRTISO(struct IOUsbHWReq *io)
 
 badparams:
     Kprintf("Bad params\n");
-    io->iouh_Req.io_Error = UHIOERR_BADPARAMS;
+    io->req.io_Error = ERR_BAD_PARAMETERS;
     return COMMAND_PROCESSED;
 }
 
-void ProcessCommand(struct IOUsbHWReq *io)
+void ProcessCommand(struct USBIORequest *io)
 {
     ULONG complete = COMMAND_SCHEDULED;
 
@@ -465,17 +465,17 @@ void ProcessCommand(struct IOUsbHWReq *io)
         Only NSCMD_DEVICEQUERY can use standard sized request. All other must be of
         size IORequest
     */
-    if (io->iouh_Req.io_Message.mn_Length < sizeof(struct IORequest) &&
-        io->iouh_Req.io_Command != NSCMD_DEVICEQUERY)
+    if (io->req.io_Message.mn_Length < sizeof(struct IORequest) &&
+        io->req.io_Command != NSCMD_DEVICEQUERY)
     {
-        io->iouh_Req.io_Error = IOERR_BADLENGTH;
+        io->req.io_Error = IOERR_BADLENGTH;
         complete = COMMAND_PROCESSED;
     }
     else
     {
-        io->iouh_Req.io_Error = UHIOERR_NO_ERROR;
+        io->req.io_Error = ERR_NO_ERROR;
 
-        switch (io->iouh_Req.io_Command)
+        switch (io->req.io_Command)
         {
         case CMD_FLUSH:
             complete = Do_CMD_FLUSH(io);
@@ -485,63 +485,63 @@ void ProcessCommand(struct IOUsbHWReq *io)
             complete = Do_CMD_RESET(io);
             break;
 
-        case UHCMD_QUERYDEVICE:
-            complete = Do_UHCMD_QUERYDEVICE(io);
+        case CMD_DEVICE_QUERY:
+            complete = Do_CMD_DEVICE_QUERY(io);
             break;
 
-        case UHCMD_USBRESET:
-            complete = Do_UHCMD_USBRESET(io);
+        case CMD_DEVICE_RESET:
+            complete = Do_CMD_DEVICE_RESET(io);
             break;
 
-        case UHCMD_USBRESUME:
-            complete = Do_UHCMD_USBRESUME(io);
+        case CMD_DEVICE_RESUME:
+            complete = Do_CMD_DEVICE_RESUME(io);
             break;
 
-        case UHCMD_USBSUSPEND:
-            complete = Do_UHCMD_USBSUSPEND(io);
+        case CMD_STOP:
+            complete = Do_CMD_STOP(io);
             break;
 
-        case UHCMD_USBOPER:
-            complete = Do_UHCMD_USBOPER(io);
+        case CMD_START:
+            complete = Do_CMD_START(io);
             break;
 
-        case UHCMD_CONTROLXFER:
-        case UHCMD_ISOXFER:
-        case UHCMD_INTXFER:
-        case UHCMD_BULKXFER:
-            complete = Do_UHCMD_XFER(io);
+        case CMD_REQUEST_CONTROL:
+        case CMD_REQUEST_ISOCHRONOUS:
+        case CMD_REQUEST_INTERRUPT:
+        case CMD_REQUEST_BULK:
+            complete = Do_CMD_XFER(io);
             break;
 
         case NSCMD_DEVICEQUERY:
             complete = Do_NSCMD_DEVICEQUERY((struct IOStdReq *)io);
             break;
 
-        case UHCMD_ADDISOHANDLER:
-            complete = Do_UHCMD_ADDISOHANDLER(io);
+        case CMD_REGISTER_ISOCHRONOUS_HOOKS:
+            complete = Do_CMD_REGISTER_ISO_HANDLER(io);
             break;
 
-        case UHCMD_REMISOHANDLER:
-            complete = Do_UHCMD_REMISOHANDLER(io);
+        case CMD_UNREGISTER_ISOCHRONOUS_HOOKS:
+            complete = Do_CMD_UNREGISTER_ISO_HANDLER(io);
             break;
 
-        case UHCMD_STARTRTISO:
-            complete = Do_UHCMD_STARTRTISO(io);
+        case CMD_START_REALTIME_ISOCHRONOUS:
+            complete = Do_CMD_STARTRTISO(io);
             break;
 
-        case UHCMD_STOPRTISO:
-            complete = Do_UHCMD_STOPRTISO(io);
+        case CMD_STOP_REALTIME_ISOCHRONOUS:
+            complete = Do_CMD_STOPRTISO(io);
             break;
 
         default:
-            Kprintf("[xhci] %s: Unsupported command %ld\n", __func__, (LONG)io->iouh_Req.io_Command);
-            io->iouh_Req.io_Error = IOERR_NOCMD;
+            Kprintf("[xhci] %s: Unsupported command %ld\n", __func__, (LONG)io->req.io_Command);
+            io->req.io_Error = IOERR_NOCMD;
             complete = COMMAND_PROCESSED;
             break;
         }
     }
 
     // If command is complete and not quick, reply it now
-    if (complete == COMMAND_PROCESSED && !(io->iouh_Req.io_Flags & IOF_QUICK))
+    if (complete == COMMAND_PROCESSED && !(io->req.io_Flags & IOF_QUICK))
     {
         ReplyMsg((struct Message *)io);
     }

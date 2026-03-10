@@ -28,7 +28,7 @@
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -461,8 +461,8 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	if (xhci_mem_init(ctrl, hccr, hcor) < 0)
 		return -ENOMEM;
 
-	ctrl->devices_by_poseidon_address[0] = xhci_udev_alloc(ctrl, 0);
-	ctrl->root_hub = xhci_roothub_create(ctrl->devices_by_poseidon_address[0], xhci_udev_io_reply_data);
+	ctrl->devices_by_virtual_address[0] = xhci_udev_alloc(ctrl, 0);
+	ctrl->root_hub = xhci_roothub_create(ctrl->devices_by_virtual_address[0], xhci_udev_io_reply_data);
 	if (!ctrl->root_hub)
 		return -ENOMEM;
 

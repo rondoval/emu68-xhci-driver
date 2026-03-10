@@ -24,7 +24,7 @@
 
 #include <compat.h>
 #include <pci_types.h>
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 #include <xhci/xhci-udev.h>
 
 #define XHCI_ALIGNMENT 64
@@ -700,12 +700,12 @@ struct xhci_ctrl
 	struct xhci_erst erst;
 	struct xhci_scratchpad *scratchpad;
 	struct xhci_root_hub *root_hub;
-	struct IOUsbHWReq *root_int_req;
+	struct USBIORequest *root_int_req;
 	u16 hci_version;
 
 	APTR memoryPool;
 	struct pci_device *pci_dev;
-	struct usb_device *devices_by_poseidon_address[USB_MAX_ADDRESS + 1];
+	struct usb_device *devices_by_virtual_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];
 
 	struct usb_device *pending_parent; /* parent hub pending for next default-address child */

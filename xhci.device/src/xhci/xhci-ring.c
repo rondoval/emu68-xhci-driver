@@ -659,18 +659,18 @@ void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx)
 	giveback_first_trb(udev, ring->ep_index, ring->deferred_giveback);
 }
 
-inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy)
+inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIORequest *req, BOOL copy)
 {
 	if (!req)
 		return NULL;
 
-	APTR addr = req->iouh_Data;
-	ULONG size = req->iouh_Length;
+	APTR addr = req->data_buffer;
+	ULONG size = req->data_buffer_length;
 
 	if (!ctrl || !ctrl->memoryPool || !addr || size == 0)
 		return (dma_addr_t)addr;
 
-	if (((ULONG)addr & ARCH_DMA_MINALIGN_MASK) == 0)
+	if (likely(addr > (APTR)0x1FFFFF) && ((ULONG)addr & ARCH_DMA_MINALIGN_MASK) == 0)
 	{
 		xhci_flush_cache(addr, size);
 		return (dma_addr_t)addr;
@@ -684,7 +684,7 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq 
 		return (dma_addr_t)addr;
 	}
 
-	req->iouh_DriverPrivate1 = (APTR)((ULONG)req->iouh_DriverPrivate1 | REQ_DMA_MAPPED);
+	req->driver_private_flags |= REQ_DMA_MAPPED;
 
 	if (copy)
 	{
@@ -692,11 +692,11 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct IOUsbHWReq 
 	}
 	xhci_flush_cache(aligned, alloc_len);
 
-	req->iouh_DriverPrivate2 = aligned;
+	req->driver_private_dma_address = aligned;
 	return (dma_addr_t)aligned;
 }
 
-inline static dma_addr_t xhci_ring_enqueue_setup_trb(struct xhci_ring *ep_ring, struct IOUsbHWReq *io)
+inline static dma_addr_t xhci_ring_enqueue_setup_trb(struct xhci_ring *ep_ring, struct USBIORequest *io)
 {
 	/* Queue setup TRB - see section 6.4.1.2.1 */
 	u32 field3 = TRB_IDT | TRB_TYPE(TRB_SETUP);
@@ -709,34 +709,34 @@ inline static dma_addr_t xhci_ring_enqueue_setup_trb(struct xhci_ring *ep_ring, 
 		field3 |= 0x1;
 
 	/* xHCI 1.0 6.4.1.2.1: Transfer Type field */
-	if (io->iouh_Length > 0)
+	if (io->data_buffer_length > 0)
 	{
-		if (io->iouh_SetupData.bmRequestType & USB_DIR_IN)
+		if (io->setup.bmRequestType & USB_DIR_IN)
 			field3 |= TRB_TX_TYPE(TRB_DATA_IN);
 		else
 			field3 |= TRB_TX_TYPE(TRB_DATA_OUT);
 	}
 
 	return xhci_ring_enqueue_trb(ep_ring, TRUE,
-								 io->iouh_SetupData.bmRequestType | io->iouh_SetupData.bRequest << 8 | LE16(io->iouh_SetupData.wValue) << 16, /* field 0 */
-								 LE16(io->iouh_SetupData.wIndex) | LE16(io->iouh_SetupData.wLength) << 16,									  /* field 1 */
-								 TRB_LEN(8) | TRB_INTR_TARGET(0),																			  /* field 2 */
-								 field3);																									  /* field 3 */
+								 io->setup.bmRequestType | io->setup.bRequest << 8 | LE16(io->setup.wValue) << 16, /* field 0 */
+								 LE16(io->setup.wIndex) | LE16(io->setup.wLength) << 16,						   /* field 1 */
+								 TRB_LEN(8) | TRB_INTR_TARGET(0),												   /* field 2 */
+								 field3);																		   /* field 3 */
 }
 
-inline static dma_addr_t xhci_ring_enqueue_data_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring, struct IOUsbHWReq *io)
+inline static dma_addr_t xhci_ring_enqueue_data_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring, struct USBIORequest *io)
 {
 	/* If there's data, queue data TRBs */
 	/* Only set interrupt on short packet for IN endpoints */
 
-	u32 remainder = xhci_td_remainder(0, io->iouh_Length, io->iouh_Length, ep_ring->max_packet_size, TRUE);
-	u32 length_field = TRB_LEN(io->iouh_Length) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0);
+	u32 remainder = xhci_td_remainder(0, io->data_buffer_length, io->data_buffer_length, ep_ring->max_packet_size, TRUE);
+	u32 length_field = TRB_LEN(io->data_buffer_length) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0);
 	// KprintfH("length_field = %ld, length = %ld,"
 	// 		 "xhci_td_remainder(length) = %ld , TRB_INTR_TARGET(0) = %ld\n",
-	// 		 length_field, TRB_LEN(io->iouh_Length),
+	// 		 length_field, TRB_LEN(io->data_buffer_length),
 	// 		 TRB_TD_SIZE(remainder), 0);
 
-	BOOL is_direction_in = (io->iouh_SetupData.bmRequestType & USB_DIR_IN) != 0;
+	BOOL is_direction_in = (io->setup.bmRequestType & USB_DIR_IN) != 0;
 	u64 buf_64 = xhci_dma_map(ctrl, io, !is_direction_in);
 
 	u32 field3 = (is_direction_in) ? TRB_ISP | TRB_DIR_IN | TRB_TYPE(TRB_DATA) : TRB_TYPE(TRB_DATA);
@@ -749,7 +749,7 @@ inline static dma_addr_t xhci_ring_enqueue_data_trb(struct xhci_ctrl *ctrl, stru
 								 field3);				/* field 3 */
 }
 
-inline static dma_addr_t xhci_ring_enqueue_status_trb(struct xhci_ring *ep_ring, struct IOUsbHWReq *io)
+inline static dma_addr_t xhci_ring_enqueue_status_trb(struct xhci_ring *ep_ring, struct USBIORequest *io)
 {
 	/*
 	 * Queue status TRB -
@@ -757,7 +757,7 @@ inline static dma_addr_t xhci_ring_enqueue_status_trb(struct xhci_ring *ep_ring,
 	 */
 
 	/* If the device sent data, the status stage is an OUT transfer */
-	u32 field3 = (io->iouh_Length > 0 && io->iouh_SetupData.bmRequestType & USB_DIR_IN) ? 0 : TRB_DIR_IN;
+	u32 field3 = (io->data_buffer_length > 0 && io->setup.bmRequestType & USB_DIR_IN) ? 0 : TRB_DIR_IN;
 
 	/* Event on completion */
 	field3 |= TRB_IOC | TRB_TYPE(TRB_STATUS) | ep_ring->cycle_state;
@@ -769,10 +769,10 @@ inline static dma_addr_t xhci_ring_enqueue_status_trb(struct xhci_ring *ep_ring,
 								 field3);			 /* field 3 */
 }
 
-inline static void xhci_ring_enqueue_control_trbs(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring, struct IOUsbHWReq *io, dma_addr_t *td_trb_addrs)
+inline static void xhci_ring_enqueue_control_trbs(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring, struct USBIORequest *io, dma_addr_t *td_trb_addrs)
 {
 	unsigned int td_trb_index = 0;
-	const unsigned int length = io->iouh_Length;
+	const unsigned int length = io->data_buffer_length;
 
 	dma_addr_t setup_trb = xhci_ring_enqueue_setup_trb(ep_ring, io);
 	td_trb_addrs[td_trb_index++] = setup_trb;
@@ -787,14 +787,14 @@ inline static void xhci_ring_enqueue_control_trbs(struct xhci_ctrl *ctrl, struct
 	td_trb_addrs[td_trb_index++] = status_trb;
 }
 
-inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring, struct IOUsbHWReq *io, u64 addr, u32 num_trbs, u32 trb_buff_len, dma_addr_t *td_trb_addrs)
+inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring, struct USBIORequest *io, u64 addr, u32 num_trbs, u32 trb_buff_len, dma_addr_t *td_trb_addrs)
 {
 	// KprintfH("num_trbs = %lu, trb_buff_len = %lu\n", (ULONG)num_trbs, (ULONG)trb_buff_len);
-	const BOOL is_iso = io->iouh_Req.io_Command == UHCMD_ADDISOHANDLER ||
-						io->iouh_Req.io_Command == UHCMD_ISOXFER;
+	const BOOL is_iso = io->req.io_Command == CMD_REGISTER_ISOCHRONOUS_HOOKS ||
+						io->req.io_Command == CMD_REQUEST_ISOCHRONOUS;
 
-	const u32 length = io->iouh_Length;
-	const u32 enable_short_packet = (!is_iso && (io->iouh_Dir == UHDIR_IN)) ? TRB_ISP : 0;
+	const u32 length = io->data_buffer_length;
+	const u32 enable_short_packet = (!is_iso && (io->direction == DIRECTION_IN)) ? TRB_ISP : 0;
 	const u32 trb_type_bits = (is_iso) ? ((u32)TRB_TYPE(TRB_ISOC) | TRB_SIA) : (TRB_TYPE(TRB_NORMAL) | enable_short_packet);
 
 	u32 running_total = 0;
@@ -872,14 +872,14 @@ inline static void xhci_ring_finalize_first_trb(struct usb_device *udev, int ep_
 		giveback_first_trb(udev, ep_index, start_trb);
 }
 
-inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct IOUsbHWReq *io, u32 *trb_buff_len, u64 *addr)
+inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct USBIORequest *io, u32 *trb_buff_len, u64 *addr)
 {
-	if (io->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+	if (io->req.io_Command == CMD_REQUEST_CONTROL)
 		/* 1 TRB for setup, 1 for status, 1 optional for data */
-		return (io->iouh_Length > 0) ? 3 : 2;
+		return (io->data_buffer_length > 0) ? 3 : 2;
 
-	const u32 length = io->iouh_Length;
-	*addr = xhci_dma_map(ctrl, io, io->iouh_Dir == UHDIR_OUT);
+	const u32 length = io->data_buffer_length;
+	*addr = xhci_dma_map(ctrl, io, io->direction == DIRECTION_OUT);
 
 	/*
 	 * How much data is (potentially) left before the 64KB boundary?
@@ -898,11 +898,11 @@ inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct IOUsbHW
 		num_trbs++;
 
 	/* Account for remaining 64KB windows, adding more TRBs as needed. */
-	num_trbs += DIV_ROUND_UP(io->iouh_Length - running_total, TRB_MAX_BUFF_SIZE);
+	num_trbs += DIV_ROUND_UP(io->data_buffer_length - running_total, TRB_MAX_BUFF_SIZE);
 	return num_trbs;
 }
 
-void xhci_dump_request(const char *tag, const struct IOUsbHWReq *req)
+void xhci_dump_request(const char *tag, const struct USBIORequest *req)
 {
 	if (!req)
 		return;
@@ -911,33 +911,33 @@ void xhci_dump_request(const char *tag, const struct IOUsbHWReq *req)
 
 	Kprintf("%s Request dump:\n", pfx);
 	Kprintf("%s  Endpoint=0x%02lx Dir=%s Type=%s\n",
-			pfx, (ULONG)req->iouh_Endpoint,
-			(req->iouh_Dir == UHDIR_IN) ? "IN" : "OUT",
-			(req->iouh_Req.io_Command == UHCMD_CONTROLXFER) ? "Control" : (req->iouh_Req.io_Command == UHCMD_BULKXFER)	  ? "Bulk"
-																	  : (req->iouh_Req.io_Command == UHCMD_INTXFER)		  ? "Interrupt"
-																	  : (req->iouh_Req.io_Command == UHCMD_ISOXFER)		  ? "Isochronous"
-																	  : (req->iouh_Req.io_Command == UHCMD_ADDISOHANDLER) ? "RT Isochronous"
-																														  : "Unknown");
-	if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+			pfx, (ULONG)req->endpoint,
+			(req->direction == DIRECTION_IN) ? "IN" : "OUT",
+			(req->req.io_Command == CMD_REQUEST_CONTROL) ? "Control" : (req->req.io_Command == CMD_REQUEST_BULK)			 ? "Bulk"
+																   : (req->req.io_Command == CMD_REQUEST_INTERRUPT)			 ? "Interrupt"
+																   : (req->req.io_Command == CMD_REQUEST_ISOCHRONOUS)		 ? "Isochronous"
+																   : (req->req.io_Command == CMD_REGISTER_ISOCHRONOUS_HOOKS) ? "RT Isochronous"
+																															 : "Unknown");
+	if (req->req.io_Command == CMD_REQUEST_CONTROL)
 		Kprintf("%s  SetupData: bmRequestType=0x%02lx bRequest=0x%02lx wValue=0x%04lx wIndex=0x%04lx wLength=%lu\n",
-				pfx, (ULONG)req->iouh_SetupData.bmRequestType, (ULONG)req->iouh_SetupData.bRequest,
-				(ULONG)LE16(req->iouh_SetupData.wValue), (ULONG)LE16(req->iouh_SetupData.wIndex),
-				(ULONG)LE16(req->iouh_SetupData.wLength));
+				pfx, (ULONG)req->setup.bmRequestType, (ULONG)req->setup.bRequest,
+				(ULONG)LE16(req->setup.wValue), (ULONG)LE16(req->setup.wIndex),
+				(ULONG)LE16(req->setup.wLength));
 }
 
-int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigned int timeout_ms, BOOL defer_doorbell)
+int xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, unsigned int timeout_ms, BOOL defer_doorbell)
 {
-// #ifdef DEBUG_HIGH
-// 	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
-// #endif
+	// #ifdef DEBUG_HIGH
+	// 	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
+	// #endif
 	struct xhci_ctrl *ctrl = udev->controller;
 
-	const int ep_index = xhci_ep_index_from_parts(io->iouh_Endpoint, io->iouh_Dir);
+	const int ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
 	struct ep_context *udev_ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
 	if (!udev_ep_ctx)
 	{
 		Kprintf("No ep context for ep %d\n", ep_index);
-		return UHIOERR_BADPARAMS;
+		return ERR_BAD_PARAMETERS;
 	}
 
 	enum ep_state cur_state = xhci_ep_get_state(udev_ep_ctx);
@@ -947,12 +947,12 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 	{
 		KprintfH("Cannot submit transfer, ep in state %d\n", cur_state);
 		xhci_ep_enqueue(udev_ep_ctx, io);
-		return UHIOERR_NO_ERROR;
+		return ERR_NO_ERROR;
 	}
 
 #ifdef DEBUG_CONTEXT
 	xhci_dump_slot_ctx("[xhci-ring] xhci_ring_enqueue_td:", udev, FALSE);
-	xhci_dump_ep_ctx("[xhci-ring] xhci_ring_enqueue_td:", udev, io->iouh_Endpoint);
+	xhci_dump_ep_ctx("[xhci-ring] xhci_ring_enqueue_td:", udev, io->endpoint);
 #endif
 
 	u32 trb_buff_len = 0; // non-control only
@@ -964,22 +964,22 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 	if (!ep_ring)
 	{
 		Kprintf("No ring for ep %d\n", ep_index);
-		return UHIOERR_HOSTERROR;
+		return ERR_HCI_ERROR;
 	}
 
 	if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1))
 	{
 		KprintfH("Ring full ep=%lu needed %lu TRBs\n", (ULONG)ep_index, (ULONG)num_trbs);
 		xhci_ep_enqueue(udev_ep_ctx, io);
-		return UHIOERR_NO_ERROR;
+		return ERR_NO_ERROR;
 	}
 
 	dma_addr_t *td_trb_addrs = AllocVecPooled(ctrl->memoryPool, num_trbs * sizeof(dma_addr_t));
 	if (!td_trb_addrs)
 	{
 		Kprintf("Failed to alloc TD TRB list\n");
-		io->iouh_Req.io_Error = UHIOERR_OUTOFMEMORY;
-		return UHIOERR_OUTOFMEMORY;
+		io->req.io_Error = ERR_ALLOC_ERROR;
+		return ERR_ALLOC_ERROR;
 	}
 
 	/*
@@ -989,7 +989,7 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 	 */
 	prepare_ring(ep_ring);
 
-	if (io->iouh_Req.io_Command == UHCMD_CONTROLXFER)
+	if (io->req.io_Command == CMD_REQUEST_CONTROL)
 		xhci_ring_enqueue_control_trbs(ctrl, ep_ring, io, td_trb_addrs);
 	else
 		xhci_ring_enqueue_non_control_trbs(ep_ring, io, addr, num_trbs, trb_buff_len, td_trb_addrs);
@@ -997,5 +997,5 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct IOUsbHWReq *io, unsigne
 	xhci_ep_set_receiving(udev_ep_ctx, io, td_trb_addrs, timeout_ms, num_trbs);
 	xhci_ring_finalize_first_trb(udev, ep_index, ep_ring, (struct xhci_generic_trb *)td_trb_addrs[0], defer_doorbell);
 
-	return UHIOERR_NO_ERROR;
+	return ERR_NO_ERROR;
 }

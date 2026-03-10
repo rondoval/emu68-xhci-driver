@@ -4,6 +4,8 @@
 #include <proto/exec.h>
 #endif
 
+#include <exec/errors.h>
+
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-td.h>
 #include <xhci/xhci.h>
@@ -23,7 +25,7 @@
 struct xhci_td
 {
     struct MinNode node;       /* linkage in active TD list */
-    struct IOUsbHWReq *req;    /* owning request */
+    struct USBIORequest *req;    /* owning request */
     dma_addr_t completion_trb; /* TRB address we expect a completion for */
     ULONG length;              /* total length for completion accounting */
     BOOL deadline_active;      /* true if deadline_us is valid */
@@ -119,7 +121,7 @@ ULONG xhci_td_get_queued_td_count(TransferDescriptorList *td_list)
 }
 
 static struct xhci_td *td_create(TransferDescriptorList *td_list,
-                                 struct IOUsbHWReq *io_req,
+                                 struct USBIORequest *io_req,
                                  ULONG timeout_ms,
                                  BOOL is_rt_iso,
                                  dma_addr_t *trb_addresses,
@@ -139,12 +141,12 @@ static struct xhci_td *td_create(TransferDescriptorList *td_list,
 
     td->req = io_req;
 
-    io_req->iouh_DriverPrivate1 = (APTR)((ULONG)io_req->iouh_DriverPrivate1 | REQ_ON_RING);
+    io_req->driver_private_flags |= REQ_ON_RING;
 
     td->deadline_active = (timeout_ms != 0);
     td->deadline_us = get_time() + timeout_ms * 1000UL;
 
-    td->length = io_req->iouh_Length;
+    td->length = io_req->data_buffer_length;
     td->trb_count = trb_count;
     td->trb_addrs = trb_addresses;
     td->completion_trb = trb_addresses[trb_count - 1];
@@ -155,7 +157,7 @@ static struct xhci_td *td_create(TransferDescriptorList *td_list,
 }
 
 BOOL xhci_td_add(TransferDescriptorList *td_list,
-                 struct IOUsbHWReq *io_req,
+                 struct USBIORequest *io_req,
                  ULONG timeout_ms,
                  BOOL is_rt_iso,
                  dma_addr_t *trb_addresses,
@@ -231,24 +233,24 @@ static void xhci_td_free(TransferDescriptorList *td_list, struct xhci_td *td)
     FreeVecPooled(td_list->memoryPool, td);
 }
 
-inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req, BOOL copy)
+inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct USBIORequest *req, BOOL copy)
 {
 	if (!ctrl || !req)
 		return;
 
-	APTR addr = req->iouh_Data;
-	ULONG size = req->iouh_Length;
+	APTR addr = req->data_buffer;
+	ULONG size = req->data_buffer_length;
 	if (!addr || size == 0)
 		return;
 
-	if (!((ULONG)req->iouh_DriverPrivate1 & REQ_DMA_MAPPED))
+	if (!(req->driver_private_flags & REQ_DMA_MAPPED))
 	{
 		if (copy)
 			xhci_inval_cache(addr, size);
 		return;
 	}
 
-	APTR bounce = (APTR)req->iouh_DriverPrivate2;
+	APTR bounce = (APTR)req->driver_private_dma_address;
 	if (!bounce)
 	{
 		Kprintf("No bounce buffer found for unmap of %lx len=%ld\n", (ULONG)addr, (LONG)size);
@@ -262,8 +264,8 @@ inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req
 	}
 
 	memalign_free(ctrl->memoryPool, bounce);
-	req->iouh_DriverPrivate1 = (APTR)((ULONG)req->iouh_DriverPrivate1 & ~REQ_DMA_MAPPED);
-	req->iouh_DriverPrivate2 = NULL;
+	req->driver_private_flags &= ~REQ_DMA_MAPPED;
+	req->driver_private_dma_address = NULL;
 }
 
 /*
@@ -272,7 +274,7 @@ inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct IOUsbHWReq *req
  * The TD is finalized and freed,
  * if it contains a IOUsbHWReq, the request is returned to the caller.
  */
-struct IOUsbHWReq *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr)
+struct USBIORequest *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr)
 {
     if (!td_list)
         return NULL;
@@ -281,19 +283,19 @@ struct IOUsbHWReq *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_addr_
     if (!td)
         return NULL;
 
-    struct IOUsbHWReq *req = td->req;
+    struct USBIORequest *req = td->req;
 
     RemoveMinNode((struct MinNode *)td);
     xhci_td_decrease_queued(td_list, td);
     xhci_td_free(td_list, td);
 
-    if (req && req->iouh_Length > 0)
+    if (req && req->data_buffer_length > 0)
     {
         BOOL need_data;
-        if (req->iouh_Req.io_Command == UHCMD_CONTROLXFER)
-            need_data = (req->iouh_SetupData.bmRequestType & USB_DIR_IN) != 0;
+        if (req->req.io_Command == CMD_REQUEST_CONTROL)
+            need_data = (req->setup.bmRequestType & USB_DIR_IN) != 0;
         else
-            need_data = (req->iouh_Dir == UHDIR_IN);
+            need_data = (req->direction == DIRECTION_IN);
 
         xhci_dma_unmap(td_list->ctrl, req, need_data);
     }
@@ -312,10 +314,10 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
         struct xhci_td *td = (struct xhci_td *)n;
         if (td->req)
         {
-            if (td->req->iouh_Data)
+            if (td->req->data_buffer)
                 xhci_dma_unmap(td_list->ctrl, td->req, FALSE);
-            if (td->is_rt_iso && td->req->iouh_Dir == UHDIR_IN && td->req->iouh_Data)
-                FreeVecPooled(td_list->memoryPool, td->req->iouh_Data);
+            if (td->is_rt_iso && td->req->direction == DIRECTION_IN && td->req->data_buffer)
+                FreeVecPooled(td_list->memoryPool, td->req->data_buffer);
             if (td->is_rt_iso)
                 FreeVecPooled(td_list->memoryPool, td->req);
             else
@@ -334,17 +336,17 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
  * well just null out the request so that the completion handler won't try
  * to reply to it.
  */
-ULONG xhci_td_abort_req(struct IOUsbHWReq *io)
+ULONG xhci_td_abort_req(struct USBIORequest *io)
 {
     ULONG aborted = -1;
     Forbid();
 
     /* If the IO was not quick and is of type message that is not yet on the hardware ring, abord it and remove from queue. */
-    if ((io->iouh_Req.io_Flags & IOF_QUICK) == 0 && io->iouh_Req.io_Message.mn_Node.ln_Type == NT_MESSAGE)
+    if ((io->req.io_Flags & IOF_QUICK) == 0 && io->req.io_Message.mn_Node.ln_Type == NT_MESSAGE)
     {
-        if (!((ULONG)(io->iouh_DriverPrivate1) & REQ_ON_RING))
+        if (!(io->driver_private_flags & REQ_ON_RING))
         {
-            Remove(&io->iouh_Req.io_Message.mn_Node);
+            Remove(&io->req.io_Message.mn_Node);
             xhci_udev_io_reply_failed(NULL, io, IOERR_ABORTED);
             aborted = 0;
         }

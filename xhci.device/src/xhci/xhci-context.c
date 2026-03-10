@@ -255,7 +255,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     udev->parent = ctrl->pending_parent;
     udev->parent_port = ctrl->pending_parent_port;
     KprintfH("Setting up addressable virtual device addr=%ld pending_parent_addr=%ld pending_parent_port=%ld\n",
-             (LONG)udev->poseidon_address, (LONG)(ctrl->pending_parent ? ctrl->pending_parent->poseidon_address : 0), ctrl->pending_parent_port);
+             (LONG)udev->virtual_address, (LONG)(ctrl->pending_parent ? ctrl->pending_parent->virtual_address : 0), ctrl->pending_parent_port);
     build_route_string(udev);
 
     /* Extract the EP0 and Slot Ctrl */
@@ -304,7 +304,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     u32 root_port = find_root_port(udev);
 
     KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%ld port_num=%ld root_port_num=%ld speed=%ld route=%lx route_depth=%ld\n",
-             (ULONG)udev->parent->poseidon_address, udev->parent_port, root_port, (ULONG)udev->speed, (ULONG)udev->route, (ULONG)udev->route_depth);
+             (ULONG)udev->parent->virtual_address, udev->parent_port, root_port, (ULONG)udev->speed, (ULONG)udev->route, (ULONG)udev->route_depth);
 
     u32 dev_info2 = LE32(slot_ctx->dev_info2);
     dev_info2 &= ~((ROOT_HUB_PORT_MASK) << ROOT_HUB_PORT_SHIFT);
@@ -332,7 +332,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
         }
 
         if (!tt_hub)
-            Kprintf("Low or full speed device addr %ld not behind a high-speed hub???\n", (ULONG)udev->poseidon_address);
+            Kprintf("Low or full speed device addr %ld not behind a high-speed hub???\n", (ULONG)udev->virtual_address);
     }
 
     /* TODO for SS/SSP if connected by higher rank hub:
@@ -458,7 +458,7 @@ void xhci_update_maxpacket(struct usb_device *udev, unsigned int max_packet_size
     unsigned int hw_max_packet_size;
 
     xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
-    KprintfH("Checking max packet size for ep 0 of address %ld (slot %ld)\n", (LONG)udev->poseidon_address, (LONG)udev->slot_id);
+    KprintfH("Checking max packet size for ep 0 of address %ld (slot %ld)\n", (LONG)udev->virtual_address, (LONG)udev->slot_id);
 
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, ep_index);
     hw_max_packet_size = MAX_PACKET_DECODED(LE32(ep_ctx->ep_info2));
@@ -525,7 +525,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
     {
         Kprintf("xhci_init_ep_contexts_if: no active altsetting for iface %ld\n",
                 (ULONG)ifdesc->interface_number);
-        return UHIOERR_BADPARAMS;
+        return ERR_BAD_PARAMETERS;
     }
 
     int num_of_ep = active_alt->no_of_ep;
@@ -558,7 +558,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
         /* Allocate the ep rings */
         BOOL result = xhci_ep_create_context(udev, ep_index, max_packet_size, ctrl->memoryPool);
         if (!result)
-            return UHIOERR_OUTOFMEMORY;
+            return ERR_ALLOC_ERROR;
 
         /*NOTE: ep_desc[0] actually represents EP1 and so on */
         dir = (((endpt_desc->bEndpointAddress) & (0x80)) >> 7);
@@ -598,7 +598,7 @@ static int xhci_init_ep_contexts_if(struct usb_device *udev,
                  (ULONG)(max_burst + 1));
     }
 
-    return UHIOERR_NO_ERROR;
+    return ERR_NO_ERROR;
 }
 
 static void xhci_update_slot_last_ctx(struct xhci_ctrl *ctrl,
@@ -632,7 +632,7 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
     if (!cfg)
     {
         Kprintf("xhci_set_configuration: config_val=%ld not found!\n", (LONG)config_value);
-        return UHIOERR_BADPARAMS;
+        return ERR_BAD_PARAMETERS;
     }
 
     udev->active_config = cfg;
@@ -641,7 +641,7 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
 
 #ifdef DEBUG_HIGH
     /* Dump entire cfg using kprintf (all fields and all interfaces and endpoints) */
-    xhci_dump_config("[xhci] xhci_set_configuration:", cfg, (LONG)udev->poseidon_address);
+    xhci_dump_config("[xhci] xhci_set_configuration:", cfg, (LONG)udev->virtual_address);
 #endif
 
     struct xhci_ctrl *ctrl = udev->controller;
@@ -674,12 +674,12 @@ int xhci_set_configuration(struct usb_device *udev, int config_value)
     {
         struct usb_interface *ifdesc = &cfg->if_desc[ifnum];
         int err = xhci_init_ep_contexts_if(udev, ctrl, ifdesc);
-        if (err != UHIOERR_NO_ERROR)
+        if (err != ERR_NO_ERROR)
         {
             return err;
         }
     }
-    return UHIOERR_NO_ERROR;
+    return ERR_NO_ERROR;
 }
 
 int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsigned int alt_setting)
@@ -687,14 +687,14 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     if (!udev || !udev->controller)
     {
         Kprintf("xhci_set_interface: invalid usb_device pointer\n");
-        return UHIOERR_BADPARAMS;
+        return ERR_BAD_PARAMETERS;
     }
 
     struct usb_config *cfg = udev->active_config;
     if (!cfg)
     {
-        Kprintf("xhci_set_interface: no active config for addr %ld\n", (LONG)udev->poseidon_address);
-        return UHIOERR_BADPARAMS;
+        Kprintf("xhci_set_interface: no active config for addr %ld\n", (LONG)udev->virtual_address);
+        return ERR_BAD_PARAMETERS;
     }
 
     struct usb_interface *iface = xhci_find_interface(cfg, iface_number);
@@ -702,7 +702,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     {
         Kprintf("xhci_set_interface: interface %ld not found in config %ld\n",
                 (LONG)iface_number, (LONG)cfg->desc.bConfigurationValue);
-        return UHIOERR_BADPARAMS;
+        return ERR_BAD_PARAMETERS;
     }
 
     struct usb_interface_altsetting *current_alt = iface->active_altsetting;
@@ -711,7 +711,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     {
         KprintfH("xhci_set_interface: iface %ld already at alt %ld\n",
                  (LONG)iface_number, (LONG)alt_setting);
-        return UHIOERR_NO_ERROR;
+        return ERR_NO_ERROR;
     }
 
     struct usb_interface_altsetting *new_alt = xhci_find_altsetting(iface, alt_setting);
@@ -719,12 +719,12 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     {
         Kprintf("xhci_set_interface: alt %ld missing for iface %ld\n",
                 (LONG)alt_setting, (LONG)iface_number);
-        return UHIOERR_BADPARAMS;
+        return ERR_BAD_PARAMETERS;
     }
 
     struct xhci_ctrl *ctrl = udev->controller;
 
-    /* Poseidon stack guarantees endpoint queues are idle before switching. */
+    /* The stack must guarantee endpoint queues are idle before switching. */
     u32 drop_mask = xhci_collect_ep_mask(current_alt, NULL);
 
     iface->active_altsetting = new_alt;
@@ -739,14 +739,14 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     {
         Kprintf("xhci_set_interface: missing input control context\n");
         iface->active_altsetting = current_alt;
-        return UHIOERR_HOSTERROR;
+        return ERR_HCI_ERROR;
     }
 
-    int err = UHIOERR_NO_ERROR;
+    int err = ERR_NO_ERROR;
     if (new_alt->no_of_ep > 0)
     {
         err = xhci_init_ep_contexts_if(udev, ctrl, iface);
-        if (err != UHIOERR_NO_ERROR)
+        if (err != ERR_NO_ERROR)
         {
             Kprintf("xhci_set_interface: failed to init ep contexts (err=%ld)\n", (LONG)err);
             iface->active_altsetting = current_alt;
@@ -763,7 +763,7 @@ int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsig
     xhci_update_slot_last_ctx(ctrl, udev, max_ep_flag);
 
     KprintfH("xhci_set_interface: updating device context for addr=%ld iface=%ld alt=%ld drop=0x%lx add=0x%lx\n",
-             (LONG)udev->poseidon_address,
+             (LONG)udev->virtual_address,
              (LONG)iface_number,
              (LONG)alt_setting,
              (ULONG)drop_mask,
