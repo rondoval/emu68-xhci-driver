@@ -50,9 +50,10 @@
 
 static struct descriptor
 {
-	struct usb_hub_descriptor hub;
+	struct usb_hub_descriptor hub_30;
 	struct usb_hub_descriptor hub_20;
-	struct usb_device_descriptor device;
+	struct usb_device_descriptor device_30;
+	struct usb_device_descriptor device_20;
 	struct usb_config_descriptor config;
 	struct usb_interface_descriptor interface;
 	struct usb_endpoint_descriptor endpoint;
@@ -62,7 +63,7 @@ static struct descriptor
 	struct usb_ss_device_capability_descriptor ss_dev_cap;
 	struct usb_container_id_capability_descriptor container_id_cap;
 } __attribute__((packed)) prototype_descriptor = {
-	.hub = {
+	.hub_30 = {
 		.bLength = 12,
 		.bDescriptorType = USB_DT_SS_HUB, /* hub descriptor */
 		.bNbrPorts = 2,					  /* patched to real port count during init */
@@ -76,7 +77,19 @@ static struct descriptor
 			.DeviceRemovable = 0,		 /* all ports permanently wired */
 		},
 	},
-	.device = {
+	.hub_20 = {
+		.bLength = 9,
+		.bDescriptorType = USB_DT_HUB,														   /* hub descriptor */
+		.bNbrPorts = 2,																		   /* patched to real port count during init */
+		.wHubCharacteristics = cpu_to_le16(HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_INDV_PORT_OCPM), /* per-port power + OC */
+		.bPwrOn2PwrGood = 10,																   /* 20 ms between power on and usable */
+		.bHubContrCurrent = 0,																   /* self-powered: no bus draw */
+		.u.hs = {
+			.DeviceRemovable = {0},		 /* all ports permanently wired */
+			.PortPowerCtrlMask = {0xff}, /* all ports always have power */
+		},
+	},
+	.device_30 = {
 		.bLength = sizeof(struct usb_device_descriptor), /* size of device descriptor */
 		.bDescriptorType = USB_DT_DEVICE,				 /* device descriptor */
 		.bcdUSB = cpu_to_le16(0x0310),					 /* advertise as USB 3.2 */
@@ -91,6 +104,22 @@ static struct descriptor
 		.iProduct = 2,									 /* string index */
 		.iSerialNumber = 0,								 /* no serial */
 		.bNumConfigurations = 1,						 /* single configuration */
+	},
+	.device_20 = {
+		.bLength = sizeof(struct usb_device_descriptor), /* size of device descriptor */
+		.bDescriptorType = USB_DT_DEVICE,				 /* device descriptor */
+		.bcdUSB = cpu_to_le16(0x0200),					 /* advertise as USB 2.0 */
+		.bDeviceClass = USB_CLASS_HUB,					 /* hub */
+		.bDeviceSubClass = 0,
+		.bDeviceProtocol = USB_HUB_PR_HS_SINGLE_TT, /* high-speed hub */
+		.bMaxPacketSize0 = 64,						/* control endpoint max packet */
+		.idVendor = 0x0000,							/* virtual root hub: leave VID zero */
+		.idProduct = 0x0000,						/* virtual root hub: leave PID zero */
+		.bcdDevice = cpu_to_le16(0x0200),			/* device revision */
+		.iManufacturer = 1,							/* string index */
+		.iProduct = 2,								/* string index */
+		.iSerialNumber = 0,							/* no serial */
+		.bNumConfigurations = 1,					/* single configuration */
 	},
 	.config = {
 		.bLength = sizeof(struct usb_config_descriptor),																																				 /* size of configuration descriptor */
@@ -184,6 +213,7 @@ struct xhci_root_hub
 	struct USBIORequest *int_req;
 
 	struct xhci_root_hub_port *ports;
+	BOOL is_super_speed;
 };
 
 #ifdef DEBUG_HIGH
@@ -316,13 +346,14 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 	CopyMem(&prototype_descriptor, &rh->descriptor, sizeof(prototype_descriptor));
 
 	const u8 ports = HCS_MAX_PORTS(readl(&ctrl->hccr->cr_hcsparams1));
-	rh->descriptor.hub.bNbrPorts = ports;
+	rh->descriptor.hub_30.bNbrPorts = ports;
+	rh->descriptor.hub_20.bNbrPorts = ports;
 
 	Kprintf("Initializing root hub with %ld ports\n", (LONG)ports);
 
 	/* Port Indicators */
 	const u32 hccParams1 = readl(&ctrl->hccr->cr_hccparams1);
-	u16 wHubCharacteristics = LE16(rh->descriptor.hub.wHubCharacteristics);
+	u16 wHubCharacteristics = LE16(rh->descriptor.hub_30.wHubCharacteristics);
 	if (HCS_INDICATOR(hccParams1))
 	{
 		wHubCharacteristics |= HUB_CHAR_PORTIND;
@@ -340,7 +371,8 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 		rh->descriptor.ss_dev_cap.bmAttributes |= USB_SS_DEVICE_ATT_LATENCY_TOLERANCE_MESSAGES;
 	// TODO add support for Set Latency Tolerance Value command
 
-	rh->descriptor.hub.wHubCharacteristics = LE16(wHubCharacteristics);
+	rh->descriptor.hub_30.wHubCharacteristics = LE16(wHubCharacteristics);
+	rh->descriptor.hub_20.wHubCharacteristics = LE16(wHubCharacteristics);
 
 	/* Exit latencies */
 	const u32 hcsParams3 = readl(&ctrl->hccr->cr_hcsparams3);
@@ -360,7 +392,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 
 	u32 next_offset = 0;
 	u32 *cap_base;
-	BOOL is_super_speed = FALSE;
+	rh->is_super_speed = FALSE;
 
 	while ((cap_base = xhci_find_next_capability(ctrl, XHCI_EXT_CAPS_PROTOCOL, &next_offset)) != NULL)
 	{
@@ -382,7 +414,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 					caps.protocol_slot_type, caps.max_hub_depth);
 			if (caps.major_revision >= 3)
 			{
-				is_super_speed = TRUE;
+				rh->is_super_speed = TRUE;
 				if (caps.usb3_lsecc)
 					Kprintf("  USB 3.0 Link Soft Error Count Capability\n");
 			}
@@ -400,7 +432,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 		}
 	}
 
-	rh->udev->speed = (is_super_speed ? USB_SPEED_SUPER : USB_SPEED_HIGH);
+	rh->udev->speed = rh->is_super_speed ? USB_SPEED_SUPER : USB_SPEED_HIGH;
 
 #ifdef DEBUG_HIGH
 	for (int i = 0; i < ports; ++i)
@@ -434,7 +466,7 @@ UBYTE xhci_roothub_get_num_ports(struct xhci_root_hub *rh)
 	if (!rh)
 		return 0;
 
-	return rh->descriptor.hub.bNbrPorts;
+	return rh->descriptor.hub_30.bNbrPorts;
 }
 
 int xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct USBIORequest *req)
@@ -459,7 +491,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 
 	u8 *buffer = (u8 *)rh->int_req->data_buffer;
 
-	const u8 num_ports = rh->descriptor.hub.bNbrPorts;
+	const u8 num_ports = rh->descriptor.hub_30.bNbrPorts;
 	/* USB 3.0 spec is always two bytes, however the stack may request fewer bytes */
 	const u8 need_bytes = (num_ports + 7) / 8;
 	if (!buffer || rh->int_req->data_buffer_length < need_bytes)
@@ -579,7 +611,10 @@ static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, 
 		break;
 	case USB_DT_DEVICE:
 		KprintfH("get USB_DT_DEVICE\n");
-		xhci_roothub_reply(req, &rh->descriptor.device, rh->descriptor.device.bLength);
+		if (rh->is_super_speed)
+			xhci_roothub_reply(req, &rh->descriptor.device_30, rh->descriptor.device_30.bLength);
+		else
+			xhci_roothub_reply(req, &rh->descriptor.device_20, rh->descriptor.device_20.bLength);
 		break;
 	case USB_DT_CONFIG:
 		KprintfH("get USB_DT_CONFIG\n");
@@ -703,7 +738,7 @@ inline static struct xhci_hcor_port_regs *xhci_roothub_get_port(struct xhci_root
 	struct xhci_ctrl *ctrl = rh->udev->controller;
 	u8 port = LE16(req->setup.wIndex) & 0xff; // port number is in low byte of wIndex;
 
-	if (port == 0 || port > rh->descriptor.hub.bNbrPorts)
+	if (port == 0 || port > rh->descriptor.hub_30.bNbrPorts)
 		return NULL;
 
 	return &ctrl->hcor->portregs[port - 1];
@@ -807,13 +842,20 @@ static void xhci_roothub_handle_hub_get_descriptor(struct xhci_root_hub *rh, str
 	(void)rh;
 	KprintfH("USB_REQ_GET_DESCRIPTOR HUB\n");
 	const u16 wValue = LE16(req->setup.wValue);
-	if (wValue >> 8 != USB_DT_SS_HUB)
+	if (wValue >> 8 == USB_DT_SS_HUB && rh->is_super_speed)
+	{
+		xhci_roothub_reply(req, &rh->descriptor.hub_30, rh->descriptor.hub_30.bLength);
+	}
+	else if (wValue >> 8 == USB_DT_HUB && !rh->is_super_speed)
+	{
+		xhci_roothub_reply(req, &rh->descriptor.hub_20, rh->descriptor.hub_20.bLength);
+	}
+	else
 	{
 		Kprintf("get unknown value %lx\n", wValue);
 		xhci_roothub_stall(req);
 		return;
 	}
-	xhci_roothub_reply(req, &rh->descriptor.hub, rh->descriptor.hub.bLength);
 }
 
 static void xhci_roothub_handle_hub_get_status(struct xhci_root_hub *rh, struct USBIORequest *req)
@@ -847,23 +889,49 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	const u32 reg = readl(&port->or_portsc);
 
-	u16 wPortStatus = reg & 0x3ff; // bits 0-9 same as portsc
-	// bits 10-12 are speed, for USB3 it's bit 10=1 if enhanced superspeed
-	// fake low/full/high speed bits are used to convey info about USB 2.0 ports to higher layers
-	switch (reg & DEV_SPEED_MASK)
+	u16 wPortStatus;
+	if (rh->is_super_speed)
 	{
-	case XDEV_FS:
-		wPortStatus |= USB_SS_PORT_STAT_SPEED_FULL;
-		break;
-	case XDEV_LS:
-		wPortStatus |= USB_SS_PORT_STAT_SPEED_LOW;
-		break;
-	case XDEV_HS:
-		wPortStatus |= USB_SS_PORT_STAT_SPEED_HIGH;
-		break;
-	case XDEV_SS:
-		wPortStatus |= USB_SS_PORT_STAT_SPEED_5GBPS;
-		break;
+		wPortStatus = reg & 0x3ff; // bits 0-9 same as portsc
+		// bits 10-12 are speed for USB3, it's bit 10=1 if enhanced superspeed
+		// fake low/full/high speed bits are used to convey info about USB 2.0 ports to higher layers
+		switch (reg & DEV_SPEED_MASK)
+		{
+		case XDEV_FS:
+			wPortStatus |= USB_SS_PORT_STAT_SPEED_FULL;
+			break;
+		case XDEV_LS:
+			wPortStatus |= USB_SS_PORT_STAT_SPEED_LOW;
+			break;
+		case XDEV_HS:
+			wPortStatus |= USB_SS_PORT_STAT_SPEED_HIGH;
+			break;
+		case XDEV_SS:
+			wPortStatus |= USB_SS_PORT_STAT_SPEED_5GBPS;
+			break;
+		}
+	}
+	else
+	{
+		wPortStatus = reg & (PORT_CONNECT | PORT_PE | PORT_OC | PORT_RESET); // map bits that are the same in portsc to port status
+		if (reg & PORT_POWER)
+			wPortStatus |= USB_PORT_STAT_POWER;
+
+		if ((reg & PORT_PLS_MASK) == XDEV_U3)
+			wPortStatus |= USB_PORT_STAT_SUSPEND;
+
+		switch (reg & DEV_SPEED_MASK)
+		{
+		case XDEV_FS:
+			wPortStatus |= USB_PORT_STAT_HIGH_SPEED;
+			break;
+		case XDEV_LS:
+			wPortStatus |= USB_PORT_STAT_LOW_SPEED;
+			break;
+		case XDEV_HS:
+			/* no bits to set for USB 2.0 high speed */
+			break;
+		}
 	}
 
 	u16 wPortChange = 0;
@@ -873,14 +941,24 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 		wPortChange |= USB_PORT_STAT_C_OVERCURRENT;
 	if (reg & PORT_RC)
 		wPortChange |= USB_PORT_STAT_C_RESET;
-	if (reg & PORT_WRC)
-		wPortChange |= USB_SS_PORT_STAT_C_BH_RESET;
-	if (reg & PORT_PLC)
-		wPortChange |= USB_SS_PORT_STAT_C_LINK_STATE;
-	if (reg & PORT_CEC)
-		wPortChange |= USB_SS_PORT_STAT_C_CONFIG_ERROR;
-	if (reg & PORT_PEC && rh->ports[portNo - 1].major_revision < 3) // only report enable change for USB 2.0 ports, for USB 3.0 ports this is reserved
+
+	if (rh->is_super_speed)
+	{
+		if (reg & PORT_WRC)
+			wPortChange |= USB_SS_PORT_STAT_C_BH_RESET;
+		if (reg & PORT_PLC)
+			wPortChange |= USB_SS_PORT_STAT_C_LINK_STATE;
+		if (reg & PORT_CEC)
+			wPortChange |= USB_SS_PORT_STAT_C_CONFIG_ERROR;
+	}
+
+	// only report enable change for USB 2.0 ports, for USB 3.0 ports this is reserved
+	if (rh->ports[portNo - 1].major_revision < 3 && (reg & PORT_PEC))
 		wPortChange |= USB_PORT_STAT_C_ENABLE;
+
+	// report C_PORT_SUSPEND for USB 2.0 hubs when port is resumed from suspend
+	if (!rh->is_super_speed && (reg & PORT_PLC) && (reg & PORT_PLS_MASK) == XDEV_U0)
+		wPortChange |= USB_PORT_STAT_C_SUSPEND;
 
 	u8 tmpbuf[4] = {wPortStatus & 0xff, (wPortStatus >> 8) & 0xff, wPortChange & 0xff, (wPortChange >> 8) & 0xff};
 	KprintfH("USB_REQ_GET_STATUS PORT %ld status=0x%lx\n", portNo, reg);
@@ -1036,7 +1114,7 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 
 	struct USBSetupPacket *setup = &io->setup;
 
-	if ((setup->bmRequestType & USB_RT_PORT) && (wIndex & 0xff) > rh->descriptor.hub.bNbrPorts)
+	if ((setup->bmRequestType & USB_RT_PORT) && (wIndex & 0xff) > rh->descriptor.hub_30.bNbrPorts)
 	{
 		Kprintf("The request port(%ld) exceeds maximum port number\n", wIndex);
 		xhci_roothub_stall(io);

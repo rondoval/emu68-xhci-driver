@@ -57,11 +57,8 @@ int UnitClose(struct XHCIUnit *unit);
 
 void ProcessCommand(struct USBIORequest *io);
 
-int xhci_intx_enable(struct XHCIUnit *unit);
-void xhci_intx_shutdown(struct XHCIUnit *unit);
-void xhci_intx_handle(struct XHCIUnit *unit);
-
-int xhci_msi_enable(struct XHCIUnit *unit);
-void xhci_msi_shutdown(struct XHCIUnit *unit);
+int xhci_int_enable(struct XHCIUnit *unit);
+void xhci_int_shutdown(struct XHCIUnit *unit);
+void xhci_int_rearm(struct XHCIUnit *unit);
 
 #endif

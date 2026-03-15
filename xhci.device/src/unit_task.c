@@ -79,7 +79,8 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 
         if(sigset & (1UL << unit->irq_signal))
         {
-            xhci_intx_handle(unit);
+            xhci_process_event_trb(unit->xhci_ctrl);
+            xhci_int_rearm(unit);
         }
         
         // IO queue got a new message

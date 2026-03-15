@@ -1205,13 +1205,6 @@ static void xhci_udev_map_ss_port_status(u16 *wStatus, u16 *wChange, enum usb_de
 
     u16 wChangeNew = *wChange & (USB_PORT_STAT_C_CONNECTION | USB_PORT_STAT_C_OVERCURRENT | USB_PORT_STAT_C_RESET);
 
-    /* Not needed, BH_RESET asserts C_RESET as well */
-    // if (*wChange & USB_SS_PORT_STAT_C_BH_RESET)
-    // {
-    //     KprintfH("SS hub: C_BH_RESET detected, mapping to C_RESET\n");
-    //     wChangeNew |= USB_PORT_STAT_C_RESET;
-    // }
-
     if (*wChange & USB_SS_PORT_STAT_C_LINK_STATE && ((*wStatus & PORT_PLS_MASK) == XDEV_U0))
     {
         KprintfH("SS hub: C_LINK_STATE detected and PLS=U0, mapping to C_SUSPEND\n");
@@ -1436,9 +1429,6 @@ static void handle_set_address(struct usb_device *udev, struct USBIORequest *io)
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
         return;
-
-    if (old_addr == xhci_roothub_get_address(ctrl->root_hub))
-        udev->speed = USB_SPEED_SUPER;
 
     struct usb_device *current = ctrl->devices_by_virtual_address[old_addr];
     if (!current)
