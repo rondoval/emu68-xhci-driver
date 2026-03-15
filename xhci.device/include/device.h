@@ -31,6 +31,7 @@ struct XHCIUnit
 	LONG unitNumber;
 	LONG flags;
 
+	/* state */
 	struct Task *task;
 	struct xhci_ctrl *xhci_ctrl;
 

@@ -105,8 +105,6 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
             xhci_process_command_timeouts(unit->xhci_ctrl);
             xhci_process_event_timeouts(unit->xhci_ctrl);
 
-            //TODO enable irq, just in case
-
             /* Re-arm timer */
             packetTimerReq->tr_node.io_Command = TR_ADDREQUEST;
             packetTimerReq->tr_time.tv_secs = 0;

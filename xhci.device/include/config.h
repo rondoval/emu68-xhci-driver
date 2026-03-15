@@ -17,6 +17,10 @@
 #define DEVICE_REVISION 1
 #endif
 
+#ifndef DEVICE_USE_MSI
+#define DEVICE_USE_MSI TRUE
+#endif
+
 #define STACK_SIZE 65535
 #define UNIT_TASK_PRIORITY 30
 #define UNIT_TASK_POLL_DELAY_MS 100

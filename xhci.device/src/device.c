@@ -126,12 +126,6 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
              ULONG flags asm("d1"), struct XHCIDevice *base asm("a6"))
 {
     Kprintf("[xhci] %s: Opening device with unit number %ld and flags %lx\n", __func__, unitNumber, flags);
-    if (unitNumber != 0)
-    {
-        Kprintf("[xhci] %s: Invalid unit number %ld\n", __func__, unitNumber);
-        io->req.io_Error = IOERR_OPENFAIL;
-        return;
-    }
 
     if (io->req.io_Message.mn_Length < sizeof(struct IOStdReq))
     {

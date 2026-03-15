@@ -311,7 +311,6 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 		return NULL;
 
 	rh->udev = udev;
-	rh->udev->speed = USB_SPEED_SUPER;
 	rh->io_reply_data = io_reply_data;
 
 	CopyMem(&prototype_descriptor, &rh->descriptor, sizeof(prototype_descriptor));
@@ -361,6 +360,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 
 	u32 next_offset = 0;
 	u32 *cap_base;
+	BOOL is_super_speed = FALSE;
 
 	while ((cap_base = xhci_find_next_capability(ctrl, XHCI_EXT_CAPS_PROTOCOL, &next_offset)) != NULL)
 	{
@@ -382,6 +382,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 					caps.protocol_slot_type, caps.max_hub_depth);
 			if (caps.major_revision >= 3)
 			{
+				is_super_speed = TRUE;
 				if (caps.usb3_lsecc)
 					Kprintf("  USB 3.0 Link Soft Error Count Capability\n");
 			}
@@ -398,6 +399,8 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 			}
 		}
 	}
+
+	rh->udev->speed = (is_super_speed ? USB_SPEED_SUPER : USB_SPEED_HIGH);
 
 #ifdef DEBUG_HIGH
 	for (int i = 0; i < ports; ++i)

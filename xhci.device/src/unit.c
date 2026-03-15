@@ -24,7 +24,7 @@
 #include <pci_types.h>
 #include <pci.h>
 #include <xhci/xhci.h>
-
+#include <config.h>
 
 static struct pci_controller *pcie = NULL;
 extern struct MinList pci_bus_list;
@@ -140,26 +140,27 @@ static BOOL is_supported(struct pci_device *dev)
  * Map BAR, get register pointers and enable bus mastering
  */
 static int xhci_pci_init(struct pci_device *dev, struct xhci_hccr **ret_hccr,
-			 struct xhci_hcor **ret_hcor)
+						 struct xhci_hcor **ret_hcor)
 {
 	struct xhci_hccr *hccr;
 	struct xhci_hcor *hcor;
 	u32 cmd;
 
 	hccr = (struct xhci_hccr *)dm_pci_map_bar(dev,
-			PCI_BASE_ADDRESS_0, 0, 0, PCI_REGION_TYPE,
-			PCI_REGION_MEM);
-	if (!hccr) {
+											  PCI_BASE_ADDRESS_0, 0, 0, PCI_REGION_TYPE,
+											  PCI_REGION_MEM);
+	if (!hccr)
+	{
 		Kprintf("[xhci] %s: init cannot map PCI mem bar\n", __func__);
 		return -EIO;
 	}
 	Kprintf("[xhci] %s: init mapped hccr %lx\n", __func__, hccr);
 
-	hcor = (struct xhci_hcor *)((uintptr_t) hccr +
-			HC_LENGTH(readl(&hccr->cr_capbase)));
+	hcor = (struct xhci_hcor *)((uintptr_t)hccr +
+								HC_LENGTH(readl(&hccr->cr_capbase)));
 
 	Kprintf("[xhci] %s: init hccr %lx and hcor %lx hc_length %ld\n",
-	      __func__, hccr, hcor, (u32)HC_LENGTH(readl(&hccr->cr_capbase)));
+			__func__, hccr, hcor, (u32)HC_LENGTH(readl(&hccr->cr_capbase)));
 
 	*ret_hccr = hccr;
 	*ret_hcor = hcor;
@@ -219,7 +220,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 		}
 	}
 
-	if(!is_supported(xhci_dev))
+	if (!is_supported(xhci_dev))
 	{
 		Kprintf("[xhci] %s: Unsupported XHCI controller\n", __func__);
 		result = ERR_BAD_PARAMETERS;
@@ -230,13 +231,15 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	struct xhci_hcor *hcor;
 
 	result = xhci_pci_init(xhci_dev, &hccr, &hcor);
-	if (result) {
+	if (result)
+	{
 		Kprintf("[xhci] %s: Failed to initialize XHCI PCI device: %ld\n", __func__, result);
 		goto err_del_pool;
 	}
 
 	struct xhci_ctrl *xhci_ctrl = AllocMem(sizeof(struct xhci_ctrl), MEMF_CLEAR | MEMF_PUBLIC);
-	if (!xhci_ctrl) {
+	if (!xhci_ctrl)
+	{
 		Kprintf("[xhci] %s: Failed to allocate memory for xhci_ctrl\n", __func__);
 		result = ERR_ALLOC_ERROR;
 		goto err_del_pool;
@@ -244,7 +247,8 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 
 	xhci_ctrl->pci_dev = xhci_dev;
 	result = xhci_register(xhci_ctrl, hccr, hcor);
-	if (result) {
+	if (result)
+	{
 		Kprintf("[xhci] %s: xhci_register failed: %ld\n", __func__, result);
 		goto err_del_ctrl;
 	}
@@ -258,8 +262,11 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 		goto err_dereg;
 	}
 
-	// result = xhci_intx_enable(unit);
-	result = xhci_msi_enable(unit);
+	if(DEVICE_USE_MSI)
+		result = xhci_msi_enable(unit);
+	else
+		result = xhci_intx_enable(unit);
+
 	if (result < 0)
 	{
 		Kprintf("[xhci] %s: Failed to enable INTx (%ld)\n", __func__, (LONG)result);
@@ -268,9 +275,11 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	return ERR_NO_ERROR;
 
 err_int_shutdown:
-	// xhci_intx_shutdown(unit);
-	xhci_msi_shutdown(unit);
-err_dereg:	
+	if(DEVICE_USE_MSI)
+		xhci_msi_shutdown(unit);
+	else
+		xhci_intx_shutdown(unit);
+err_dereg:
 	xhci_deregister(xhci_ctrl);
 err_del_ctrl:
 	FreeMem(xhci_ctrl, sizeof(*xhci_ctrl));
@@ -290,8 +299,13 @@ int UnitClose(struct XHCIUnit *unit)
 	{
 		Kprintf("[xhci] %s: Last opener closed, cleaning up unit\n", __func__);
 		UnitTaskStop(unit);
-		// xhci_intx_shutdown(unit);
-		xhci_msi_shutdown(unit);
+		if (unit->unitNumber == 0)
+		{
+			if(DEVICE_USE_MSI)
+				xhci_msi_shutdown(unit);
+			else
+				xhci_intx_shutdown(unit);
+		}
 		xhci_deregister(unit->xhci_ctrl);
 		FreeMem(unit->xhci_ctrl, sizeof(*unit->xhci_ctrl));
 		DeletePool(unit->memoryPool);

@@ -19,13 +19,13 @@
 static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 {
 	u32 iman = readl(&ctrl->ir_set->irq_pending);
-	writel(ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman),&ctrl->ir_set->irq_pending);
+	writel(ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
 	u32 iman = readl(&ctrl->ir_set->irq_pending);
-	writel(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman),&ctrl->ir_set->irq_pending);
+	writel(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
@@ -58,7 +58,7 @@ static ULONG xhci_intx_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *
 	writel(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
 	xhci_irq_disable_runtime(ctrl);
 
-	if(unit->xhci_ctrl->pci_dev->msi.enabled)
+	if (unit->xhci_ctrl->pci_dev->msi.enabled)
 	{
 		pci_msi_mask_irq(unit->xhci_ctrl->pci_dev, unit->xhci_ctrl->pci_dev->msi.irq);
 	}
@@ -114,13 +114,13 @@ int xhci_intx_enable(struct XHCIUnit *unit)
 int xhci_msi_enable(struct XHCIUnit *unit)
 {
 	Kprintf("[xhci] %s: enabling MSI\n", __func__);
-	if(unit->xhci_ctrl->pci_dev->msi.enabled)
+	if (unit->xhci_ctrl->pci_dev->msi.enabled)
 	{
 		Kprintf("[xhci] %s: MSI already enabled\n", __func__);
 		return 0;
 	}
 
-	if(pci_get_controller(unit->xhci_ctrl->pci_dev->bus)->msi.enabled == FALSE)
+	if (pci_get_controller(unit->xhci_ctrl->pci_dev->bus)->msi.enabled == FALSE)
 	{
 		Kprintf("[xhci] %s: MSI not supported on this controller, falling back to INTx\n", __func__);
 		return xhci_intx_enable(unit);
@@ -153,7 +153,7 @@ void xhci_msi_shutdown(struct XHCIUnit *unit)
 	if (!unit)
 		return;
 
-	if(!unit->xhci_ctrl->pci_dev->msi.enabled)
+	if (!unit->xhci_ctrl->pci_dev->msi.enabled)
 	{
 		Kprintf("[xhci] %s: MSI not enabled, shutting down INTx\n", __func__);
 		xhci_intx_shutdown(unit);
@@ -190,7 +190,7 @@ void xhci_intx_handle(struct XHCIUnit *unit)
 
 	xhci_process_event_trb(ctrl);
 
-	if(unit->xhci_ctrl->pci_dev->msi.enabled)
+	if (unit->xhci_ctrl->pci_dev->msi.enabled)
 	{
 		pci_msi_unmask_irq(unit->xhci_ctrl->pci_dev, unit->xhci_ctrl->pci_dev->msi.irq);
 		xhci_irq_enable_runtime(ctrl);

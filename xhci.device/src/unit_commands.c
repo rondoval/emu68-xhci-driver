@@ -145,13 +145,25 @@ static inline int Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
             filled++;
             break;
         case TAG_DEVICE_VENDOR:
-            uword_to_hex(unit->xhci_ctrl->pci_dev->vendor, (UBYTE *)vendor_str);
-            *out = (ULONG)(APTR)vendor_str;
+            if (unit->xhci_ctrl->pci_dev)
+            {
+                uword_to_hex(unit->xhci_ctrl->pci_dev->vendor, (UBYTE *)vendor_str);
+                *out = (ULONG)(APTR)vendor_str;
+            }
+            else
+                *out = (ULONG)(APTR) "Broadcom";
+                
             filled++;
             break;
         case TAG_DEVICE_PRODUCT:
-            uword_to_hex(unit->xhci_ctrl->pci_dev->device, (UBYTE *)device_str);
-            *out = (ULONG)(APTR)device_str;
+            if (unit->xhci_ctrl->pci_dev)
+            {
+                uword_to_hex(unit->xhci_ctrl->pci_dev->device, (UBYTE *)device_str);
+                *out = (ULONG)(APTR)device_str;
+            }
+            else
+                *out = (ULONG)(APTR) "OTG controller";
+
             filled++;
             break;
         case TAG_DEVICE_VERSION:
