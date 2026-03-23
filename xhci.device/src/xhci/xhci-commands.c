@@ -468,7 +468,7 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
     ctrl->cmd_abort_pending = TRUE;
     cmd->deadline_active = FALSE;
     /* Ring is running — assert CA and wait for hardware events. */
-    xhci_writeq(&ctrl->hcor->or_crcr, crcr | CMD_RING_ABORT);
+    xhci_writeq(&ctrl->hcor->or_crcr, CMD_RING_ABORT);
 }
 
 /* Command event dispatcher
