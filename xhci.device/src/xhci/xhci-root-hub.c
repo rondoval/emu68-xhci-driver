@@ -923,13 +923,13 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 		switch (reg & DEV_SPEED_MASK)
 		{
 		case XDEV_FS:
-			wPortStatus |= USB_PORT_STAT_HIGH_SPEED;
+			/* USB 2.0 full-speed is represented by neither LS nor HS bits set. */
 			break;
 		case XDEV_LS:
 			wPortStatus |= USB_PORT_STAT_LOW_SPEED;
 			break;
 		case XDEV_HS:
-			/* no bits to set for USB 2.0 high speed */
+			wPortStatus |= USB_PORT_STAT_HIGH_SPEED;
 			break;
 		}
 	}
