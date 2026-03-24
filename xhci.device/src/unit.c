@@ -43,6 +43,14 @@ static int unit_init_onboard_xhci(struct XHCIUnit *unit,
 		return -1;
 	}
 
+	CONST_STRPTR status = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "status"));
+	if (status && Stricmp((STRPTR)status, (STRPTR)"disabled") == 0)
+	{
+		Kprintf("[bcm-xhci] %s: Node %s is disabled\n", __func__, "/scb/xhci");
+		DT_CloseKey(key);
+		return -1;
+	}
+
 	CONST_STRPTR compatible = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "compatible"));
 
 	APTR base = DT_GetBaseAddressVirtual((CONST_STRPTR) "/scb/xhci");
