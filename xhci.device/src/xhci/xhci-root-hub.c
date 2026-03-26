@@ -248,13 +248,13 @@ static void xhci_roothub_debug_port(struct xhci_root_hub *rh, int port)
 		KprintfH("  link state: U0 (active)\n");
 		break;
 	case XDEV_U1:
-		KprintfH("  link state: U1 (suspended, can wake)\n");
+		KprintfH("  link state: U1\n");
 		break;
 	case XDEV_U2:
-		KprintfH("  link state: U2 (suspended, can wake)\n");
+		KprintfH("  link state: U2\n");
 		break;
 	case XDEV_U3:
-		KprintfH("  link state: U3 (suspended, can't wake)\n");
+		KprintfH("  link state: U3 (suspended)\n");
 		break;
 	case XDEV_DISABLED:
 		KprintfH("  link state: Disabled\n");
@@ -812,13 +812,15 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		/* For USB2, need to write 15 (XDEV_RESUME) first, wait 20ms, then write U0 */
 		if (rh->ports[portNo - 1].major_revision < 3)
 		{
+			reg &= ~PORT_PLS_MASK;
 			reg |= XDEV_RESUME;
 			reg |= PORT_LINK_STROBE;
 			writel(reg, &port->or_portsc);
-			xhci_roothub_delay_ms(20);
+			xhci_roothub_delay_ms(25); // wait at least 20ms for resume to take effect
 			reg = readl(&port->or_portsc);
 			reg = xhci_roothub_port_state_to_neutral(reg);
 		}
+		reg &= ~PORT_PLS_MASK;
 		reg |= XDEV_U0; // put port back to U0 (active) state
 		reg |= PORT_LINK_STROBE;
 		writel(reg, &port->or_portsc);
@@ -1051,6 +1053,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		KprintfH("Set port %ld PORT_LINK_STATE to %ld\n", portNo, link_state);
 		if (link_state <= 5 || link_state == 10)
 		{
+			reg &= ~PORT_PLS_MASK;
 			reg |= PORT_LINK_STROBE;
 			reg |= link_state << 5;
 			writel(reg, &port->or_portsc);
@@ -1082,6 +1085,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	// USB2 specific features
 	case USB_PORT_FEAT_SUSPEND:
 		KprintfH("Putting port %ld link to U3 standby\n", portNo);
+		reg &= ~PORT_PLS_MASK;
 		reg |= XDEV_U3;
 		reg |= PORT_LINK_STROBE;
 		writel(reg, &port->or_portsc);
