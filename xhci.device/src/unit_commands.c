@@ -80,6 +80,13 @@ static int Do_CMD_FLUSH(struct USBIORequest *io)
     /* go through all devices and endpoints and flush their queues */
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
 
+    if (ctrl->root_int_req)
+    {
+        struct USBIORequest *root_req = ctrl->root_int_req;
+        ctrl->root_int_req = NULL;
+        xhci_udev_io_reply_failed(ctrl, root_req, IOERR_ABORTED);
+    }
+
     for (unsigned int addr = 0; addr <= USB_MAX_ADDRESS; ++addr)
     {
         struct usb_device *udev = ctrl->devices_by_virtual_address[addr];
@@ -336,7 +343,33 @@ static inline int Do_CMD_START(struct USBIORequest *io)
  */
 static inline int Do_CMD_XFER(struct USBIORequest *io)
 {
-    io->driver_private_flags = 0; // clear any flags, just in case
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    struct xhci_ctrl *ctrl = unit ? unit->xhci_ctrl : NULL;
+
+    if (io->req.io_Command == CMD_REQUEST_INTERRUPT && ctrl && io->virtual_address <= USB_MAX_ADDRESS)
+    {
+        struct usb_device *udev = ctrl->devices_by_virtual_address[io->virtual_address];
+        if (udev)
+        {
+            int ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
+            struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+            if (ep_ctx && xhci_ep_has_request(ep_ctx, io))
+            {
+                /* Work around hub class resume path submitting the same
+                 * interrupt IORequest twice. Ignore only if the exact request is still tracked
+                 * on the endpoint; a legitimately re-used request object after
+                 * ReplyMsg() must still be accepted as a fresh transfer. */
+                KprintfH("[xhci] %s: ignoring duplicate submission for tracked request %08lx\n",
+                         __func__,
+                         (ULONG)io);
+                return COMMAND_SCHEDULED;
+            }
+        }
+    }
+
+    io->driver_private_flags = 0;
+    io->driver_private_dma_address = NULL;
+
     int result = xhci_udev_send(io);
     if (result != ERR_NO_ERROR)
     {
