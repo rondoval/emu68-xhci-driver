@@ -567,7 +567,7 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, int e
 
     _memset(io, 0, sizeof(*io));
     io->req.io_Command = CMD_REQUEST_CONTROL;
-    io->req.io_Flags = IOF_QUICK;                             /* no reply port */
+    io->req.io_Flags = IOF_QUICK;                           /* no reply port */
     io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED; /* magic tag to free on completion */
 
     io->setup.bmRequestType = bmRequestType;
@@ -1384,14 +1384,22 @@ static void handle_get_port_status(struct usb_device *udev, struct USBIORequest 
 
     KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->virtual_address, (LONG)port, (ULONG)wStatus, (ULONG)wChange);
 
-    /* Drop children immediately if port power is off or connection loss */
-    if ((wStatus & USB_PORT_STAT_POWER) == 0 || ((wStatus & USB_PORT_STAT_CONNECTION) == 0))
+    /* Tear down any existing child as soon as the port is powered-but-disabled,
+     * otherwise re-enumeration races the stale slot/context we still own. */
+    const BOOL port_lost_child = ((wStatus & USB_PORT_STAT_POWER) == 0) ||
+                                 ((wStatus & USB_PORT_STAT_CONNECTION) == 0) ||
+                                 ((wStatus & USB_PORT_STAT_CONNECTION) != 0 &&
+                                  (wStatus & USB_PORT_STAT_ENABLE) == 0 &&
+                                  (wStatus & USB_PORT_STAT_RESET) == 0);
+
+    if (port_lost_child)
     {
-        KprintfH("hub addr=%ld port=%ld lost power or disabled; removing child if any\n", (LONG)udev->virtual_address, (LONG)port);
+        KprintfH("hub addr=%ld port=%ld lost power, disconnected, or disabled; removing child if any\n",
+                 (LONG)udev->virtual_address, (LONG)port);
         struct usb_device *child = xhci_udev_find_child_on_port(udev, port);
         if (child)
         {
-            KprintfH("hub addr=%ld port=%ld power-off or disabled, removing child addr=%ld slot=%ld\n",
+            KprintfH("hub addr=%ld port=%ld tearing down child addr=%ld slot=%ld before re-enumeration\n",
                      (LONG)udev->virtual_address, (LONG)port, (LONG)child->virtual_address, (LONG)child->slot_id);
             xhci_udev_disconnect(child, TRUE);
         }
