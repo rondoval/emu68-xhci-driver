@@ -99,7 +99,7 @@ static int Do_CMD_FLUSH(struct USBIORequest *io)
         if (!udev || addr == xhci_roothub_get_address(ctrl->root_hub))
             continue;
 
-        for (unsigned int ep_index = 0; ep_index < USB_MAXENDPOINTS; ++ep_index)
+        for (unsigned int ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ++ep_index)
         {
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
             if (ep_ctx)
@@ -361,13 +361,22 @@ static inline int Do_CMD_XFER(struct USBIORequest *io)
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
             if (ep_ctx && xhci_ep_has_request(ep_ctx, io))
             {
-                /* Work around hub class resume path submitting the same
-                 * interrupt IORequest twice. Ignore only if the exact request is still tracked
-                 * on the endpoint; a legitimately re-used request object after
-                 * ReplyMsg() must still be accepted as a fresh transfer. */
-                KprintfH("[xhci] %s: ignoring duplicate submission for tracked request %08lx\n",
+                /* Work around the Poseidon hub resume path re-submitting the
+                 * same interrupt IORequest while the original request is still
+                 * active on this endpoint. Treat that second send as a safe
+                 * no-op only when the exact same request object is still
+                 * tracked here; a legitimately re-used request after ReplyMsg()
+                 * must still be accepted as a fresh transfer.
+                 *
+                 * This avoids queueing the same IORequest twice or replying the
+                 * same message twice. It does not fix Poseidon's pending-count
+                 * accounting for the duplicate send. */
+                KprintfH("[xhci] %s: ignoring duplicate hub resume re-send for tracked request %08lx state=%ld flags=%lx dflags=%lx\n",
                          __func__,
-                         (ULONG)io);
+                         (ULONG)io,
+                         (LONG)xhci_ep_get_state(ep_ctx),
+                         (ULONG)io->req.io_Flags,
+                         (ULONG)io->driver_private_flags);
                 return COMMAND_SCHEDULED;
             }
         }

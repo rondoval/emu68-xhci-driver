@@ -398,6 +398,7 @@ void xhci_ep_request_stop(struct ep_context *ep_ctx)
         state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
         return;
 
+    KprintfH("EP %ld state %ld -> ABORTING (stop requested)\n", (LONG)ep_ctx->ep_index, (LONG)state);
     xhci_ep_set_aborting(ep_ctx);
     xhci_stop_ring(ep_ctx->udev, ep_ctx->ep_index);
 }
