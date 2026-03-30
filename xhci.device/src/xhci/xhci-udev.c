@@ -227,10 +227,12 @@ static BOOL xhci_udev_filter_emulated_hub_ctrl_request(struct usb_device *udev, 
     switch (wValue)
     {
     case USB_PORT_FEAT_SUSPEND:
+    {
+        const u8 link_state = (setup->bRequest == USB_REQ_CLEAR_FEATURE) ? 0 : 3;
         setup->wValue = LE16(USB_PORT_FEAT_LINK_STATE);
-        const u8 link_state = (setup->bRequest == USB_REQ_CLEAR_FEATURE) ? XDEV_U0 : XDEV_U3;
         setup->wIndex = LE16(portNo | (link_state << 8));
         return FALSE;
+    }
 
     // these 3 are only for CLEAR_FEATURE
     case USB_PORT_FEAT_ENABLE:
