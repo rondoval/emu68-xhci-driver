@@ -549,6 +549,37 @@ u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring)
 	return (u32)ring->enqueue | ring->cycle_state;
 }
 
+u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr)
+{
+	if (!trb_addr)
+		return 0;
+
+	union xhci_trb *trb = (union xhci_trb *)(uintptr_t)trb_addr;
+	xhci_inval_cache(trb, sizeof(*trb));
+	return trb_addr | (LE32(trb->generic.field[3]) & TRB_CYCLE);
+}
+
+void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, UWORD trb_count, UWORD start_index)
+{
+	if (!trb_addrs || start_index >= trb_count)
+		return;
+
+	for (UWORD index = start_index; index < trb_count; ++index)
+	{
+		union xhci_trb *trb = (union xhci_trb *)(uintptr_t)trb_addrs[index];
+		if (!trb)
+			return;
+
+		xhci_inval_cache(trb, sizeof(*trb));
+		u32 cycle = LE32(trb->generic.field[3]) & TRB_CYCLE;
+		trb->generic.field[0] = 0;
+		trb->generic.field[1] = 0;
+		trb->generic.field[2] = 0;
+		trb->generic.field[3] = LE32(TRB_TYPE(TRB_TR_NOOP) | cycle);
+		xhci_flush_cache(trb, sizeof(*trb));
+	}
+}
+
 int xhci_ring_get_max_packet_size(struct xhci_ring *ring)
 {
 	return ring->max_packet_size;
@@ -656,7 +687,11 @@ void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx)
 		return;
 
 	struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
-	giveback_first_trb(udev, ring->ep_index, ring->deferred_giveback);
+	if (ring && ring->deferred_giveback)
+	{
+		giveback_first_trb(udev, ring->ep_index, ring->deferred_giveback);
+		ring->deferred_giveback = NULL;
+	}
 }
 
 inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIORequest *req, BOOL copy)

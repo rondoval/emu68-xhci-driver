@@ -1,9 +1,11 @@
 #ifndef __XHCI_DESCRIPTORS_H__
-#define __XHCI_DESCRIPTORS_H___
+#define __XHCI_DESCRIPTORS_H__
 
 #include <devices/hcd_api.h>
 #include <compat.h>
 #include <xhci/ch9.h>
+
+struct usb_device;
 
 inline int xhci_ep_index_from_parts(UWORD endpoint, UWORD direction)
 {

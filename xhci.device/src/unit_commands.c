@@ -22,6 +22,7 @@
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-descriptors.h>
+#include <xhci/xhci-td.h>
 #include <xhci/xhci-udev.h>
 
 static const UWORD SupportedCommands[] = {
@@ -61,6 +62,19 @@ static int Do_NSCMD_DEVICEQUERY(struct IOStdReq *io)
     return COMMAND_PROCESSED;
 }
 
+static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct USBIORequest *req)
+{
+    if ((req->driver_private_flags & REQ_INTERNAL) && req->req.io_Command == CMD_INTERNAL_ABORT_REQUEST)
+    {
+        if (unit && unit->memoryPool)
+            FreeVecPooled(unit->memoryPool, req);
+        return;
+    }
+
+    req->req.io_Error = IOERR_ABORTED;
+    ReplyMsg((struct Message *)req);
+}
+
 /*
  * Abort all UHCMD_CONTROLXFER, UHCMD_ISOXFER, UHCMD_INTXFER and UHCMD_BULKXFER requests in progress or queued
  */
@@ -72,20 +86,12 @@ static int Do_CMD_FLUSH(struct USBIORequest *io)
     struct USBIORequest *req;
     /* Flush and cancel all requests */
     while ((req = (struct USBIORequest *)GetMsg(&unit->unit.unit_MsgPort)))
-    {
-        req->req.io_Error = IOERR_ABORTED;
-        ReplyMsg((struct Message *)req);
-    }
+        flush_queued_unit_request(unit, req);
 
     /* go through all devices and endpoints and flush their queues */
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
 
-    if (ctrl->root_int_req)
-    {
-        struct USBIORequest *root_req = ctrl->root_int_req;
-        ctrl->root_int_req = NULL;
-        xhci_udev_io_reply_failed(ctrl, root_req, IOERR_ABORTED);
-    }
+    xhci_roothub_abort_int_request(ctrl->root_hub);
 
     for (unsigned int addr = 0; addr <= USB_MAX_ADDRESS; ++addr)
     {
@@ -99,7 +105,7 @@ static int Do_CMD_FLUSH(struct USBIORequest *io)
             if (ep_ctx)
             {
                 xhci_ep_flush(ep_ctx, IOERR_ABORTED);
-                xhci_stop_endpoint(udev, ep_index);
+                xhci_ep_request_stop(ep_ctx);
             }
         }
     }
@@ -379,6 +385,21 @@ static inline int Do_CMD_XFER(struct USBIORequest *io)
     return COMMAND_SCHEDULED;
 }
 
+static inline int Do_CMD_INTERNAL_ABORT(struct USBIORequest *io)
+{
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    struct USBIORequest *orig_req = (struct USBIORequest *)io->data_buffer;
+
+    if (ctrl && orig_req)
+        xhci_td_abort_req(orig_req);
+
+    if (unit && unit->memoryPool)
+        FreeVecPooled(unit->memoryPool, io);
+
+    return COMMAND_PROCESSED;
+}
+
 static inline int Do_CMD_REGISTER_ISO_HANDLER(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
@@ -555,6 +576,10 @@ void ProcessCommand(struct USBIORequest *io)
         case CMD_REQUEST_INTERRUPT:
         case CMD_REQUEST_BULK:
             complete = Do_CMD_XFER(io);
+            break;
+
+        case CMD_INTERNAL_ABORT_REQUEST:
+            complete = Do_CMD_INTERNAL_ABORT(io);
             break;
 
         case NSCMD_DEVICEQUERY:

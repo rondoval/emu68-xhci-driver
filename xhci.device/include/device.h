@@ -20,6 +20,8 @@
 #define COMMAND_PROCESSED 1
 #define COMMAND_SCHEDULED 0
 
+#define CMD_INTERNAL_ABORT_REQUEST (CMD_NONSTD + 0x100)
+
 struct XHCIDevice;
 
 struct XHCIUnit

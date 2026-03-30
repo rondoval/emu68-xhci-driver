@@ -140,6 +140,13 @@ u32 xhci_get_hardware_address(struct usb_device *udev)
     return LE32(slot_ctx->dev_state) & DEV_ADDR_MASK;
 }
 
+u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, unsigned int ep_index)
+{
+    struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
+    xhci_inval_cache(ep_ctx, sizeof(struct xhci_ep_ctx));
+    return LE64(ep_ctx->deq);
+}
+
 /**
  * Copy output xhci_ep_ctx to the input xhci_ep_ctx copy.
  * Useful when you want to change one particular aspect of the endpoint

@@ -28,6 +28,7 @@
 #endif
 
 #include <devices/timer.h>
+#include <exec/errors.h>
 
 #include <debug.h>
 #include <xhci/ch9.h>
@@ -447,6 +448,8 @@ void xhci_roothub_destroy(struct xhci_root_hub *rh)
 	if (!rh)
 		return;
 
+	xhci_roothub_abort_int_request(rh);
+
 	if (rh->ports)
 		FreeVecPooled(rh->udev->controller->memoryPool, rh->ports);
 
@@ -530,6 +533,15 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 	}
 
 	rh->io_reply_data(rh->udev, rh->int_req, ERR_NO_ERROR, need_bytes);
+	rh->int_req = NULL;
+}
+
+void xhci_roothub_abort_int_request(struct xhci_root_hub *rh)
+{
+	if (!rh || !rh->int_req)
+		return;
+
+	rh->io_reply_data(rh->udev, rh->int_req, IOERR_ABORTED, 0);
 	rh->int_req = NULL;
 }
 

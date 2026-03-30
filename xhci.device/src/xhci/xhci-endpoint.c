@@ -12,10 +12,12 @@
 #include <minlist.h>
 
 #include <xhci/xhci-endpoint.h>
+#include <xhci/xhci-commands.h>
 #include <xhci/xhci-td.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-ring.h>
+#include <xhci/xhci-context.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -40,6 +42,9 @@ struct ep_context
 
     struct xhci_ring *ring; /* ring for this endpoint */
 
+    IOReqList stop_abort_reqs;
+    BOOL stop_process_timeouts;
+
     /* RT ISO data */
     /*
      * The idea here is that if this is filled, the event handlers will use
@@ -63,6 +68,8 @@ struct ep_context
     ULONG rt_inflight_bytes;
 };
 
+static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx);
+
 BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packet_size, APTR memoryPool)
 {
     struct ep_context *ep_ctx = AllocVecPooled(memoryPool, sizeof(struct ep_context));
@@ -77,6 +84,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packe
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
     ep_ctx->max_packet_size = max_packet_size;
     _NewMinList(&ep_ctx->pending_reqs);
+    _NewMinList(&ep_ctx->stop_abort_reqs);
     ep_ctx->active_tds = xhci_td_create_list(udev->controller);
     ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
@@ -89,6 +97,8 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packe
         FreeVecPooled(memoryPool, ep_ctx);
         return FALSE;
     }
+
+    xhci_ep_clear_stop_processing(ep_ctx);
 
     udev->ep_context[ep_index] = ep_ctx;
     return TRUE;
@@ -121,6 +131,8 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
                 xhci_udev_io_reply_failed(udev->controller, ep_ctx->rt_stop_pending, reply_code);
                 ep_ctx->rt_stop_pending = NULL;
             }
+
+            xhci_ep_clear_stop_processing(ep_ctx);
             ep_ctx->rt_req = NULL;
             ep_ctx->state = USB_DEV_EP_STATE_IDLE;
 
@@ -165,6 +177,7 @@ void xhci_ep_set_failed(struct ep_context *ep_ctx)
 {
     Kprintf("EP %ld state %ld -> FAILED\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
     ep_ctx->state = USB_DEV_EP_STATE_FAILED;
+    xhci_ep_clear_stop_processing(ep_ctx);
     xhci_td_fail_all(ep_ctx->active_tds, ERR_HCI_ERROR);
 }
 
@@ -181,6 +194,22 @@ void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io)
     KprintfH("Ring busy, queued request cmd=%ld ep=%ld\n",
              (LONG)io->req.io_Command,
              (LONG)(io->endpoint & 0x0F));
+}
+
+BOOL xhci_ep_has_request(struct ep_context *ep_ctx, struct USBIORequest *io)
+{
+    if (!ep_ctx || !io)
+        return FALSE;
+
+    struct MinNode *node = ep_ctx->pending_reqs.mlh_Head;
+    while (node && node->mln_Succ)
+    {
+        if ((struct USBIORequest *)node == io)
+            return TRUE;
+        node = node->mln_Succ;
+    }
+
+    return xhci_td_has_request(ep_ctx->active_tds, io);
 }
 
 static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
@@ -214,10 +243,10 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
 
 void xhci_ep_set_idle(struct ep_context *ep_ctx)
 {
-    if(xhci_td_is_empty(ep_ctx->active_tds))
-    {
+    if (xhci_td_is_empty(ep_ctx->active_tds))
         ep_ctx->state = USB_DEV_EP_STATE_IDLE;
-    }
+    else if (ep_ctx->state == USB_DEV_EP_STATE_ABORTING)
+        ep_ctx->state = USB_DEV_EP_STATE_RECEIVING;
 
     if (ep_ctx->pending_reqs.mlh_Head != (struct MinNode *)&ep_ctx->pending_reqs.mlh_Tail)
         xhci_ep_schedule_next(ep_ctx);
@@ -284,6 +313,116 @@ void xhci_ep_set_aborting(struct ep_context *ep_ctx)
     ep_ctx->state = USB_DEV_EP_STATE_ABORTING;
 }
 
+static BOOL xhci_ep_has_stop_abort_requests(struct ep_context *ep_ctx)
+{
+    return ep_ctx->stop_abort_reqs.mlh_Head != (struct MinNode *)&ep_ctx->stop_abort_reqs.mlh_Tail;
+}
+
+static BOOL xhci_ep_append_stop_abort_request(struct ep_context *ep_ctx, struct USBIORequest *abort_req)
+{
+    IOReqNode *node = AllocVecPooled(ep_ctx->memoryPool, sizeof(*node));
+    if (!node)
+        return FALSE;
+
+    node->req = abort_req;
+    AddTailMinList(&ep_ctx->stop_abort_reqs, (struct MinNode *)node);
+    return TRUE;
+}
+
+static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx)
+{
+    struct MinNode *node;
+    while ((node = RemHeadMinList(&ep_ctx->stop_abort_reqs)) != NULL)
+        FreeVecPooled(ep_ctx->memoryPool, node);
+
+    ep_ctx->stop_process_timeouts = FALSE;
+}
+
+static void xhci_ep_prepare_stop_processing(struct ep_context *ep_ctx, struct USBIORequest *abort_req, BOOL process_timeouts)
+{
+    enum ep_state state = xhci_ep_get_state(ep_ctx);
+    if (state != USB_DEV_EP_STATE_RECEIVING &&
+        state != USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT &&
+        state != USB_DEV_EP_STATE_ABORTING)
+        return;
+
+    if (abort_req)
+    {
+        if (abort_req->req.io_Command == CMD_REQUEST_ISOCHRONOUS ||
+            abort_req->req.io_Command == CMD_REGISTER_ISOCHRONOUS_HOOKS)
+            return;
+
+        if (!xhci_td_has_request(ep_ctx->active_tds, abort_req))
+            return;
+
+        if (!xhci_ep_append_stop_abort_request(ep_ctx, abort_req))
+            return;
+    }
+
+    ep_ctx->stop_process_timeouts |= process_timeouts;
+
+    if (ep_ctx->state != USB_DEV_EP_STATE_ABORTING)
+    {
+        ep_ctx->state = USB_DEV_EP_STATE_ABORTING;
+        xhci_stop_ring(ep_ctx->udev, ep_ctx->ep_index);
+    }
+}
+
+void xhci_ep_request_abort(struct ep_context *ep_ctx, struct USBIORequest *abort_req)
+{
+    if (!ep_ctx || !abort_req)
+        return;
+
+    xhci_ep_prepare_stop_processing(ep_ctx, abort_req, FALSE);
+}
+
+void xhci_ep_request_timeout_recovery(struct ep_context *ep_ctx)
+{
+    if (!ep_ctx)
+        return;
+
+    xhci_ep_prepare_stop_processing(ep_ctx, NULL, TRUE);
+}
+
+void xhci_ep_request_stop(struct ep_context *ep_ctx)
+{
+    if (!ep_ctx)
+        return;
+
+    enum ep_state state = xhci_ep_get_state(ep_ctx);
+    if (state == USB_DEV_EP_STATE_ABORTING)
+        return;
+
+    if (state != USB_DEV_EP_STATE_RECEIVING &&
+        state != USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT &&
+        state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
+        return;
+
+    xhci_ep_set_aborting(ep_ctx);
+    xhci_stop_ring(ep_ctx->udev, ep_ctx->ep_index);
+}
+
+void xhci_ep_process_stop(struct ep_context *ep_ctx, dma_addr_t *deq_ptr)
+{
+    if (!ep_ctx || !deq_ptr)
+        return;
+
+    *deq_ptr = 0;
+
+    if (!xhci_ep_has_stop_abort_requests(ep_ctx) && !ep_ctx->stop_process_timeouts)
+        return;
+
+    dma_addr_t stopped_deq_ptr = xhci_get_endpoint_deq_ptr(ep_ctx->udev, ep_ctx->ep_index);
+
+    xhci_td_patch_recovery(ep_ctx->active_tds,
+                           ep_ctx->ring,
+                           &ep_ctx->stop_abort_reqs,
+                           stopped_deq_ptr,
+                           deq_ptr);
+
+    xhci_ep_clear_stop_processing(ep_ctx);
+}
+
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx)
 {
     return ep_ctx->state;
@@ -337,8 +476,6 @@ void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code)
         struct USBIORequest *req = (struct USBIORequest *)node;
         xhci_udev_io_reply_failed(ep_ctx->udev->controller, req, reply_code);
     }
-
-    xhci_td_fail_all(ep_ctx->active_tds, reply_code);
 }
 
 /*

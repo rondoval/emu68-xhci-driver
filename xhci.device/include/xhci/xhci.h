@@ -700,7 +700,6 @@ struct xhci_ctrl
 	struct xhci_erst erst;
 	struct xhci_scratchpad *scratchpad;
 	struct xhci_root_hub *root_hub;
-	struct USBIORequest *root_int_req;
 	u16 hci_version;
 
 	APTR memoryPool;

@@ -121,11 +121,9 @@ static void xhci_udev_flush(struct usb_device *udev, UBYTE reply_code)
         return;
     KprintfH("flushing device addr=%ld slot=%ld\n", (LONG)udev->virtual_address, (LONG)udev->slot_id);
 
-    if (ctrl->root_int_req && ctrl->root_int_req->virtual_address == udev->virtual_address)
+    if (udev->virtual_address == xhci_roothub_get_address(ctrl->root_hub))
     {
-        struct USBIORequest *req = ctrl->root_int_req;
-        ctrl->root_int_req = NULL;
-        xhci_udev_io_reply_failed(ctrl, req, reply_code);
+        xhci_roothub_abort_int_request(ctrl->root_hub);
     }
 
     xhci_ep_destroy_contexts(udev, reply_code);

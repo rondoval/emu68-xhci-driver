@@ -149,14 +149,6 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
     return activity;
 }
 
-/*
- * This is supposed to implement NAK timeouts.
- * It scans all active TDs for expired timeouts,
- * if it finds one, it stops the endpoint, aborts all active TDs
- * and resets dequeue pointer.
- * I guess we could use something more sophisticated, like
- * stopping, removing the expired TD and restarting.
- */
 void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
 {
     for (int i = 0; i < USB_MAX_ADDRESS; i++)
@@ -171,7 +163,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
             if (ep_ctx && xhci_ep_is_expired(ep_ctx))
             {
                 KprintfH("XHCI TD timeout on slot %ld ep %ld\n", (LONG)udev->slot_id, (LONG)ep_index);
-                xhci_stop_endpoint(udev, ep_index);
+                xhci_ep_request_timeout_recovery(ep_ctx);
             }
         }
     }

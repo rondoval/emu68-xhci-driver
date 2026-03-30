@@ -32,7 +32,7 @@ struct pending_command
     u32 ep_index;            /* endpoint index encoded into the command */
     command_handler complete;
     struct USBIORequest *req; /* to continue control transfers */
-    trb_type type;         /* command type */
+    trb_type type;            /* command type */
     BOOL deadline_active;
     ULONG deadline_us;
 };
@@ -121,25 +121,28 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
 static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-    u32 flags = LE32(event->event_cmd.flags);
-    ULONG slot_id = cmd->udev->slot_id;
-    ULONG ep_index = cmd->ep_index;
+    const u32 flags = LE32(event->event_cmd.flags);
+    const ULONG slot_id = cmd->udev->slot_id;
+    const ULONG ep_index = cmd->ep_index;
+
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
+    if (!ep_ctx)
+    {
+        Kprintf("No ep context for addr %ld ep %ld\n", (LONG)cmd->udev->virtual_address, (LONG)ep_index);
+        return;
+    }
 
     if (TRB_TO_SLOT_ID(flags) != slot_id)
     {
         Kprintf("Expected a TRB for slot %ld, got %ld\n", slot_id, TRB_TO_SLOT_ID(flags));
-        struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
-        if (!ep_ctx)
-        {
-            Kprintf("No ep context for addr %ld ep %ld\n", (LONG)cmd->udev->virtual_address, (LONG)ep_index);
-            return;
-        }
         xhci_ep_set_failed(ep_ctx);
         return;
     }
+    struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
+    u32 deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
 
     KprintfH("Reset EP %ld completed successfully\n", ep_index);
-    xhci_set_deq_pointer(cmd->udev, ep_index);
+    xhci_set_deq_pointer(cmd->udev, ep_index, deq_ptr);
 }
 
 static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
@@ -205,25 +208,44 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
     xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
     ULONG slot_id = cmd->udev->slot_id;
     ULONG ep_index = cmd->ep_index;
-
-    if (type != TRB_COMPLETION || TRB_TO_SLOT_ID(flags) != slot_id || comp != COMP_SUCCESS)
-    {
-        Kprintf("Expected a TRB for slot %ld with SUCCESS, got %ld with %ld\n", slot_id, TRB_TO_SLOT_ID(flags), comp);
-        return;
-    }
-
-    KprintfH("Stopped EP %ld...\n", ep_index);
-
-    /* Fail all active TDs on this endpoint */
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
     if (!ep_ctx)
     {
         Kprintf("No ep context for addr %ld ep %ld\n", (LONG)cmd->udev->virtual_address, (LONG)ep_index);
         return;
     }
+
+    if (type != TRB_COMPLETION || TRB_TO_SLOT_ID(flags) != slot_id)
+    {
+        Kprintf("Expected a TRB for slot %ld completion, got %ld with %ld\n", slot_id, TRB_TO_SLOT_ID(flags), comp);
+        xhci_ep_set_failed(ep_ctx);
+        return;
+    }
+
+    if (comp != COMP_SUCCESS && comp != COMP_CTX_STATE)
+    {
+        Kprintf("Stop EP %ld failed with completion code %ld\n", (LONG)ep_index, (LONG)comp);
+        xhci_ep_set_failed(ep_ctx);
+        return;
+    }
+
+    KprintfH("Stopped EP %ld with completion code %ld\n", ep_index, comp);
+
+    u32 deq_ptr = 0;
+    xhci_ep_process_stop(ep_ctx, &deq_ptr);
+
+    if (deq_ptr)
+    {
+        xhci_set_deq_pointer(cmd->udev, ep_index, deq_ptr);
+        return;
+    }
+
+    /* ordinary stop command */
     xhci_ep_set_failed(ep_ctx);
 
-    xhci_set_deq_pointer(cmd->udev, ep_index);
+    struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
+    deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
+    xhci_set_deq_pointer(cmd->udev, ep_index, deq_ptr);
 }
 
 /*
@@ -449,7 +471,7 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
         return; /* abort already fired */
 
     ULONG now_us = get_time();
-    if((int32_t)(now_us - cmd->deadline_us) < 0)
+    if ((int32_t)(now_us - cmd->deadline_us) < 0)
         return; /* not timed out yet */
 
     Kprintf("Command timeout: type=%s trb_dma=%lx slot=%ld — asserting Command Abort (CA)\n",
@@ -461,7 +483,7 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
     if (!(crcr & CMD_RING_RUNNING))
     {
         Kprintf("Command ring already stopped\n");
-        //TODO restart controller?
+        // TODO restart controller?
         return;
     }
 
@@ -546,35 +568,17 @@ void xhci_reset_ep(struct usb_device *udev, u32 ep_index)
 }
 
 /*
- * Stops transfer processing for an endpoint and throws away all unprocessed
- * TRBs by setting the xHC's dequeue pointer to our enqueue pointer. The next
- * xhci_bulk_tx/xhci_ctrl_tx on this enpoint will add new transfers there and
- * ring the doorbell, causing this endpoint to start working again.
+ * Stops transfer processing for an endpoint/ring. Used for endpoint reset and stall recovery, and also for aborting transfers on disconnect.
+ * After the ring is stopped, we can set the dequeue pointer to the current enqueue pointer to flush any pending transfers and then restart the ring to continue processing new transfers.
+ * The endpoint needs be in either Running or Halted state, otherwise this command will fail.
  */
-void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
+void xhci_stop_ring(struct usb_device *udev, u32 ep_index)
 {
-    KprintfH("Stop EP addr=%ld ep=%ld\n",
-             (LONG)udev->virtual_address, (LONG)ep_index);
-    struct xhci_ctrl *ctrl = udev->controller;
-
-    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-    if (!ep_ctx)
-    {
-        Kprintf("No ep context for addr %ld ep %ld\n", (LONG)udev->virtual_address, (LONG)ep_index);
+    if (!udev || !udev->controller)
         return;
-    }
 
-    enum ep_state state = xhci_ep_get_state(ep_ctx);
-    if (state == USB_DEV_EP_STATE_RECEIVING ||
-        state == USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT ||
-        state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
-    {
-        xhci_ep_set_aborting(ep_ctx);
-        KprintfH("Stopping EP %ld...\n", ep_index);
-
-        // TODO suspend bit support
-        xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL, udev);
-    }
+    KprintfH("Stopping EP addr=%ld ep=%ld...\n", (LONG)udev->virtual_address, (LONG)ep_index);
+    xhci_queue_command(udev->controller, 0, udev->slot_id, ep_index, TRB_STOP_RING, NULL, udev);
 }
 
 /*
@@ -582,10 +586,9 @@ void xhci_stop_endpoint(struct usb_device *udev, u32 ep_index)
  * Used after a reset endpoint command to continue processing.
  * The endpoint needs to be either in Error or Stopped state.
  */
-void xhci_set_deq_pointer(struct usb_device *udev, u32 ep_index)
+void xhci_set_deq_pointer(struct usb_device *udev, u32 ep_index, u32 deq_ptr)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
     {
@@ -593,11 +596,8 @@ void xhci_set_deq_pointer(struct usb_device *udev, u32 ep_index)
         return;
     }
 
-    struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
-    u64 deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
-
     KprintfH("Setting DEQ pointer for EP index %ld to %lx\n", (LONG)ep_index, (ULONG)deq_ptr);
-    xhci_queue_command(ctrl, deq_ptr, udev->slot_id, ep_index, TRB_SET_DEQ, NULL, udev); // handle_set_deq
+    xhci_queue_command(ctrl, deq_ptr, udev->slot_id, ep_index, TRB_SET_DEQ, NULL, udev);
 }
 
 /*

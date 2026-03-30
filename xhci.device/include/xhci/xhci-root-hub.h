@@ -14,6 +14,7 @@ void xhci_roothub_destroy(struct xhci_root_hub *rh);
 void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequest *req);
 int xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct USBIORequest *req);
 void xhci_roothub_complete_int_request(struct xhci_root_hub *rh);
+void xhci_roothub_abort_int_request(struct xhci_root_hub *rh);
 
 unsigned int xhci_roothub_get_address(struct xhci_root_hub *rh);
 UBYTE xhci_roothub_get_num_ports(struct xhci_root_hub *rh);

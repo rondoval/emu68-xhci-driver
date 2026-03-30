@@ -32,14 +32,19 @@ void xhci_ep_set_receiving_control_short(struct ep_context *ep_ctx);
 void xhci_ep_set_resetting(struct ep_context *ep_ctx);
 void xhci_ep_set_aborting(struct ep_context *ep_ctx);
 
-BOOL xhci_ep_is_expired(struct ep_context *ep_ctx);
+void xhci_ep_request_abort(struct ep_context *ep_ctx, struct USBIORequest *abort_req);
+void xhci_ep_request_timeout_recovery(struct ep_context *ep_ctx);
+void xhci_ep_request_stop(struct ep_context *ep_ctx);
+void xhci_ep_process_stop(struct ep_context *ep_ctx, dma_addr_t *deq_ptr);
 
+BOOL xhci_ep_is_expired(struct ep_context *ep_ctx);
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx);
 int xhci_ep_get_ep_index(struct ep_context *ep_ctx);
 int xhci_ep_get_active_trb_count(struct ep_context *ep_ctx);
 struct xhci_ring *xhci_ep_get_ring(struct ep_context *ep_ctx);
 
 struct USBIORequest *xhci_ep_get_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr);
+BOOL xhci_ep_has_request(struct ep_context *ep_ctx, struct USBIORequest *io);
 void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io);
 void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code);
 
