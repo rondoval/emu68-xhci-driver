@@ -116,7 +116,7 @@ static int pcie_init(void)
 	root_bus->controller = pcie;
 	root_bus->parent = NULL;
 	root_bus->pci_bridge = NULL;
-	SNPrintf(root_bus->name, sizeof(root_bus->name), (CONST_STRPTR) "pcie0");
+	CopyMem((APTR)"pcie0", root_bus->name, sizeof("pcie0"));
 	root_bus->bus_number = 0;
 	root_bus->bus_number_last_sub = 0;
 	AddTailMinList(&pci_bus_list, (struct MinNode *)root_bus);
