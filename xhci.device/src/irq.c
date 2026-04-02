@@ -8,6 +8,7 @@
 #endif
 
 #include <compat.h>
+#include <config.h>
 #include <debug.h>
 #include <pci.h>
 #include <xhci/xhci.h>
@@ -19,13 +20,13 @@
 static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 {
 	u32 iman = readl(&ctrl->ir_set->irq_pending);
-	writel(ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman),&ctrl->ir_set->irq_pending);
+	writel(ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
 	u32 iman = readl(&ctrl->ir_set->irq_pending);
-	writel(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman),&ctrl->ir_set->irq_pending);
+	writel(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
@@ -39,7 +40,7 @@ static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
 	writel(cmd, &ctrl->hcor->or_usbcmd);
 }
 
-static ULONG xhci_intx_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *unit asm("a1"), ULONG vector asm("d0"))
+static ULONG xhci_int_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *unit asm("a1"), ULONG vector asm("d0"))
 {
 	(void)SysBase;
 	(void)vector;
@@ -58,7 +59,7 @@ static ULONG xhci_intx_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *
 	writel(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
 	xhci_irq_disable_runtime(ctrl);
 
-	if(unit->xhci_ctrl->pci_dev->msi.enabled)
+	if (unit->xhci_ctrl->pci_dev->msi.enabled)
 	{
 		pci_msi_mask_irq(unit->xhci_ctrl->pci_dev, unit->xhci_ctrl->pci_dev->msi.irq);
 	}
@@ -72,7 +73,44 @@ static ULONG xhci_intx_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *
 	return 1;
 }
 
-int xhci_intx_enable(struct XHCIUnit *unit)
+static inline void xhci_setup_isr(struct XHCIUnit *unit)
+{
+	unit->irq_isr.is_Node.ln_Type = NT_INTERRUPT;
+	unit->irq_isr.is_Node.ln_Name = "xhci_isr";
+	unit->irq_isr.is_Data = unit;
+	unit->irq_isr.is_Code = (APTR)xhci_int_isr;
+}
+
+static inline void xhci_irq_start(struct xhci_ctrl *ctrl)
+{
+	xhci_irq_update_cmd(ctrl, TRUE);
+	xhci_irq_enable_runtime(ctrl);
+}
+
+static inline void xhci_irq_stop(struct xhci_ctrl *ctrl)
+{
+	xhci_irq_disable_runtime(ctrl);
+	xhci_irq_update_cmd(ctrl, FALSE);
+}
+
+void xhci_int_rearm(struct XHCIUnit *unit)
+{
+	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+
+	if (ctrl->pci_dev && ctrl->pci_dev->msi.enabled)
+	{
+		pci_msi_unmask_irq(ctrl->pci_dev, ctrl->pci_dev->msi.irq);
+	}
+	else if (ctrl->pci_dev && !pci_check_and_set_intx_mask(ctrl->pci_dev, FALSE))
+	{
+		Signal(unit->task, 1UL << unit->irq_signal);
+		return;
+	}
+
+	xhci_irq_enable_runtime(ctrl);
+}
+
+static int xhci_intx_enable(struct XHCIUnit *unit)
 {
 	Kprintf("[xhci] %s: enabling INTx\n", __func__);
 	// UBYTE irq_line_cfg;
@@ -86,11 +124,6 @@ int xhci_intx_enable(struct XHCIUnit *unit)
 	// unit->irq_line = irq_line_cfg + 32;
 	unit->irq_line = unit->xhci_ctrl->pci_dev->irq + 32;
 
-	unit->irq_isr.is_Node.ln_Type = NT_INTERRUPT;
-	unit->irq_isr.is_Node.ln_Name = "xhci_intx_isr";
-	unit->irq_isr.is_Data = unit;
-	unit->irq_isr.is_Code = (APTR)xhci_intx_isr;
-
 	int ret = AddIntServerEx((ULONG)unit->irq_line, 0, FALSE, &unit->irq_isr);
 	if (ret < 0)
 	{
@@ -103,35 +136,25 @@ int xhci_intx_enable(struct XHCIUnit *unit)
 	pci_intx(ctrl->pci_dev, TRUE);
 	pci_check_and_set_intx_mask(ctrl->pci_dev, FALSE);
 
-	xhci_irq_update_cmd(ctrl, TRUE);
-	xhci_irq_enable_runtime(ctrl);
-
-	Kprintf("[xhci] %s: INTx enabled on IRQ %ld\n", __func__, unit->irq_line);
-
 	return 0;
 }
 
-int xhci_msi_enable(struct XHCIUnit *unit)
+static int xhci_msi_enable(struct XHCIUnit *unit)
 {
 	Kprintf("[xhci] %s: enabling MSI\n", __func__);
-	if(unit->xhci_ctrl->pci_dev->msi.enabled)
+	if (unit->xhci_ctrl->pci_dev->msi.enabled)
 	{
 		Kprintf("[xhci] %s: MSI already enabled\n", __func__);
 		return 0;
 	}
 
-	if(pci_get_controller(unit->xhci_ctrl->pci_dev->bus)->msi.enabled == FALSE)
+	if (pci_get_controller(unit->xhci_ctrl->pci_dev->bus)->msi.enabled == FALSE)
 	{
 		Kprintf("[xhci] %s: MSI not supported on this controller, falling back to INTx\n", __func__);
 		return xhci_intx_enable(unit);
 	}
 
 	unit->irq_line = unit->xhci_ctrl->pci_dev->msi.irq + 32;
-
-	unit->irq_isr.is_Node.ln_Type = NT_INTERRUPT;
-	unit->irq_isr.is_Node.ln_Name = "xhci_msi_isr";
-	unit->irq_isr.is_Data = unit;
-	unit->irq_isr.is_Code = (APTR)xhci_intx_isr;
 
 	int ret = add_int_server(unit->xhci_ctrl->pci_dev, &unit->irq_isr);
 	if (ret < 0)
@@ -140,69 +163,44 @@ int xhci_msi_enable(struct XHCIUnit *unit)
 		return ret;
 	}
 
-	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-
-	xhci_irq_update_cmd(ctrl, TRUE);
-	xhci_irq_enable_runtime(ctrl);
-
 	return 0;
 }
 
-void xhci_msi_shutdown(struct XHCIUnit *unit)
+int xhci_int_enable(struct XHCIUnit *unit)
+{
+	xhci_setup_isr(unit);
+
+	int result = 0;
+	if (!unit->xhci_ctrl->pci_dev)
+		result = AddIntServerEx((ULONG)unit->irq_line, 0, FALSE, &unit->irq_isr);
+	else if (DEVICE_USE_MSI)
+		result = xhci_msi_enable(unit);
+	else
+		result = xhci_intx_enable(unit);
+
+	xhci_irq_start(unit->xhci_ctrl);
+
+	return result;
+}
+
+void xhci_int_shutdown(struct XHCIUnit *unit)
 {
 	if (!unit)
 		return;
 
-	if(!unit->xhci_ctrl->pci_dev->msi.enabled)
-	{
-		Kprintf("[xhci] %s: MSI not enabled, shutting down INTx\n", __func__);
-		xhci_intx_shutdown(unit);
-		return;
-	}
+	xhci_irq_stop(unit->xhci_ctrl);
 
-	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	xhci_irq_disable_runtime(ctrl);
-	xhci_irq_update_cmd(ctrl, FALSE);
-
-	rem_int_server(unit->xhci_ctrl->pci_dev);
-}
-
-void xhci_intx_shutdown(struct XHCIUnit *unit)
-{
-	if (!unit)
-		return;
-
-	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	xhci_irq_disable_runtime(ctrl);
-	xhci_irq_update_cmd(ctrl, FALSE);
-
-	if (!pci_check_and_set_intx_mask(ctrl->pci_dev, FALSE))
-	{
-		Kprintf("[xhci] %s: failed to unmask INTx line during shutdown\n", __func__);
-	}
-
-	RemIntServerEx((ULONG)unit->irq_line, &unit->irq_isr);
-}
-
-void xhci_intx_handle(struct XHCIUnit *unit)
-{
-	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-
-	xhci_process_event_trb(ctrl);
-
-	if(unit->xhci_ctrl->pci_dev->msi.enabled)
-	{
-		pci_msi_unmask_irq(unit->xhci_ctrl->pci_dev, unit->xhci_ctrl->pci_dev->msi.irq);
-		xhci_irq_enable_runtime(ctrl);
-		return;
-	}
-
-	if (!pci_check_and_set_intx_mask(ctrl->pci_dev, FALSE))
-	{
-		Signal(unit->task, 1UL << unit->irq_signal);
-	}
+	if (!unit->xhci_ctrl->pci_dev)
+		RemIntServerEx((ULONG)unit->irq_line, &unit->irq_isr);
+	else if (DEVICE_USE_MSI && unit->xhci_ctrl->pci_dev->msi.enabled)
+		rem_int_server(unit->xhci_ctrl->pci_dev);
 	else
 	{
-		xhci_irq_enable_runtime(ctrl);
+		if (!pci_check_and_set_intx_mask(unit->xhci_ctrl->pci_dev, FALSE))
+		{
+			Kprintf("[xhci] %s: failed to unmask INTx line during shutdown\n", __func__);
+		}
+
+		RemIntServerEx((ULONG)unit->irq_line, &unit->irq_isr);
 	}
 }

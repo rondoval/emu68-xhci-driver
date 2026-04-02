@@ -9,14 +9,16 @@
 
 #include <dos/dos.h>
 
-#include <devices/usbhardware.h>
-#include <xhci/xhci-events.h>
-
 #include <compat.h>
 #include <device.h>
 #include <minlist.h>
 #include <debug.h>
 #include <config.h>
+
+#include <devices/hcd_api.h>
+#include <xhci/xhci-events.h>
+#include <xhci/xhci-commands.h>
+
 
 static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 {
@@ -77,15 +79,16 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 
         if(sigset & (1UL << unit->irq_signal))
         {
-            xhci_intx_handle(unit);
+            xhci_process_event_trb(unit->xhci_ctrl);
+            xhci_int_rearm(unit);
         }
         
         // IO queue got a new message
         if (sigset & (1UL << unit->unit.unit_MsgPort.mp_SigBit))
         {
-            struct IOUsbHWReq *io;
+            struct USBIORequest *io;
             // Drain command queue and process it
-            while ((io = (struct IOUsbHWReq *)GetMsg(&unit->unit.unit_MsgPort)))
+            while ((io = (struct USBIORequest *)GetMsg(&unit->unit.unit_MsgPort)))
             {
                 ProcessCommand(io);
             }
@@ -100,9 +103,8 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
                 WaitIO(&packetTimerReq->tr_node);
             }
 
+            xhci_process_command_timeouts(unit->xhci_ctrl);
             xhci_process_event_timeouts(unit->xhci_ctrl);
-
-            //TODO enable irq, just in case
 
             /* Re-arm timer */
             packetTimerReq->tr_node.io_Command = TR_ADDREQUEST;
@@ -148,7 +150,7 @@ int UnitTaskStart(struct XHCIUnit *unit)
             FreeMem(task, sizeof(struct Task));
         if (stack)
             FreeMem(stack, STACK_SIZE);
-        return UHIOERR_HOSTERROR;
+        return ERR_HCI_ERROR;
     }
 
     // Prepare mem list, put task and its stack there
@@ -185,12 +187,12 @@ int UnitTaskStart(struct XHCIUnit *unit)
         FreeMem(ml, sizeof(struct MemList) + sizeof(struct MemEntry));
         FreeMem(task, sizeof(struct Task));
         FreeMem(&stack[0], STACK_SIZE);
-        return UHIOERR_HOSTERROR;
+        return ERR_HCI_ERROR;
     }
 
     Wait(SIGBREAKF_CTRL_F);
     Kprintf("[xhci] %s: xhci task started\n", __func__);
-    return UHIOERR_NO_ERROR;
+    return ERR_NO_ERROR;
 }
 
 void UnitTaskStop(struct XHCIUnit *unit)

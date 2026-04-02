@@ -22,12 +22,13 @@
 #include <exec/memory.h>
 
 #include <debug.h>
+#include <minlist.h>
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -40,6 +41,7 @@
 #endif
 
 #define CACHELINE_SIZE 64
+#define XHCI_EXT_CAPS_SEARCH_DONE ((u32)~0U)
 
 /**
  * Malloc the aligned memory
@@ -325,6 +327,123 @@ static int xhci_reset(struct xhci_hcor *hcor)
 	return handshake(&hcor->or_usbsts, STS_CNR, 0, XHCI_MAX_RESET_USEC);
 }
 
+/**
+ * find_next_capability - Find the next XHCI extended capability
+ * @ctrl: Pointer to the XHCI controller structure
+ * @cap_id: The capability ID to search for
+ * @init_offset: Pointer to the offset of the next capability to check;
+ *               on input, 0 starts from the beginning, non-zero continues
+ *               from a previous search; on output, contains the offset of
+ *               the next capability in the chain, or
+ *               XHCI_EXT_CAPS_SEARCH_DONE when search is exhausted
+ *
+ * Description:
+ * Searches through the extended capability list in the XHCI host controller
+ * to find the next capability matching the specified ID. The function supports
+ * iterative searching through the capability chain by maintaining the offset
+ * position between calls.
+ *
+ * Return:
+ * On success, returns a pointer to the capability structure at the found offset.
+ * If the capability is not found or next_offset is NULL, returns NULL.
+ * The next_offset output parameter is updated with the offset of the next
+ * capability in the chain for continued searching.
+ */
+u32 *xhci_find_next_capability(struct xhci_ctrl *ctrl, u32 cap_id, u32 *init_offset)
+{
+	if (init_offset == NULL || *init_offset == XHCI_EXT_CAPS_SEARCH_DONE)
+		return NULL;
+
+	struct xhci_hccr *hccr = ctrl->hccr;
+	u32 hccParams = readl(&hccr->cr_hccparams1);
+
+	u32 current_offset = (*init_offset != 0) ? *init_offset : HCC_EXT_CAPS(hccParams) << 2;
+	while (current_offset != XHCI_EXT_CAPS_SEARCH_DONE)
+	{
+		u32 *current = (u32 *)((u8 *)hccr + current_offset);
+		u32 ext_cap = readl(current);
+
+		u32 next_offset = current_offset + (XHCI_EXT_CAPS_NEXT(ext_cap) << 2);
+		if (next_offset == current_offset)
+			next_offset = XHCI_EXT_CAPS_SEARCH_DONE; /* That was the last capability */
+
+		if (XHCI_EXT_CAPS_ID(ext_cap) == cap_id)
+		{
+			*init_offset = next_offset;
+			return current;
+		}
+
+		current_offset = next_offset;
+	}
+
+	*init_offset = XHCI_EXT_CAPS_SEARCH_DONE;
+	return NULL;
+}
+
+struct xhci_protocol_caps xhci_get_protocol_caps(u32* base_address)
+{
+	struct xhci_protocol_caps caps = {0};
+	u32 cap00 = readl(base_address + 0);
+	u32 cap08 = readl(base_address + 2);
+	u32 cap0c = readl(base_address + 3);
+
+	caps.minor_revision = XHCI_PROTOCOL_CAP_MINOR_REV(cap00);
+	caps.major_revision = XHCI_PROTOCOL_CAP_MAJOR_REV(cap00);
+	caps.port_offset = XHCI_PROTOCOL_CAP_PORT_OFFSET(cap08);
+	caps.port_count = XHCI_PROTOCOL_CAP_PORT_COUNT(cap08);
+	if (caps.major_revision >= 0x3)
+	{
+		caps.usb3_lsecc = XHCI_PROTOCOL_CAP_USB3_LSECC(cap08);
+		caps.max_hub_depth = XHCI_PROTOCOL_CAP_USB3_MHD(cap08);
+	}
+	else
+	{
+		caps.usb2_hs_only = XHCI_PROTOCOL_CAP_USB2_HSO(cap08);
+		caps.usb2_integrated_hub = XHCI_PROTOCOL_CAP_USB2_IHI(cap08);
+		caps.usb2_hw_lpm = XHCI_PROTOCOL_CAP_USB2_HLC(cap08);
+		caps.usb2_besl_lpm = XHCI_PROTOCOL_CAP_USB2_BLC(cap08);
+		caps.max_hub_depth = XHCI_PROTOCOL_CAP_USB2_MHD(cap08);
+	}
+	caps.protocol_speed_id_count = XHCI_PROTOCOL_CAP_SPEED_ID_COUNT(cap08);
+	caps.protocol_slot_type |= XHCI_PROTOCOL_CAP_SLOT_TYPE(cap0c);
+
+	return caps;
+}
+
+static void xhci_dump_caps(struct xhci_ctrl *ctrl)
+{
+	struct xhci_hccr *hccr = ctrl->hccr;
+	u32 reg = readl(&hccr->cr_hccparams1);
+	if (HCC_64BIT_ADDR(reg))
+		Kprintf("Host controller supports 64-bit addressing\n");
+	if (HCC_64BYTE_CONTEXT(reg))
+		Kprintf("Host controller supports 64-byte context structures\n");
+	if (HCC_LTC(reg))
+		Kprintf("Host controller supports latency tolerance messaging\n");
+
+	reg = readl(&hccr->cr_hccparams2);
+	if (HCC_U3C(reg))
+		Kprintf("Host controller supports U3 Entry Capability\n");
+	if (HCC_CMC(reg))
+		Kprintf("Host controller supports Configure Endpoint Command Max Exit Latency Too Large Capability\n");
+	if (HCC_FSC(reg))
+		Kprintf("Host controller supports Force Save Context Capability\n");
+	if (HCC_CTC(reg))
+		Kprintf("Host controller supports Compliance Transition Capability\n");
+	if (HCC_LEC(reg))
+		Kprintf("Host controller supports Large ESIT Payload Capability\n");
+	if (HCC_CIC(reg))
+		Kprintf("Host controller supports Configuration Information Capability\n");
+	if (HCC_ETC(reg))
+		Kprintf("Host controller supports Extended TBC Capability\n");
+	if (HCC_ETC_TSC(reg))
+		Kprintf("Host controller supports Extended TBC TRB Status Capability\n");
+	if (HCC_GSC(reg))
+		Kprintf("Host controller supports Get/Set Extended Property Capability\n");
+	if (HCC_VTC(reg))
+		Kprintf("Host controller supports Virtualization Based Trusted I/O Capability\n");
+}
+
 static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 {
 	struct xhci_hccr *hccr = ctrl->hccr;
@@ -342,8 +461,8 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	if (xhci_mem_init(ctrl, hccr, hcor) < 0)
 		return -ENOMEM;
 
-	ctrl->devices_by_poseidon_address[0] = xhci_udev_alloc(ctrl, 0);
-	ctrl->root_hub = xhci_roothub_create(ctrl->devices_by_poseidon_address[0], xhci_udev_io_reply_data);
+	ctrl->devices_by_virtual_address[0] = xhci_udev_alloc(ctrl, 0);
+	ctrl->root_hub = xhci_roothub_create(ctrl->devices_by_virtual_address[0], xhci_udev_io_reply_data);
 	if (!ctrl->root_hub)
 		return -ENOMEM;
 
@@ -360,6 +479,8 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	u32 reg = HC_VERSION(readl(&hccr->cr_capbase));
 	Kprintf("USB XHCI %lx.%02lx\n", reg >> 8, reg & 0xff);
 	ctrl->hci_version = reg;
+
+	xhci_dump_caps(ctrl);
 
 	return 0;
 }
@@ -380,8 +501,7 @@ static int xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 	return 0;
 }
 
-int xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
-				  struct xhci_hcor *hcor)
+int xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
 	Kprintf("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
 
@@ -396,6 +516,8 @@ int xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 		goto err;
 	}
 	Kprintf("memory pool created: %lx\n", ctrl->memoryPool);
+
+	_NewMinList(&ctrl->pending_commands);
 
 	ctrl->hccr = hccr;
 	ctrl->hcor = hcor;

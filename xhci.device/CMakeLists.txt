@@ -3,7 +3,7 @@ project(xhci.device VERSION ${CMAKE_PROJECT_VERSION})
 
 add_link_options(-ffreestanding -nostdlib -nostartfiles -s -Wl,-e,_doNotExecute)
 add_compile_options(-Os -m68040 -Wall -Wextra -DDEBUG -fomit-frame-pointer)
-add_compile_definitions(PRIVATE DEVICE_IDSTRING="${VERSTRING}" DEVICE_VERSION=${PROJECT_VERSION_MAJOR} DEVICE_REVISION=${PROJECT_VERSION_MINOR} DEVICE_NAME="${PROJECT_NAME}")
+add_compile_definitions(PRIVATE DEVICE_IDSTRING="${VERSTRING}" DEVICE_VERSION=${PROJECT_VERSION_MAJOR} DEVICE_REVISION=${PROJECT_VERSION_MINOR} DEVICE_NAME="${PROJECT_NAME}" DEVICE_USE_MSI=TRUE)
 
 add_executable(xhci.device
     src/device.c

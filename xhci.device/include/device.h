@@ -12,13 +12,15 @@
 #include <exec/semaphores.h>
 #include <exec/interrupts.h>
 
-#include <devices/usbhardware.h>
+#include <devices/hcd_api.h>
 
 #define LIB_MIN_VERSION 39 /* we use memory pools */
 #define DEVICE_PRIORITY 90
 
 #define COMMAND_PROCESSED 1
 #define COMMAND_SCHEDULED 0
+
+#define CMD_INTERNAL_ABORT_REQUEST (CMD_NONSTD + 0x100)
 
 struct XHCIDevice;
 
@@ -31,6 +33,7 @@ struct XHCIUnit
 	LONG unitNumber;
 	LONG flags;
 
+	/* state */
 	struct Task *task;
 	struct xhci_ctrl *xhci_ctrl;
 
@@ -54,13 +57,10 @@ void UnitTaskStop(struct XHCIUnit *unit);
 int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
 int UnitClose(struct XHCIUnit *unit);
 
-void ProcessCommand(struct IOUsbHWReq *io);
+void ProcessCommand(struct USBIORequest *io);
 
-int xhci_intx_enable(struct XHCIUnit *unit);
-void xhci_intx_shutdown(struct XHCIUnit *unit);
-void xhci_intx_handle(struct XHCIUnit *unit);
-
-int xhci_msi_enable(struct XHCIUnit *unit);
-void xhci_msi_shutdown(struct XHCIUnit *unit);
+int xhci_int_enable(struct XHCIUnit *unit);
+void xhci_int_shutdown(struct XHCIUnit *unit);
+void xhci_int_rearm(struct XHCIUnit *unit);
 
 #endif

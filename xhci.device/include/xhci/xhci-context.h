@@ -199,6 +199,8 @@ struct xhci_ep_ctx
 #define EP_BPKTS(p) (((p) & 0x7f) << 0)
 #define EP_BBM(p) (((p) & 0x1) << 11)
 
+struct usb_device;
+
 /**
  * struct xhci_input_control_context
  * Input control context; see section 6.2.5.
@@ -217,9 +219,9 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int 
 void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx);
 
 u32 xhci_get_hardware_address(struct usb_device *udev);
+u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, unsigned int ep_index);
 
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
-void xhci_update_hub_tt(struct usb_device *udev);
 
 void xhci_update_maxpacket(struct usb_device *udev, unsigned int max_packet_size);
 int xhci_set_configuration(struct usb_device *udev, int config_value);
