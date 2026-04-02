@@ -210,7 +210,7 @@ static void build_route_string(struct usb_device *udev)
         return;
     }
 
-    unsigned int nibble = (udev->parent_port > 15)? 0xf : udev->parent_port & 0xF;
+    unsigned int nibble = (udev->parent_port > 15) ? 0xf : udev->parent_port & 0xF;
     udev->route_depth = parent->route_depth + 1;
     if (parent->route_depth > 5)
     {
@@ -259,10 +259,10 @@ static u32 find_root_port(struct usb_device *udev)
  */
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev)
 {
-    udev->parent = ctrl->pending_parent;
-    udev->parent_port = ctrl->pending_parent_port;
-    KprintfH("Setting up addressable virtual device addr=%ld pending_parent_addr=%ld pending_parent_port=%ld\n",
-             (LONG)udev->virtual_address, (LONG)(ctrl->pending_parent ? ctrl->pending_parent->virtual_address : 0), ctrl->pending_parent_port);
+    KprintfH("Setting up addressable virtual device addr=%ld parent_addr=%ld parent_port=%ld\n",
+             (LONG)udev->virtual_address,
+             (LONG)(udev->parent ? udev->parent->virtual_address : 0),
+             udev->parent_port);
     build_route_string(udev);
 
     /* Extract the EP0 and Slot Ctrl */
@@ -358,6 +358,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     switch (udev->speed)
     {
     case USB_SPEED_SUPER:
+    case USB_SPEED_SUPER_PLUS:
         ep0_ctx->ep_info2 |= LE32(MAX_PACKET(512));
         max_packet_size = 512;
         KprintfH("xhci_setup_addressable_virt_dev: MPS=512\n");
@@ -420,7 +421,6 @@ static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ct
         return;
 
     struct xhci_ctrl *ctrl = udev->controller;
-
 
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, in_ctx);
     if (!slot_ctx)

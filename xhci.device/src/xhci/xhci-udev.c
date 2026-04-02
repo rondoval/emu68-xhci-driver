@@ -1049,9 +1049,19 @@ static enum usb_device_speed xhci_udev_speed_from_ss_port_status(u16 status)
         return USB_SPEED_FULL;
     case USB_SS_PORT_STAT_SPEED_HIGH:
         return USB_SPEED_HIGH;
-    default:
+    case USB_SS_PORT_STAT_SPEED_5GBPS:
         return USB_SPEED_SUPER;
+    default:
+        return USB_SPEED_UNKNOWN;
     }
+}
+
+static BOOL xhci_udev_ss_port_ready_for_attach(u16 status, enum usb_device_speed speed)
+{
+    return (status & USB_PORT_STAT_CONNECTION) != 0 &&
+           (status & USB_PORT_STAT_ENABLE) != 0 &&
+           (status & USB_PORT_STAT_RESET) == 0 &&
+           speed != USB_SPEED_UNKNOWN;
 }
 
 static struct usb_device *xhci_udev_find_child_on_port(struct usb_device *hub, unsigned int port)
@@ -1372,8 +1382,10 @@ static void handle_get_port_status(struct usb_device *udev, struct USBIORequest 
 
     u16 wStatus = LE16(((u16 *)io->data_buffer)[0]);
     u16 wChange = LE16(((u16 *)io->data_buffer)[1]);
+    const u16 rawStatus = wStatus;
+    const u16 rawChange = wChange;
     /* Extract speed from the appropriate bit positions based on hub type */
-    enum usb_device_speed speed = (udev->ss_hub_emulation) ? xhci_udev_speed_from_ss_port_status(wStatus) : xhci_udev_speed_from_port_status(wStatus);
+    enum usb_device_speed speed = (udev->ss_hub_emulation) ? xhci_udev_speed_from_ss_port_status(rawStatus) : xhci_udev_speed_from_port_status(wStatus);
 
     if (udev->ss_hub_emulation)
     {
@@ -1405,19 +1417,27 @@ static void handle_get_port_status(struct usb_device *udev, struct USBIORequest 
         }
     }
 
-    /* USB 3.0 port transitions to enabled automatically */
-    if (speed == USB_SPEED_SUPER && (wChange & USB_PORT_STAT_C_CONNECTION) && (wStatus & USB_PORT_STAT_CONNECTION))
+    /* SS hub: use raw (pre-mapping) status to detect attach readiness.
+     * USB 3.0 ports transition to enabled automatically after link training,
+     * so we wait for connected + enabled + known speed before arming
+     * pending_parent for the next SET_ADDRESS. */
+    if (udev->ss_hub_emulation)
     {
-        /* Remember parent/port for the next default-address attach without split info. */
-        KprintfH("hub addr=%ld port=%ld speed=%ld connected; remembering for pending attach (status=%04lx)\n",
-                 (LONG)udev->virtual_address, (LONG)port, (LONG)speed, (ULONG)wStatus);
-        ctrl->pending_parent = udev;
-        ctrl->pending_parent_port = port;
-        ctrl->pending_parent_speed = speed;
+        if (xhci_udev_ss_port_ready_for_attach(rawStatus, speed) &&
+            (rawChange & (USB_PORT_STAT_C_CONNECTION |
+                          USB_PORT_STAT_C_RESET |
+                          USB_SS_PORT_STAT_C_BH_RESET |
+                          USB_SS_PORT_STAT_C_LINK_STATE)))
+        {
+            KprintfH("hub addr=%ld port=%ld speed=%ld SS attach ready; remembering for pending attach (raw_status=%04lx)\n",
+                     (LONG)udev->virtual_address, (LONG)port, (LONG)speed, (ULONG)rawStatus);
+            ctrl->pending_parent = udev;
+            ctrl->pending_parent_port = port;
+            ctrl->pending_parent_speed = speed;
+        }
     }
-
     /* USB 2.0 enables device after reset completes */
-    if ((wChange & USB_PORT_STAT_C_RESET) && (wStatus & (USB_PORT_STAT_CONNECTION | USB_PORT_STAT_ENABLE)))
+    else if ((wChange & USB_PORT_STAT_C_RESET) && (wStatus & (USB_PORT_STAT_CONNECTION | USB_PORT_STAT_ENABLE)))
     {
         KprintfH("hub addr=%ld port=%ld speed=%ld reset-complete; remembering for pending attach (status=%04lx)\n",
                  (LONG)udev->virtual_address, (LONG)port, (LONG)speed, (ULONG)wStatus);

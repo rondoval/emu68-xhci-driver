@@ -129,13 +129,28 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
             break;
 
         case TRB_PORT_STATUS:
-            KprintfH("Port Status Change Event TRB: (%08lx %08lx %08lx %08lx)\n",
-                     (ULONG)LE32(event->generic.field[0]),
-                     (ULONG)LE32(event->generic.field[1]),
-                     (ULONG)LE32(event->generic.field[2]),
-                     (ULONG)LE32(event->generic.field[3]));
+        {
+#ifdef DEBUG_HIGH
+            const ULONG port_field = (ULONG)LE32(event->generic.field[0]);
+            const ULONG flags = (ULONG)LE32(event->generic.field[3]);
+            const ULONG port_id = (ULONG)GET_PORT_ID(port_field);
+            ULONG portsc = 0;
+
+            if (port_id > 0 && port_id <= MAX_HC_PORTS)
+                portsc = readl(&ctrl->hcor->portregs[port_id - 1].or_portsc);
+
+            Kprintf("Port Status Change Event port=%lu portsc=%08lx usbsts=%08lx trb=(%08lx %08lx %08lx %08lx)\n",
+                    port_id,
+                    portsc,
+                    (ULONG)readl(&ctrl->hcor->or_usbsts),
+                    port_field,
+                    (ULONG)LE32(event->generic.field[1]),
+                    (ULONG)LE32(event->generic.field[2]),
+                    flags);
+#endif
             xhci_roothub_complete_int_request(ctrl->root_hub);
             break;
+        }
         default:
             Kprintf("Unexpected XHCI event type %ld, skipping... (%08lx %08lx %08lx %08lx)\n",
                     (ULONG)type,

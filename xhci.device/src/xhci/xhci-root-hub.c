@@ -778,9 +778,23 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		writel(reg, &port->or_portsc);
 		break;
 	case USB_PORT_FEAT_C_CONNECTION:
-	case USB_PORT_FEAT_C_RESET:
 	case USB_PORT_FEAT_C_OVER_CURRENT:
 		xhci_roothub_clear_port_change_bit(wValue, portNo, &port->or_portsc, reg);
+		break;
+	case USB_PORT_FEAT_C_RESET:
+		xhci_roothub_clear_port_change_bit(wValue, portNo, &port->or_portsc, reg);
+		/* For USB 3.0 ports: a warm reset sets both PRC and WRC.
+		 * The USB 2.0 stack won't send CLEAR_FEATURE(C_BH_PORT_RESET)
+		 * so we clear WRC here alongside PRC. */
+		if (rh->ports[portNo - 1].major_revision >= 3)
+		{
+			u32 tmp = readl(&port->or_portsc);
+			if (tmp & PORT_WRC)
+			{
+				tmp = xhci_roothub_port_state_to_neutral(tmp);
+				writel(tmp | PORT_WRC, &port->or_portsc);
+			}
+		}
 		break;
 	case USB_PORT_FEAT_CONNECTION:
 	case USB_PORT_FEAT_OVER_CURRENT:
@@ -1023,10 +1037,77 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	{
 	// Common for USB2 and USB3 ports
 	case USB_PORT_FEAT_RESET:
-		KprintfH("Set port %ld PORT_RESET\n", portNo);
-		reg |= PORT_RESET;
-		writel(reg, &port->or_portsc);
+	{
+		/* USB 3.0 ports in Compliance or SS.Inactive state need a warm reset
+		 * to recover from link training failure. A hot reset alone may briefly
+		 * train the link but leave it unstable. This mirrors Linux's
+		 * hub_port_warm_reset_required() logic in hub.c. */
+		u32 pls = reg & PORT_PLS_MASK;
+		if (rh->ports[portNo - 1].major_revision >= 3 &&
+			(pls == XDEV_COMPLIANCE || pls == XDEV_INACTIVE))
+		{
+			Kprintf("SS port %ld PLS=%ld (%s); upgrading to warm reset (portsc=%08lx)\n",
+					(LONG)portNo, (LONG)(pls >> 5),
+					pls == XDEV_COMPLIANCE ? "Compliance" : "SS.Inactive",
+					(ULONG)readl(&port->or_portsc));
+
+			/* Clear all pending change bits before the warm reset.
+			 * Stale change bits (especially PLC from the Compliance
+			 * transition) can cause the VL805 to botch the warm reset:
+			 * the link bounces through disconnect/reconnect and recovers
+			 * via normal link training instead, leaving WRC=0 and the
+			 * device in a state where ADDRESS_DEVICE times out. */
+			writel(reg | PORT_CSC | PORT_PEC | PORT_WRC |
+					   PORT_OCC | PORT_RC | PORT_PLC | PORT_CEC,
+				   &port->or_portsc);
+
+			/* Re-read and re-neutralize after clearing change bits */
+			reg = readl(&port->or_portsc);
+			reg = xhci_roothub_port_state_to_neutral(reg);
+
+			/* Initiate warm reset */
+			writel(reg | PORT_WR, &port->or_portsc);
+
+			/* Poll until the warm reset completes (PORT_RESET clears)
+			 * or we time out.  Linux's hub_port_wait_reset() does the
+			 * same at the hub-driver level. */
+			{
+				int attempts;
+				u32 temp;
+				for (attempts = 0; attempts < 100; attempts++)
+				{
+					xhci_roothub_delay_ms(10);
+					temp = readl(&port->or_portsc);
+					if (!(temp & PORT_RESET))
+						break;
+				}
+
+				if (attempts >= 100)
+				{
+					Kprintf("SS port %ld warm reset timed out after 1s "
+							"(portsc=%08lx)\n",
+							(LONG)portNo, (ULONG)temp);
+				}
+				else
+				{
+					Kprintf("SS port %ld warm reset completed in %ld0ms "
+							"(portsc=%08lx)\n",
+							(LONG)portNo, (LONG)attempts, (ULONG)temp);
+
+					/* Allow the link partner to stabilise before
+					 * the stack tries ADDRESS_DEVICE. */
+					xhci_roothub_delay_ms(50);
+				}
+			}
+		}
+		else
+		{
+			KprintfH("Set port %ld PORT_RESET\n", portNo);
+			reg |= PORT_RESET;
+			writel(reg, &port->or_portsc);
+		}
 		break;
+	}
 	case USB_PORT_FEAT_POWER:
 		KprintfH("Set port %ld PORT_POWER\n", portNo);
 		reg |= PORT_POWER;
