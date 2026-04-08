@@ -223,12 +223,19 @@ Build dependencies (must be installed first):
 | `GIC400` | `emu68-gic400-library` | ARM GIC-400 interrupt controller (MSI) |
 
 ```sh
-cd build
-make -j4
-make install    # installs xhci.device into ./install/
+cmake -S . -B build \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain.cmake \
+  -DCMAKE_PREFIX_PATH=/path/to/emu68-sdk \
+  -DCMAKE_INSTALL_PREFIX=/path/to/emu68-sdk
+cmake --build build
+cmake --install build
 ```
 
-Copy `install/xhci.device` to `DEVS:USBHardware/` on the Amiga.
+Recommended workflow: install all dependencies and this package into the same prefix.
+
+If you keep dependencies in separate install trees instead, set `CMAKE_PREFIX_PATH` to the `emu68-common` and `emu68-pcie-library` install prefixes.
+
+The installed binary is written to `/path/to/emu68-sdk/DEVS/USBHardware/xhci.device`.
 
 ---
 

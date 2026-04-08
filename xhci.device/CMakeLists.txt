@@ -33,4 +33,4 @@ target_link_libraries(xhci.device
         Emu68PCIe::pcie
 )
 
-install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device DESTINATION .)
+install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device DESTINATION DEVS/USBHardware)

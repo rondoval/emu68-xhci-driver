@@ -873,6 +873,8 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 		u32 remainder = xhci_td_remainder(running_total, trb_buff_len,
 										  length, ep_ring->max_packet_size,
 										  num_trbs > 1);
+		//TODO TBC in isoch - length_field. set ETE=1. 4.11.2.3
+		//TODO TLBPC in isoch - field3
 
 		u32 length_field = (TRB_LEN(trb_buff_len) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0));
 

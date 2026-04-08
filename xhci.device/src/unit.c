@@ -19,7 +19,6 @@
 #include <minlist.h>
 #include <devtree.h>
 
-#include <mbox.h>
 #include <msg.h>
 #include <devices/hcd_api.h>
 #include <pci_types.h>
@@ -140,14 +139,7 @@ static int pcie_init(void)
 
 static int vl805_init(void)
 {
-	int ret = mbox_parse_devtree();
-	if (ret != 0)
-	{
-		Kprintf("[vl805] %s: mbox_parse_devtree failed: %ld\n", __func__, ret);
-		return -ENODEV;
-	}
-
-	ret = bcm2711_notify_vl805_reset();
+	int ret = bcm2711_notify_vl805_reset();
 	if (ret != 0)
 	{
 		Kprintf("[vl805] %s: Failed to load VL805 firmware: %ld\n", __func__, ret);

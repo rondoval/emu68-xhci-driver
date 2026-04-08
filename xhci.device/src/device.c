@@ -115,7 +115,7 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
     GIC400_Base = OpenLibrary((CONST_STRPTR) "gic400.library", 0);
     if (GIC400_Base == NULL)
     {
-        Kprintf("[genet] %s: Failed to open gic400.library\n", __func__);
+        Kprintf("[xhci] %s: Failed to open gic400.library\n", __func__);
         return NULL;
     }
 
