@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0+
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
-#include <clib/utility_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
-#include <proto/utility.h>
 #endif
 
 #include <exec/types.h>
@@ -93,31 +93,55 @@ static const APTR funcTable[] = {
     (APTR)abortIO,
     (APTR)-1};
 
-struct ExecBase *SysBase;
-struct Library *UtilityBase = NULL;
-struct Library *GIC400_Base = NULL;
+static void xhci_close_libraries(struct XHCIDevice *base)
+{
+    if (base->gic400Base != NULL)
+    {
+        CloseLibrary(base->gic400Base);
+        base->gic400Base = NULL;
+    }
+
+    if (base->utilityBase != NULL)
+    {
+        CloseLibrary(base->utilityBase);
+        base->utilityBase = NULL;
+    }
+}
+
+static int xhci_open_libraries(struct XHCIDevice *base)
+{
+    if (base->utilityBase != NULL && base->gic400Base != NULL)
+        return 0;
+
+    xhci_close_libraries(base);
+
+    base->utilityBase = OpenLibrary((CONST_STRPTR) "utility.library", LIB_MIN_VERSION);
+    if (base->utilityBase == NULL)
+    {
+        Kprintf("[xhci] %s: Failed to open utility.library\n", __func__);
+        return -1;
+    }
+
+    base->gic400Base = OpenLibrary((CONST_STRPTR) "gic400.library", 0);
+    if (base->gic400Base == NULL)
+    {
+        Kprintf("[xhci] %s: Failed to open gic400.library\n", __func__);
+        xhci_close_libraries(base);
+        return -1;
+    }
+
+    return 0;
+}
 
 APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *_SysBase asm("a6"))
 {
-    SysBase = _SysBase;
+    (void)_SysBase;
     Kprintf("[xhci] %s: Initializing device\n", __func__);
     base->segList = segList;
     base->device.dd_Library.lib_Revision = DEVICE_REVISION;
     _NewMinList(&base->units);
-
-    UtilityBase = OpenLibrary((CONST_STRPTR)"utility.library", LIB_MIN_VERSION);
-    if (UtilityBase == NULL)
-    {
-        Kprintf("[xhci] %s: Failed to open utility.library\n", __func__);
-        return NULL;
-    }
-
-    GIC400_Base = OpenLibrary((CONST_STRPTR) "gic400.library", 0);
-    if (GIC400_Base == NULL)
-    {
-        Kprintf("[xhci] %s: Failed to open gic400.library\n", __func__);
-        return NULL;
-    }
+    base->utilityBase = NULL;
+    base->gic400Base = NULL;
 
     return base;
 }
@@ -125,6 +149,9 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
 void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
              ULONG flags asm("d1"), struct XHCIDevice *base asm("a6"))
 {
+    BOOL firstOpen = FALSE;
+    BOOL createdUnit = FALSE;
+
     Kprintf("[xhci] %s: Opening device with unit number %ld and flags %lx\n", __func__, unitNumber, flags);
 
     if (io->req.io_Message.mn_Length < sizeof(struct IOStdReq))
@@ -136,7 +163,7 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
 
     // Seek through the list of units to find the one with the requested unit number
     struct XHCIUnit *unit = NULL;
-    for(struct MinNode *node = base->units.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
+    for (struct MinNode *node = base->units.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
     {
         struct XHCIUnit *currentUnit = (struct XHCIUnit *)node;
         if (currentUnit->unitNumber == unitNumber)
@@ -156,13 +183,27 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
             io->req.io_Error = IOERR_OPENFAIL;
             return;
         }
+        unit->device = base;
         AddTailMinList(&base->units, (struct MinNode *)unit);
+        createdUnit = TRUE;
     }
 
     if (unit->unit.unit_OpenCnt > 0)
     {
         Kprintf("[xhci] %s: Unit is already open, we only support exclusive access\n", __func__);
         io->req.io_Error = IOERR_UNITBUSY;
+        return;
+    }
+
+    firstOpen = (base->device.dd_Library.lib_OpenCnt == 0);
+    if (firstOpen && xhci_open_libraries(base) != 0)
+    {
+        io->req.io_Error = IOERR_OPENFAIL;
+        if (createdUnit)
+        {
+            RemoveMinNode((struct MinNode *)unit);
+            FreeMem(unit, sizeof(struct XHCIUnit));
+        }
         return;
     }
 
@@ -181,9 +222,11 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
         Kprintf("[xhci] %s: Failed to open unit, error code %ld\n", __func__, result);
         io->req.io_Error = IOERR_OPENFAIL;
 
-        // Remove the failed unit from the list and free its memory
         RemoveMinNode((struct MinNode *)unit);
         FreeMem(unit, sizeof(struct XHCIUnit));
+
+        if (firstOpen)
+            xhci_close_libraries(base);
     }
 
     /* In contrast to normal library there is no need to return anything */
@@ -207,6 +250,7 @@ ULONG closeLib(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a
 
     if (base->device.dd_Library.lib_OpenCnt == 0)
     {
+        xhci_close_libraries(base);
         if (base->device.dd_Library.lib_Flags & LIBF_DELEXP)
         {
             return expungeLib(base);
@@ -227,18 +271,6 @@ ULONG expungeLib(struct XHCIDevice *base asm("a6"))
     }
     else
     {
-        if (UtilityBase != NULL)
-        {
-            CloseLibrary(UtilityBase);
-            UtilityBase = NULL;
-        }
-
-        if (GIC400_Base != NULL)
-        {
-            CloseLibrary(GIC400_Base);
-            GIC400_Base = NULL;
-        }
-
         ULONG segList = base->segList;
 
         /* Remove yourself from list of devices */

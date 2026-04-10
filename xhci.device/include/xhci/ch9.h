@@ -33,7 +33,8 @@
 #ifndef __LINUX_USB_CH9_H
 #define __LINUX_USB_CH9_H
 
-#include <compat.h>
+#include <emu_byteorder.h>
+#include <emu_types.h>
 
 /*-------------------------------------------------------------------------*/
 

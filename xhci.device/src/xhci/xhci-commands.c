@@ -1,6 +1,9 @@
 #include <debug.h>
 #include <config.h>
-#include <compat.h>
+
+#include <emu_iomem.h>
+#include <emu_memory.h>
+#include <emu_timing.h>
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>

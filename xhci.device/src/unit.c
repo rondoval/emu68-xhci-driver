@@ -1,39 +1,43 @@
 // SPDX-License-Identifier: GPL-2.0+
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
-#include <clib/dos_protos.h>
-#include <clib/utility_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
-#include <proto/dos.h>
-#include <proto/utility.h>
 #endif
 
 #include <exec/execbase.h>
 #include <exec/types.h>
-#include <stdarg.h>
+#include <emu_errors.h>
+#include <emu_iomem.h>
+#include <emu_string.h>
+#include <emu_timing.h>
+#include <emu_types.h>
 
 #include <debug.h>
 #include <device.h>
-#include <compat.h>
 #include <minlist.h>
+
+#define __NOLIBBASE__
 #include <devtree.h>
 
-#include <msg.h>
 #include <devices/hcd_api.h>
 #include <pci_types.h>
 #include <pci.h>
 #include <xhci/xhci.h>
 #include <config.h>
 
-static struct pci_controller *pcie = NULL;
-extern struct MinList pci_bus_list;
-
 static int unit_init_onboard_xhci(struct XHCIUnit *unit,
 								  struct xhci_hccr **hccr,
 								  struct xhci_hcor **hcor)
 {
-	DT_Init();
+	APTR DeviceTreeBase = OpenResource((CONST_STRPTR) "devicetree.resource");
+	if (DeviceTreeBase == NULL)
+	{
+		Kprintf("[bcm-xhci] %s: Failed to open devicetree.resource\n", __func__);
+		return -1;
+	}
 
 	APTR key = DT_OpenKey((CONST_STRPTR) "/scb/xhci");
 	if (key == NULL)
@@ -43,7 +47,7 @@ static int unit_init_onboard_xhci(struct XHCIUnit *unit,
 	}
 
 	CONST_STRPTR status = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "status"));
-	if (status && Stricmp((STRPTR)status, (STRPTR)"disabled") == 0)
+	if (status != NULL && _Stricmp(status, (CONST_STRPTR)"disabled") == 0)
 	{
 		Kprintf("[bcm-xhci] %s: Node %s is disabled\n", __func__, "/scb/xhci");
 		DT_CloseKey(key);
@@ -82,27 +86,28 @@ static int unit_init_onboard_xhci(struct XHCIUnit *unit,
 /*
  * Initialize and enumerate the PCIe bus
  */
-static int pcie_init(void)
+static int pcie_init(struct XHCIDevice *device)
 {
-	if (pcie != NULL)
+	if (device->pcie != NULL)
 		return 0;
 
-	pcie = AllocMem(sizeof(struct pci_controller), MEMF_CLEAR | MEMF_PUBLIC);
-	if (!pcie)
+	device->pcie = AllocMem(sizeof(struct pci_controller), MEMF_CLEAR | MEMF_PUBLIC);
+	if (!device->pcie)
 	{
 		Kprintf("[pcie] %s: Failed to allocate memory for PCIe controller\n", __func__);
 		return -ENOMEM;
 	}
+	_NewMinList(&device->pcie->buses);
 
-	int ret = brcm_pcie_probe(pcie, /* bus number */ 0);
+	int ret = brcm_pcie_probe(device->pcie, /* bus number */ 0);
 	if (ret < 0)
 	{
 		Kprintf("[pcie] %s: brcm_pcie_probe failed: %ld\n", __func__, ret);
+		FreeMem(device->pcie, sizeof(*device->pcie));
+		device->pcie = NULL;
 		return -ENODEV;
 	}
 	Kprintf("[pcie] %s: brcm_pcie_probe succeeded\n", __func__);
-
-	_NewMinList(&pci_bus_list);
 
 	struct pci_bus *root_bus = AllocMem(sizeof(*root_bus), MEMF_CLEAR);
 	if (!root_bus)
@@ -112,18 +117,19 @@ static int pcie_init(void)
 	}
 
 	_NewMinList(&root_bus->devices);
-	root_bus->controller = pcie;
+	root_bus->controller = device->pcie;
 	root_bus->parent = NULL;
 	root_bus->pci_bridge = NULL;
 	CopyMem((APTR)"pcie0", root_bus->name, sizeof("pcie0"));
 	root_bus->bus_number = 0;
 	root_bus->bus_number_last_sub = 0;
-	AddTailMinList(&pci_bus_list, (struct MinNode *)root_bus);
+	AddTailMinList(&device->pcie->buses, (struct MinNode *)root_bus);
 
 	ret = pci_bind_bus_devices(root_bus);
 	if (ret)
 	{
 		Kprintf("[pcie] %s: pci_bind_bus_devices failed: %ld\n", __func__, ret);
+		FreeMem(root_bus, sizeof(*root_bus));
 		return -ENODEV;
 	}
 
@@ -131,6 +137,7 @@ static int pcie_init(void)
 	if (ret < 0)
 	{
 		Kprintf("[pcie] %s: pci_auto_config_devices failed: %ld\n", __func__, ret);
+		FreeMem(root_bus, sizeof(*root_bus));
 		return -ENODEV;
 	}
 
@@ -139,7 +146,7 @@ static int pcie_init(void)
 
 static int vl805_init(void)
 {
-	int ret = bcm2711_notify_vl805_reset();
+	int ret = bcm2711_reload_vl805_firmware();
 	if (ret != 0)
 	{
 		Kprintf("[vl805] %s: Failed to load VL805 firmware: %ld\n", __func__, ret);
@@ -211,10 +218,11 @@ static int pcie_xhci_init(struct pci_device *dev, struct xhci_hccr **hccr,
 
 static int unit_init_pcie_xhci(LONG unitNumber, struct pci_device **ret_xhci_dev,
 							   struct xhci_hccr **ret_hccr,
-							   struct xhci_hcor **ret_hcor)
+							   struct xhci_hcor **ret_hcor,
+							   struct XHCIDevice *device)
 {
 	struct pci_device *xhci_dev = NULL;
-	int result = pcie_init();
+	int result = pcie_init(device);
 	if (result != 0)
 	{
 		Kprintf("[xhci] %s: Failed to initialize PCIe: %ld\n", __func__, result);
@@ -222,7 +230,7 @@ static int unit_init_pcie_xhci(LONG unitNumber, struct pci_device **ret_xhci_dev
 	}
 
 	/* -1 because unit 0 is always the OTG port and dm_pci_find_class indexes from 0 */
-	dm_pci_find_class(0x0C0330, unitNumber - 1, &xhci_dev);
+	dm_pci_find_class(device->pcie, 0x0C0330, unitNumber - 1, &xhci_dev);
 	if (xhci_dev == NULL)
 	{
 		Kprintf("[xhci] %s: Failed to find XHCI PCI device\n", __func__);
@@ -267,7 +275,7 @@ static int unit_init_xhci_hw(struct XHCIUnit *unit, LONG unitNumber,
 	if (unitNumber == 0)
 		return unit_init_onboard_xhci(unit, ret_hccr, ret_hcor);
 
-	return unit_init_pcie_xhci(unitNumber, ret_xhci_dev, ret_hccr, ret_hcor);
+	return unit_init_pcie_xhci(unitNumber, ret_xhci_dev, ret_hccr, ret_hcor, unit->device);
 }
 
 static int unit_attach_xhci(struct XHCIUnit *unit, struct pci_device *xhci_dev,
@@ -280,6 +288,7 @@ static int unit_attach_xhci(struct XHCIUnit *unit, struct pci_device *xhci_dev,
 		return ERR_ALLOC_ERROR;
 	}
 
+	xhci_ctrl->utilityBase = unit->device->utilityBase;
 	xhci_ctrl->pci_dev = xhci_dev;
 
 	int result = xhci_register(xhci_ctrl, hccr, hcor);

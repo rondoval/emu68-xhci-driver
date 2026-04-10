@@ -28,6 +28,7 @@ struct XHCIUnit
 {
 	struct Unit unit;
 	APTR memoryPool;
+	struct XHCIDevice *device;
 
 	/* config */
 	LONG unitNumber;
@@ -40,12 +41,17 @@ struct XHCIUnit
 	struct Interrupt irq_isr;
 	LONG irq_line;
 	BYTE irq_signal;
+	char vendor_str[5];
+	char device_str[5];
 };
 
 struct XHCIDevice
 {
 	struct Device device;
 	ULONG segList;
+	struct Library *utilityBase;
+	struct Library *gic400Base;
+	struct pci_controller *pcie;
 
 	struct MinList units;
 };

@@ -16,11 +16,15 @@
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
 #endif
 
-#include <compat.h>
 #include <debug.h>
+
+#include <emu_iomem.h>
+#include <emu_memory.h>
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>

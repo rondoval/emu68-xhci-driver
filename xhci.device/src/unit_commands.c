@@ -3,7 +3,10 @@
 #include <clib/exec_protos.h>
 #include <clib/utility_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
+#define UTILITY_BASE_NAME unit->device->utilityBase
 #include <proto/utility.h>
 #endif
 
@@ -16,6 +19,7 @@
 #include <config.h>
 #include <device.h>
 #include <debug.h>
+#include <emu_memory.h>
 #include <xhci/usb_defs.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
@@ -124,9 +128,6 @@ static void uword_to_hex(UWORD value, UBYTE *buf)
     buf[4] = '\0';
 }
 
-static char vendor_str[5];
-static char device_str[5];
-
 static inline int Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
 {
     KprintfH("[xhci] %s: CMD_DEVICE_QUERY\n", __func__);
@@ -160,8 +161,8 @@ static inline int Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
         case TAG_DEVICE_VENDOR:
             if (unit->xhci_ctrl->pci_dev)
             {
-                uword_to_hex(unit->xhci_ctrl->pci_dev->vendor, (UBYTE *)vendor_str);
-                *out = (ULONG)(APTR)vendor_str;
+                uword_to_hex(unit->xhci_ctrl->pci_dev->vendor, (UBYTE *)unit->vendor_str);
+                *out = (ULONG)(APTR)unit->vendor_str;
             }
             else
                 *out = (ULONG)(APTR) "Broadcom";
@@ -171,8 +172,8 @@ static inline int Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
         case TAG_DEVICE_PRODUCT:
             if (unit->xhci_ctrl->pci_dev)
             {
-                uword_to_hex(unit->xhci_ctrl->pci_dev->device, (UBYTE *)device_str);
-                *out = (ULONG)(APTR)device_str;
+                uword_to_hex(unit->xhci_ctrl->pci_dev->device, (UBYTE *)unit->device_str);
+                *out = (ULONG)(APTR)unit->device_str;
             }
             else
                 *out = (ULONG)(APTR) "OTG controller";

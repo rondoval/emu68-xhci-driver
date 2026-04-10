@@ -2,7 +2,7 @@
 #define __XHCI_DESCRIPTORS_H__
 
 #include <devices/hcd_api.h>
-#include <compat.h>
+#include <emu_types.h>
 #include <xhci/ch9.h>
 
 struct usb_device;

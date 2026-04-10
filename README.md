@@ -225,8 +225,8 @@ Build dependencies (must be installed first):
 ```sh
 cmake -S . -B build \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain.cmake \
-  -DCMAKE_PREFIX_PATH=/path/to/emu68-sdk \
-  -DCMAKE_INSTALL_PREFIX=/path/to/emu68-sdk
+  -DCMAKE_PREFIX_PATH=/path/to/emu68-driver-stack \
+  -DCMAKE_INSTALL_PREFIX=/path/to/emu68-driver-stack
 cmake --build build
 cmake --install build
 ```
@@ -235,7 +235,7 @@ Recommended workflow: install all dependencies and this package into the same pr
 
 If you keep dependencies in separate install trees instead, set `CMAKE_PREFIX_PATH` to the `emu68-common` and `emu68-pcie-library` install prefixes.
 
-The installed binary is written to `/path/to/emu68-sdk/DEVS/USBHardware/xhci.device`.
+The installed binary is written to `/path/to/emu68-driver-stack/DEVS/USBHardware/xhci.device`.
 
 ---
 

@@ -3,7 +3,8 @@
 
 #include <exec/types.h>
 #include <devices/hcd_api.h>
-#include <compat.h>
+#include <emu_bits.h>
+#include <emu_byteorder.h>
 
 struct xhci_transfer_event
 {

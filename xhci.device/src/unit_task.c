@@ -3,13 +3,14 @@
 #include <clib/exec_protos.h>
 #include <clib/timer_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
 #include <proto/timer.h>
 #endif
 
 #include <dos/dos.h>
 
-#include <compat.h>
 #include <device.h>
 #include <minlist.h>
 #include <debug.h>

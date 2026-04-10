@@ -2,11 +2,14 @@
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
 #endif
 
 #include <device.h>
 #include <debug.h>
+#include <emu_memory.h>
 #include <devices/hcd_api.h>
 #include <xhci/xhci-udev.h>
 

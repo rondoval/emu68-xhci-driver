@@ -3,7 +3,6 @@
 
 #include <exec/types.h>
 #include <devices/hcd_api.h>
-#include <compat.h>
 #include <minlist.h>
 
 typedef struct MinList IOReqList;

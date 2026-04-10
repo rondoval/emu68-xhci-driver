@@ -2,11 +2,14 @@
 #include <clib/exec_protos.h>
 #include <clib/utility_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
+#define UTILITY_BASE_NAME ep_ctx->udev->controller->utilityBase
 #include <proto/utility.h>
 #endif
 
-#include <compat.h>
+#include <emu_memory.h>
 #include <debug.h>
 #include <config.h>
 #include <minlist.h>

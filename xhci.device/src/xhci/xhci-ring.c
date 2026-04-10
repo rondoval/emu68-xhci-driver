@@ -14,6 +14,7 @@
  */
 
 #include <debug.h>
+#include <emu_memory.h>
 
 #include <xhci/xhci-ring.h>
 

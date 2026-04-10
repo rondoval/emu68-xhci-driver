@@ -22,6 +22,7 @@
 #include <exec/memory.h>
 
 #include <debug.h>
+#include <emu_memory.h>
 #include <minlist.h>
 
 #include <xhci/xhci.h>

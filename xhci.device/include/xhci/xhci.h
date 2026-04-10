@@ -19,10 +19,13 @@
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
 #endif
 
-#include <compat.h>
+#include <emu_bits.h>
+#include <emu_iomem.h>
 #include <pci_types.h>
 #include <devices/hcd_api.h>
 #include <xhci/xhci-udev.h>
@@ -703,6 +706,7 @@ struct xhci_ctrl
 	u16 hci_version;
 
 	APTR memoryPool;
+	struct Library *utilityBase;
 	struct pci_device *pci_dev;
 	struct usb_device *devices_by_virtual_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];

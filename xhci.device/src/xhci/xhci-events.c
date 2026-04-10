@@ -14,13 +14,15 @@
  *	    Vikas Sajjan <vikas.sajjan@samsung.com>
  */
 #ifdef __INTELLISENSE__
-#include <clib/utility_protos.h>
 #else
-#include <proto/utility.h>
 #endif
 
-#include <compat.h>
 #include <debug.h>
+
+#include <emu_bits.h>
+#include <emu_byteorder.h>
+#include <emu_iomem.h>
+#include <emu_memory.h>
 
 #include <devices/hcd_api.h>
 #include <xhci/xhci.h>

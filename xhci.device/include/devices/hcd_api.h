@@ -1,7 +1,7 @@
 #ifndef __DRIVER_IFACE_H
 #define __DRIVER_IFACE_H
 
-#include <compat.h>
+#include <emu_types.h>
 #include <exec/io.h>
 
 #pragma pack(2)

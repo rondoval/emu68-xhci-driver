@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0+
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
-#include <clib/utility_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
-#include <proto/utility.h>
 #endif
 
 #include <devices/hcd_api.h>
@@ -22,7 +22,9 @@
 
 #include <device.h>
 #include <debug.h>
-#include <compat.h>
+#include <emu_bits.h>
+#include <emu_byteorder.h>
+#include <emu_memory.h>
 #include <minlist.h>
 
 #ifdef DEBUG
