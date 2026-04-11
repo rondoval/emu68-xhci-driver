@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef __XHCI_TD_H
 #define __XHCI_TD_H
 

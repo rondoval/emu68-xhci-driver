@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef __XHCI_ROOT_HUB_H
 #define __XHCI_ROOT_HUB_H
 

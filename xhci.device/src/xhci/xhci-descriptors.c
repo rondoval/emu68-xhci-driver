@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #include <exec/types.h>
 #include <xhci/ch9.h>
 #include <xhci/usb_defs.h>

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef __XHCI_RING_H
 #define __XHCI_RING_H
 

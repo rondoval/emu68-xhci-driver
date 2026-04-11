@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef __DRIVER_IFACE_H
 #define __DRIVER_IFACE_H
 

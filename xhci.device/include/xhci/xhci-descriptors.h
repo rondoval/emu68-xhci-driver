@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef __XHCI_DESCRIPTORS_H__
 #define __XHCI_DESCRIPTORS_H__
 

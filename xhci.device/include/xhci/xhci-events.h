@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef _XHCI_EVENTS_H_
 #define _XHCI_EVENTS_H_
 
