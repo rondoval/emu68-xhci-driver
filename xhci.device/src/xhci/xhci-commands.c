@@ -1,9 +1,9 @@
 #include <debug.h>
 #include <config.h>
 
-#include <emu_iomem.h>
-#include <emu_memory.h>
-#include <emu_timing.h>
+#include <iomem.h>
+#include <memory.h>
+#include <timing.h>
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
@@ -163,7 +163,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     }
 
     /* Add command handler to pending list */
-    struct pending_command *pending_cmd = AllocVecPooled(ctrl->memoryPool, sizeof(struct pending_command));
+    struct pending_command *pending_cmd = pool_zalloc(ctrl->memoryPool, sizeof(struct pending_command));
     if (!pending_cmd)
     {
         Kprintf("Failed to allocate pending command\n");
@@ -194,7 +194,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     /* Ring the command ring doorbell — suppressed while an abort is in
      * progress; COMP_CMD_STOP will restart the ring once the HC has stopped. */
     if (!ctrl->cmd_abort_pending)
-        writel(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
+        mmio_write32(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
 }
 
 /*
@@ -204,7 +204,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
 static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-    const u32 flags = LE32(event->event_cmd.flags);
+    const u32 flags = le32(event->event_cmd.flags);
     const ULONG slot_id = cmd->udev->slot_id;
     const ULONG ep_index = cmd->ep_index;
 
@@ -231,10 +231,10 @@ static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd,
 static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-    u32 flags = LE32(event->event_cmd.flags);
+    u32 flags = le32(event->event_cmd.flags);
     ULONG slot_id = cmd->udev->slot_id;
     ULONG ep_index = cmd->ep_index;
-    xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
+    xhci_comp_code comp = GET_COMP_CODE(le32(event->event_cmd.status));
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
     if (!ep_ctx)
     {
@@ -286,9 +286,9 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
 static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-    u32 flags = LE32(event->event_cmd.flags);
+    u32 flags = le32(event->event_cmd.flags);
     trb_type type = TRB_FIELD_TO_TYPE(flags);
-    xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
+    xhci_comp_code comp = GET_COMP_CODE(le32(event->event_cmd.status));
     ULONG slot_id = cmd->udev->slot_id;
     ULONG ep_index = cmd->ep_index;
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
@@ -343,7 +343,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
     trb_type type = cmd->type;
     const char *type_name = xhci_command_type_name(type);
 #endif
-    xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
+    xhci_comp_code comp = GET_COMP_CODE(le32(event->event_cmd.status));
 
 #ifdef DEBUG_HIGH
     if (type == TRB_EVAL_CONTEXT && cmd->udev)
@@ -355,11 +355,11 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     if (comp != COMP_SUCCESS)
     {
-        KprintfH("ERROR: %s command for slot %ld returned completion code 0x%lx.\n", type_name, TRB_TO_SLOT_ID(LE32(event->event_cmd.flags)), (ULONG)comp);
+        KprintfH("ERROR: %s command for slot %ld returned completion code 0x%lx.\n", type_name, TRB_TO_SLOT_ID(le32(event->event_cmd.flags)), (ULONG)comp);
         return;
     }
 
-    KprintfH("%s command for slot %ld completed successfully\n", type_name, TRB_TO_SLOT_ID(LE32(event->event_cmd.flags)));
+    KprintfH("%s command for slot %ld completed successfully\n", type_name, TRB_TO_SLOT_ID(le32(event->event_cmd.flags)));
 
     cmd->udev->slot_state = USB_DEV_SLOT_STATE_CONFIGURED;
 
@@ -375,8 +375,8 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
 static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
-    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
-    if (GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
+    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)le32(event->event_cmd.status), (ULONG)le32(event->event_cmd.flags));
+    if (GET_COMP_CODE(le32(event->event_cmd.status)) != COMP_SUCCESS)
     {
         Kprintf("ERROR: Enable Slot command failed.\n");
         xhci_udev_io_reply_failed(ctrl, cmd->req, ERR_HCI_ERROR);
@@ -384,7 +384,7 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
     }
 
     struct usb_device *udev = cmd->udev;
-    int slot_id = TRB_TO_SLOT_ID(LE32(event->event_cmd.flags));
+    int slot_id = TRB_TO_SLOT_ID(le32(event->event_cmd.flags));
 
     udev->slot_id = slot_id;
     udev->slot_state = USB_DEV_SLOT_STATE_ENABLED;
@@ -392,10 +392,10 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
     KprintfH("assigned slot_id=%ld for addr=%lu\n", (ULONG)slot_id, (ULONG)udev->virtual_address);
 
     /* Point to output device context in dcbaa. */
-    ctrl->dcbaa->dev_context_ptrs[slot_id] = LE64((dma_addr_t)udev->out_ctx->bytes);
+    ctrl->dcbaa->dev_context_ptrs[slot_id] = le64((dma_addr_t)udev->out_ctx->bytes);
 
     xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[slot_id], sizeof(__le64));
-    KprintfH("DCBAA[%ld]=%lx\n", (ULONG)slot_id, (ULONG)LE64(ctrl->dcbaa->dev_context_ptrs[slot_id]));
+    KprintfH("DCBAA[%ld]=%lx\n", (ULONG)slot_id, (ULONG)le64(ctrl->dcbaa->dev_context_ptrs[slot_id]));
 
     // Continue with Address Device command, passing cmd->req
     xhci_address_device(udev, cmd->req);
@@ -404,8 +404,8 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
 static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
-    xhci_comp_code comp = GET_COMP_CODE(LE32(event->event_cmd.status));
+    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)le32(event->event_cmd.status), (ULONG)le32(event->event_cmd.flags));
+    xhci_comp_code comp = GET_COMP_CODE(le32(event->event_cmd.status));
 
     if (comp != COMP_SUCCESS)
     {
@@ -423,10 +423,10 @@ static void handle_disable_slot(struct xhci_ctrl *ctrl, struct pending_command *
 static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
+    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)le32(event->event_cmd.status), (ULONG)le32(event->event_cmd.flags));
 
     int err = ERR_NO_ERROR;
-    switch (GET_COMP_CODE(LE32(event->event_cmd.status)))
+    switch (GET_COMP_CODE(le32(event->event_cmd.status)))
     {
     case COMP_CTX_STATE:
     case COMP_EBADSLT:
@@ -446,7 +446,7 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
         break;
     default:
         Kprintf("ERROR: unexpected command completion code 0x%lx.\n",
-                GET_COMP_CODE(LE32(event->event_cmd.status)));
+                GET_COMP_CODE(le32(event->event_cmd.status)));
         err = ERR_HCI_ERROR;
         break;
     }
@@ -498,8 +498,8 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
 static void handle_reset_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)LE32(event->event_cmd.status), (ULONG)LE32(event->event_cmd.flags));
-    if (GET_COMP_CODE(LE32(event->event_cmd.status)) != COMP_SUCCESS)
+    KprintfH("event status=%08lx flags=%08lx\n", (ULONG)le32(event->event_cmd.status), (ULONG)le32(event->event_cmd.flags));
+    if (GET_COMP_CODE(le32(event->event_cmd.status)) != COMP_SUCCESS)
     {
         Kprintf("ERROR: Reset Device command failed for slot %ld.\n", cmd->udev->slot_id);
         return;
@@ -581,8 +581,8 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
  */
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 {
-    const xhci_comp_code comp = (xhci_comp_code)GET_COMP_CODE(LE32(event->event_cmd.status));
-    const dma_addr_t trb_addr = (dma_addr_t)LE64(event->event_cmd.cmd_trb);
+    const xhci_comp_code comp = (xhci_comp_code)GET_COMP_CODE(le32(event->event_cmd.status));
+    const dma_addr_t trb_addr = (dma_addr_t)le64(event->event_cmd.cmd_trb);
 
     /* COMP_CMD_STOP means the command ring has stopped after a CA abort.
      * The aborted command is handled by COMP_CMD_ABORT below; here we only
@@ -593,7 +593,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
         ctrl->cmd_abort_pending = FALSE;
         /* Restart only if there are still pending commands. */
         if (ctrl->pending_commands.mlh_Head->mln_Succ)
-            writel(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
+            mmio_write32(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
         return;
     }
 
@@ -613,7 +613,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
                 (ULONG)cmd->cmd_trb_dma);
         Remove((struct Node *)cmd);
         xhci_fail_timed_out_command(ctrl, cmd);
-        FreeVecPooled(ctrl->memoryPool, cmd);
+        pool_free(ctrl->memoryPool, cmd);
         return;
     }
 
@@ -625,15 +625,15 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
             Kprintf("No handler for command TRB %lx\n", cmd->cmd_trb_dma);
 
         Remove((struct Node *)cmd);
-        FreeVecPooled(ctrl->memoryPool, cmd);
+        pool_free(ctrl->memoryPool, cmd);
         return;
     }
 
     Kprintf("No matching pending command for command completion event TRB (%08lx %08lx %08lx %08lx)\n",
-            (ULONG)LE32(event->generic.field[0]),
-            (ULONG)LE32(event->generic.field[1]),
-            (ULONG)LE32(event->generic.field[2]),
-            (ULONG)LE32(event->generic.field[3]));
+            (ULONG)le32(event->generic.field[0]),
+            (ULONG)le32(event->generic.field[1]),
+            (ULONG)le32(event->generic.field[2]),
+            (ULONG)le32(event->generic.field[3]));
 }
 
 /*

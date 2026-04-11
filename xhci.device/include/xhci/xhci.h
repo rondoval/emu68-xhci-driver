@@ -24,8 +24,8 @@
 #include <proto/exec.h>
 #endif
 
-#include <emu_bits.h>
-#include <emu_iomem.h>
+#include <bits.h>
+#include <iomem.h>
 #include <pci_types.h>
 #include <devices/hcd_api.h>
 #include <xhci/xhci-udev.h>
@@ -578,20 +578,20 @@ struct xhci_scratchpad
  */
 static inline u64 xhci_readq(__le64 volatile *regs)
 {
-	__u32 *ptr = (__u32 *)regs;
-	u64 val_lo = readl(ptr);
-	u64 val_hi = readl(ptr + 1);
+	u32 *ptr = (u32 *)regs;
+	u64 val_lo = mmio_read32(ptr);
+	u64 val_hi = mmio_read32(ptr + 1);
 	return val_lo + (val_hi << 32);
 }
 
 static inline void xhci_writeq(__le64 volatile *regs, const u64 val)
 {
-	__u32 *ptr = (__u32 *)regs;
-	u32 val_lo = lower_32_bits(val);
+	u32 *ptr = (u32 *)regs;
+	u32 val_lo = u64_lo32(val);
 	/* FIXME */
-	u32 val_hi = upper_32_bits(val);
-	writel(val_lo, ptr);
-	writel(val_hi, ptr + 1);
+	u32 val_hi = u64_hi32(val);
+	mmio_write32(val_lo, ptr);
+	mmio_write32(val_hi, ptr + 1);
 }
 
 /*************************************************************
@@ -696,7 +696,7 @@ struct xhci_ctrl
 	struct xhci_hcor *hcor;
 	struct xhci_doorbell_array *dba;
 	struct xhci_run_regs *run_regs;
-	struct xhci_device_context_array *dcbaa __attribute__((aligned(ARCH_DMA_MINALIGN)));
+	struct xhci_device_context_array *dcbaa __attribute__((aligned(DMA_ALIGN_MIN)));
 	struct xhci_ring *event_ring;
 	struct xhci_ring *cmd_ring;
 	struct xhci_intr_reg *ir_set;

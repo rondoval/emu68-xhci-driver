@@ -33,7 +33,7 @@
 #include <exec/errors.h>
 
 #include <debug.h>
-#include <emu_memory.h>
+#include <memory.h>
 #include <xhci/ch9.h>
 #include <xhci/usb_defs.h>
 #include <xhci/xhci.h>
@@ -71,13 +71,13 @@ static struct descriptor
 		.bLength = 12,
 		.bDescriptorType = USB_DT_SS_HUB, /* hub descriptor */
 		.bNbrPorts = 2,					  /* patched to real port count during init */
-		.wHubCharacteristics = cpu_to_le16(HUB_CHAR_INDV_PORT_LPSM |
+		.wHubCharacteristics = le16(HUB_CHAR_INDV_PORT_LPSM |
 										   HUB_CHAR_INDV_PORT_OCPM), /* per-port power + OC */
 		.bPwrOn2PwrGood = 10,										 /* 20 ms between power on and usable */
 		.bHubContrCurrent = 0,										 /* self-powered: no bus draw */
 		.u.ss = {
 			.bHubHdrDecLat = 0,			 /* no hub delay */
-			.wHubDelay = cpu_to_le16(0), /* no hub delay */
+			.wHubDelay = le16(0), /* no hub delay */
 			.DeviceRemovable = 0,		 /* all ports permanently wired */
 		},
 	},
@@ -85,7 +85,7 @@ static struct descriptor
 		.bLength = 9,
 		.bDescriptorType = USB_DT_HUB,														   /* hub descriptor */
 		.bNbrPorts = 2,																		   /* patched to real port count during init */
-		.wHubCharacteristics = cpu_to_le16(HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_INDV_PORT_OCPM), /* per-port power + OC */
+		.wHubCharacteristics = le16(HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_INDV_PORT_OCPM), /* per-port power + OC */
 		.bPwrOn2PwrGood = 10,																   /* 20 ms between power on and usable */
 		.bHubContrCurrent = 0,																   /* self-powered: no bus draw */
 		.u.hs = {
@@ -96,14 +96,14 @@ static struct descriptor
 	.device_30 = {
 		.bLength = sizeof(struct usb_device_descriptor), /* size of device descriptor */
 		.bDescriptorType = USB_DT_DEVICE,				 /* device descriptor */
-		.bcdUSB = cpu_to_le16(0x0310),					 /* advertise as USB 3.2 */
+		.bcdUSB = le16(0x0310),					 /* advertise as USB 3.2 */
 		.bDeviceClass = USB_CLASS_HUB,					 /* hub */
 		.bDeviceSubClass = 0,							 /* no subclass */
 		.bDeviceProtocol = USB_HUB_PR_SS,				 /* super-speed hub */
 		.bMaxPacketSize0 = 9,							 /* control endpoint max packet */
 		.idVendor = 0x0000,								 /* virtual root hub: leave VID zero */
 		.idProduct = 0x0000,							 /* virtual root hub: leave PID zero */
-		.bcdDevice = cpu_to_le16(0x0200),				 /* device revision */
+		.bcdDevice = le16(0x0200),				 /* device revision */
 		.iManufacturer = 1,								 /* string index */
 		.iProduct = 2,									 /* string index */
 		.iSerialNumber = 0,								 /* no serial */
@@ -112,14 +112,14 @@ static struct descriptor
 	.device_20 = {
 		.bLength = sizeof(struct usb_device_descriptor), /* size of device descriptor */
 		.bDescriptorType = USB_DT_DEVICE,				 /* device descriptor */
-		.bcdUSB = cpu_to_le16(0x0200),					 /* advertise as USB 2.0 */
+		.bcdUSB = le16(0x0200),					 /* advertise as USB 2.0 */
 		.bDeviceClass = USB_CLASS_HUB,					 /* hub */
 		.bDeviceSubClass = 0,
 		.bDeviceProtocol = USB_HUB_PR_HS_SINGLE_TT, /* high-speed hub */
 		.bMaxPacketSize0 = 64,						/* control endpoint max packet */
 		.idVendor = 0x0000,							/* virtual root hub: leave VID zero */
 		.idProduct = 0x0000,						/* virtual root hub: leave PID zero */
-		.bcdDevice = cpu_to_le16(0x0200),			/* device revision */
+		.bcdDevice = le16(0x0200),			/* device revision */
 		.iManufacturer = 1,							/* string index */
 		.iProduct = 2,								/* string index */
 		.iSerialNumber = 0,							/* no serial */
@@ -128,7 +128,7 @@ static struct descriptor
 	.config = {
 		.bLength = sizeof(struct usb_config_descriptor),																																				 /* size of configuration descriptor */
 		.bDescriptorType = USB_DT_CONFIG,																																								 /* configuration descriptor */
-		.wTotalLength = cpu_to_le16(sizeof(struct usb_config_descriptor) + sizeof(struct usb_interface_descriptor) + sizeof(struct usb_endpoint_descriptor) + sizeof(struct usb_ss_ep_comp_descriptor)), /* config + interface + endpoint + ss companion */
+		.wTotalLength = le16(sizeof(struct usb_config_descriptor) + sizeof(struct usb_interface_descriptor) + sizeof(struct usb_endpoint_descriptor) + sizeof(struct usb_ss_ep_comp_descriptor)), /* config + interface + endpoint + ss companion */
 		.bNumInterfaces = 1,																																											 /* single interface */
 		.bConfigurationValue = 1,																																										 /* configuration ID */
 		.iConfiguration = 0,																																											 /* no string descriptor */
@@ -151,7 +151,7 @@ static struct descriptor
 		.bDescriptorType = USB_DT_ENDPOINT,										/* endpoint descriptor */
 		.bEndpointAddress = (USB_DIR_IN | 1),									/* INT IN endpoint 1 */
 		.bmAttributes = USB_ENDPOINT_XFER_INT | USB_ENDPOINT_INTR_NOTIFICATION, /* interrupt */
-		.wMaxPacketSize = cpu_to_le16(STATUS_CHANGE_BITMAP_LENGTH),
+		.wMaxPacketSize = le16(STATUS_CHANGE_BITMAP_LENGTH),
 		.bInterval = 8,
 	},
 	.ss_ep_comp = {
@@ -159,29 +159,29 @@ static struct descriptor
 		.bDescriptorType = USB_DT_SS_ENDPOINT_COMP,			 /* SS endpoint companion descriptor */
 		.bMaxBurst = 0,										 /* no bursting */
 		.bmAttributes = 0,									 /* no streams */
-		.wBytesPerInterval = cpu_to_le16(STATUS_CHANGE_BITMAP_LENGTH),
+		.wBytesPerInterval = le16(STATUS_CHANGE_BITMAP_LENGTH),
 	},
 	.bos = {
 		.bLength = sizeof(struct usb_bos_descriptor),																																														  /* size of BOS descriptor */
 		.bDescriptorType = USB_DT_BOS,																																																		  /* BOS descriptor */
-		.wTotalLength = cpu_to_le16(sizeof(struct usb_bos_descriptor) + sizeof(struct usb_2_0_extension_capability_descriptor) + sizeof(struct usb_ss_device_capability_descriptor) + sizeof(struct usb_container_id_capability_descriptor)), /* total length of all BOS descriptors */
+		.wTotalLength = le16(sizeof(struct usb_bos_descriptor) + sizeof(struct usb_2_0_extension_capability_descriptor) + sizeof(struct usb_ss_device_capability_descriptor) + sizeof(struct usb_container_id_capability_descriptor)), /* total length of all BOS descriptors */
 		.bNumDeviceCaps = 3,																																																				  /* number of device capability descriptors */
 	},
 	.ext_cap = {
 		.bLength = sizeof(struct usb_2_0_extension_capability_descriptor), /* size of USB 2.0 extension descriptor */
 		.bDescriptorType = USB_DT_DEVICE_CAPABILITY,					   /* device capability descriptor */
 		.bDevCapabilityType = USB_CAP_DESC_USB20_EXTENSION,				   /* USB 2.0 extension capability */
-		.bmAttributes = cpu_to_le32(0),
+		.bmAttributes = le32(0),
 	},
 	.ss_dev_cap = {
 		.bLength = sizeof(struct usb_ss_device_capability_descriptor), /* size of SuperSpeed USB device capability descriptor */
 		.bDescriptorType = USB_DT_DEVICE_CAPABILITY,				   /* device capability descriptor */
 		.bDevCapabilityType = USB_CAP_DESC_SS_USB_DEVICE,			   /* SuperSpeed USB device capability */
 		.bmAttributes = 0,
-		.wSpeedsSupported = cpu_to_le16(USB_SS_DEVICE_LOWSPEED_SUPPORT | USB_SS_DEVICE_FULLSPEED_SUPPORT | USB_SS_DEVICE_HIGHSPEED_SUPPORT | USB_SS_DEVICE_SUPERSPEED_SUPPORT), /* supports all speeds */
+		.wSpeedsSupported = le16(USB_SS_DEVICE_LOWSPEED_SUPPORT | USB_SS_DEVICE_FULLSPEED_SUPPORT | USB_SS_DEVICE_HIGHSPEED_SUPPORT | USB_SS_DEVICE_SUPERSPEED_SUPPORT), /* supports all speeds */
 		.bFunctionalitySupport = 1,																																				/* lowest speed is 1 (low speed) */
 		.bU1DevExitLat = 0,																																						/* no U1 exit latency */
-		.wU2DevExitLat = cpu_to_le16(0),																																		/* no U2 exit latency */
+		.wU2DevExitLat = le16(0),																																		/* no U2 exit latency */
 	},
 	.container_id_cap = {
 		.bLength = sizeof(struct usb_container_id_capability_descriptor), /* size of Container ID capability descriptor */
@@ -224,7 +224,7 @@ struct xhci_root_hub
 static void xhci_roothub_debug_port(struct xhci_root_hub *rh, int port)
 {
 	struct xhci_ctrl *ctrl = rh->udev->controller;
-	u32 portsc = readl(&ctrl->hcor->portregs[port].or_portsc);
+	u32 portsc = mmio_read32(&ctrl->hcor->portregs[port].or_portsc);
 	KprintfH("port %ld status: 0x%08lx\n", (LONG)port + 1, portsc);
 
 	if (portsc & PORT_CONNECT) // ROS
@@ -340,7 +340,7 @@ static void xhci_roothub_debug_port(struct xhci_root_hub *rh, int port)
 struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data_fn io_reply_data)
 {
 	struct xhci_ctrl *ctrl = udev->controller;
-	struct xhci_root_hub *rh = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_root_hub));
+	struct xhci_root_hub *rh = pool_zalloc(ctrl->memoryPool, sizeof(struct xhci_root_hub));
 	if (!rh)
 		return NULL;
 
@@ -349,15 +349,15 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 
 	CopyMem(&prototype_descriptor, &rh->descriptor, sizeof(prototype_descriptor));
 
-	const u8 ports = HCS_MAX_PORTS(readl(&ctrl->hccr->cr_hcsparams1));
+	const u8 ports = HCS_MAX_PORTS(mmio_read32(&ctrl->hccr->cr_hcsparams1));
 	rh->descriptor.hub_30.bNbrPorts = ports;
 	rh->descriptor.hub_20.bNbrPorts = ports;
 
 	Kprintf("Initializing root hub with %ld ports\n", (LONG)ports);
 
 	/* Port Indicators */
-	const u32 hccParams1 = readl(&ctrl->hccr->cr_hccparams1);
-	u16 wHubCharacteristics = LE16(rh->descriptor.hub_30.wHubCharacteristics);
+	const u32 hccParams1 = mmio_read32(&ctrl->hccr->cr_hccparams1);
+	u16 wHubCharacteristics = le16(rh->descriptor.hub_30.wHubCharacteristics);
 	if (HCS_INDICATOR(hccParams1))
 	{
 		wHubCharacteristics |= HUB_CHAR_PORTIND;
@@ -375,21 +375,21 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 		rh->descriptor.ss_dev_cap.bmAttributes |= USB_SS_DEVICE_ATT_LATENCY_TOLERANCE_MESSAGES;
 	// TODO add support for Set Latency Tolerance Value command
 
-	rh->descriptor.hub_30.wHubCharacteristics = LE16(wHubCharacteristics);
-	rh->descriptor.hub_20.wHubCharacteristics = LE16(wHubCharacteristics);
+	rh->descriptor.hub_30.wHubCharacteristics = le16(wHubCharacteristics);
+	rh->descriptor.hub_20.wHubCharacteristics = le16(wHubCharacteristics);
 
 	/* Exit latencies */
-	const u32 hcsParams3 = readl(&ctrl->hccr->cr_hcsparams3);
+	const u32 hcsParams3 = mmio_read32(&ctrl->hccr->cr_hcsparams3);
 	rh->descriptor.ss_dev_cap.bU1DevExitLat = HCS_U1_LATENCY(hcsParams3);
 	rh->descriptor.ss_dev_cap.wU2DevExitLat = HCS_U2_LATENCY(hcsParams3);
 	Kprintf("Host controller U1 exit latency: %ld microseconds\n", (LONG)rh->descriptor.ss_dev_cap.bU1DevExitLat);
 	Kprintf("Host controller U2 exit latency: %ld microseconds\n", (LONG)rh->descriptor.ss_dev_cap.wU2DevExitLat);
 
 	/* Create port structs and fill with data from protool extended capability */
-	rh->ports = AllocVecPooled(ctrl->memoryPool, ports * sizeof(struct xhci_root_hub_port));
+	rh->ports = pool_zalloc(ctrl->memoryPool, ports * sizeof(struct xhci_root_hub_port));
 	if (!rh->ports)
 	{
-		FreeVecPooled(ctrl->memoryPool, rh);
+		pool_free(ctrl->memoryPool, rh);
 		Kprintf("Failed to allocate root hub port data\n");
 		return NULL;
 	}
@@ -454,9 +454,9 @@ void xhci_roothub_destroy(struct xhci_root_hub *rh)
 	xhci_roothub_abort_int_request(rh);
 
 	if (rh->ports)
-		FreeVecPooled(rh->udev->controller->memoryPool, rh->ports);
+		pool_free(rh->udev->controller->memoryPool, rh->ports);
 
-	FreeVecPooled(rh->udev->controller->memoryPool, rh);
+	pool_free(rh->udev->controller->memoryPool, rh);
 }
 
 unsigned int xhci_roothub_get_address(struct xhci_root_hub *rh)
@@ -515,7 +515,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 	BOOL change = FALSE;
 	for (u8 port = 0; port < num_ports; ++port)
 	{
-		u32 portsc = readl(&ctrl->hcor->portregs[port].or_portsc);
+		u32 portsc = mmio_read32(&ctrl->hcor->portregs[port].or_portsc);
 		u32 change_bits = portsc & change_mask;
 		if (!change_bits)
 			continue;
@@ -571,7 +571,7 @@ inline static void xhci_roothub_reply(struct USBIORequest *req, void *data, u32 
 	if (!req)
 		return;
 
-	length = min(length, LE16(req->setup.wLength));
+	length = min(length, le16(req->setup.wLength));
 	if (data && length > 0)
 		CopyMem(data, req->data_buffer, length);
 
@@ -618,11 +618,11 @@ static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, 
 {
 	struct USBSetupPacket *setup = &req->setup;
 
-	switch (LE16(setup->wValue) >> 8)
+	switch (le16(setup->wValue) >> 8)
 	{
 	case USB_DT_BOS:
 		KprintfH("get USB_DT_BOS\n");
-		xhci_roothub_reply(req, &rh->descriptor.bos, LE16(rh->descriptor.bos.wTotalLength));
+		xhci_roothub_reply(req, &rh->descriptor.bos, le16(rh->descriptor.bos.wTotalLength));
 		break;
 	case USB_DT_DEVICE:
 		KprintfH("get USB_DT_DEVICE\n");
@@ -633,11 +633,11 @@ static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, 
 		break;
 	case USB_DT_CONFIG:
 		KprintfH("get USB_DT_CONFIG\n");
-		xhci_roothub_reply(req, &rh->descriptor.config, LE16(rh->descriptor.config.wTotalLength));
+		xhci_roothub_reply(req, &rh->descriptor.config, le16(rh->descriptor.config.wTotalLength));
 		break;
 	case USB_DT_STRING:
 		KprintfH("get USB_DT_STRING\n");
-		switch (LE16(setup->wValue) & 0xff)
+		switch (le16(setup->wValue) & 0xff)
 		{
 		case 0: /* Language */
 			xhci_roothub_reply(req, "\4\3\11\4", 4);
@@ -649,12 +649,12 @@ static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, 
 			xhci_roothub_reply(req, "\52\3X\0H\0C\0I\0 \0H\0o\0s\0t\0 \0C\0o\0n\0t\0r\0o\0l\0l\0e\0r\0", 42);
 			break;
 		default:
-			Kprintf("unknown value DT_STRING %lx\n", LE16(setup->wValue));
+			Kprintf("unknown value DT_STRING %lx\n", le16(setup->wValue));
 			xhci_roothub_stall(req);
 		}
 		break;
 	default:
-		Kprintf("get unknown wValue %lx\n", LE16(setup->wValue));
+		Kprintf("get unknown wValue %lx\n", le16(setup->wValue));
 		xhci_roothub_stall(req);
 	}
 }
@@ -737,10 +737,10 @@ inline static void xhci_roothub_clear_port_change_bit(u16 wValue, u8 portNo, vol
 	}
 
 	/* Change bits are all write 1 to clear */
-	writel(port_status | status, addr);
+	mmio_write32(port_status | status, addr);
 
 #ifdef DEBUG_HIGH
-	port_status = readl(addr);
+	port_status = mmio_read32(addr);
 	KprintfH("clear port %s change, actual port %ld status  = 0x%lx\n", port_change_bit, portNo, port_status);
 #else
 	(void)port_change_bit;
@@ -751,7 +751,7 @@ inline static void xhci_roothub_clear_port_change_bit(u16 wValue, u8 portNo, vol
 inline static struct xhci_hcor_port_regs *xhci_roothub_get_port(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	struct xhci_ctrl *ctrl = rh->udev->controller;
-	u8 port = LE16(req->setup.wIndex) & 0xff; // port number is in low byte of wIndex;
+	u8 port = le16(req->setup.wIndex) & 0xff; // port number is in low byte of wIndex;
 
 	if (port == 0 || port > rh->descriptor.hub_30.bNbrPorts)
 		return NULL;
@@ -761,15 +761,15 @@ inline static struct xhci_hcor_port_regs *xhci_roothub_get_port(struct xhci_root
 
 static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	const u16 wValue = LE16(req->setup.wValue); // feature selector
-	const u16 wIndex = LE16(req->setup.wIndex); // selector | port
+	const u16 wValue = le16(req->setup.wValue); // feature selector
+	const u16 wIndex = le16(req->setup.wIndex); // selector | port
 	const u8 portNo = wIndex & 0xff;
 #ifdef DEBUG_HIGH
 	xhci_roothub_debug_port(rh, portNo - 1);
 #endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
-	u32 reg = readl(&port->or_portsc);
+	u32 reg = mmio_read32(&port->or_portsc);
 	reg = xhci_roothub_port_state_to_neutral(reg);
 
 	switch (wValue)
@@ -778,7 +778,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 	case USB_PORT_FEAT_POWER:
 		KprintfH("Clear port %ld PORT_POWER\n", portNo);
 		reg &= ~PORT_POWER;
-		writel(reg, &port->or_portsc);
+		mmio_write32(reg, &port->or_portsc);
 		break;
 	case USB_PORT_FEAT_C_CONNECTION:
 	case USB_PORT_FEAT_C_OVER_CURRENT:
@@ -791,11 +791,11 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		 * so we clear WRC here alongside PRC. */
 		if (rh->ports[portNo - 1].major_revision >= 3)
 		{
-			u32 tmp = readl(&port->or_portsc);
+			u32 tmp = mmio_read32(&port->or_portsc);
 			if (tmp & PORT_WRC)
 			{
 				tmp = xhci_roothub_port_state_to_neutral(tmp);
-				writel(tmp | PORT_WRC, &port->or_portsc);
+				mmio_write32(tmp | PORT_WRC, &port->or_portsc);
 			}
 		}
 		break;
@@ -808,9 +808,9 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		// USB3 specific features
 	case USB_SS_PORT_FEAT_FORCE_LINKPM_ACCEPT:
 		KprintfH("Clear port %ld FORCE_LINKPM_ACCEPT\n", portNo);
-		reg = readl(&port->or_portpmsc);
+		reg = mmio_read32(&port->or_portpmsc);
 		reg &= ~PORT_FLA;
-		writel(reg, &port->or_portpmsc);
+		mmio_write32(reg, &port->or_portpmsc);
 		break;
 	case USB_SS_PORT_FEAT_C_LINK_STATE:
 	case USB_SS_PORT_FEAT_C_CONFIG_ERROR:
@@ -833,7 +833,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		else
 		{
 			reg |= PORT_PE;
-			writel(reg, &port->or_portsc);
+			mmio_write32(reg, &port->or_portsc);
 		}
 		break;
 	case USB_PORT_FEAT_SUSPEND:
@@ -844,15 +844,15 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 			reg &= ~PORT_PLS_MASK;
 			reg |= XDEV_RESUME;
 			reg |= PORT_LINK_STROBE;
-			writel(reg, &port->or_portsc);
+			mmio_write32(reg, &port->or_portsc);
 			xhci_roothub_delay_ms(25); // wait at least 20ms for resume to take effect
-			reg = readl(&port->or_portsc);
+			reg = mmio_read32(&port->or_portsc);
 			reg = xhci_roothub_port_state_to_neutral(reg);
 		}
 		reg &= ~PORT_PLS_MASK;
 		reg |= XDEV_U0; // put port back to U0 (active) state
 		reg |= PORT_LINK_STROBE;
-		writel(reg, &port->or_portsc);
+		mmio_write32(reg, &port->or_portsc);
 		break;
 	case USB_PORT_FEAT_C_ENABLE:
 	case USB_PORT_FEAT_C_SUSPEND:
@@ -872,7 +872,7 @@ static void xhci_roothub_handle_hub_get_descriptor(struct xhci_root_hub *rh, str
 {
 	(void)rh;
 	KprintfH("USB_REQ_GET_DESCRIPTOR HUB\n");
-	const u16 wValue = LE16(req->setup.wValue);
+	const u16 wValue = le16(req->setup.wValue);
 	if (wValue >> 8 == USB_DT_SS_HUB && rh->is_super_speed)
 	{
 		xhci_roothub_reply(req, &rh->descriptor.hub_30, rh->descriptor.hub_30.bLength);
@@ -900,9 +900,9 @@ static void xhci_roothub_handle_hub_get_status(struct xhci_root_hub *rh, struct 
 
 static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	const u16 wIndex = LE16(req->setup.wIndex);
-	const u16 wValue = LE16(req->setup.wValue);
-	const u16 wLength = LE16(req->setup.wLength);
+	const u16 wIndex = le16(req->setup.wIndex);
+	const u16 wValue = le16(req->setup.wValue);
+	const u16 wLength = le16(req->setup.wLength);
 	const u8 portNo = wIndex & 0xff;
 	const u8 portStatusType = wValue & 0xff;
 
@@ -918,7 +918,7 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 #endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
-	const u32 reg = readl(&port->or_portsc);
+	const u32 reg = mmio_read32(&port->or_portsc);
 
 	u16 wPortStatus;
 	if (rh->is_super_speed)
@@ -998,7 +998,7 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 
 static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	const u16 wIndex = LE16(req->setup.wIndex);
+	const u16 wIndex = le16(req->setup.wIndex);
 	const u8 portNo = wIndex & 0xff;
 
 	if (rh->ports[portNo - 1].major_revision < 3)
@@ -1007,15 +1007,15 @@ static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, s
 		xhci_roothub_stall(req);
 		return;
 	}
-	if (req->setup.wValue != 0 || LE16(req->setup.wLength) < 2)
+	if (req->setup.wValue != 0 || le16(req->setup.wLength) < 2)
 	{
-		Kprintf("invalid get port error count request value 0x%lx length %ld\n", LE16(req->setup.wValue), LE16(req->setup.wLength));
+		Kprintf("invalid get port error count request value 0x%lx length %ld\n", le16(req->setup.wValue), le16(req->setup.wLength));
 		xhci_roothub_stall(req);
 		return;
 	}
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
-	const u16 errors = readl(&port->or_portli) & 0xffff;
+	const u16 errors = mmio_read32(&port->or_portli) & 0xffff;
 
 	KprintfH("USB_REQ_GET_PORT_ERROR_COUNT PORT %ld error count=%u\n", wIndex, errors);
 	u8 tmpbuf[2] = {errors & 0xff, errors >> 8};
@@ -1024,8 +1024,8 @@ static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, s
 
 static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	const u16 wValue = LE16(req->setup.wValue);
-	const u16 wIndex = LE16(req->setup.wIndex);
+	const u16 wValue = le16(req->setup.wValue);
+	const u16 wIndex = le16(req->setup.wIndex);
 	const u8 portNo = wIndex & 0xff;
 
 #ifdef DEBUG_HIGH
@@ -1033,7 +1033,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 #endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
-	u32 reg = readl(&port->or_portsc);
+	u32 reg = mmio_read32(&port->or_portsc);
 	reg = xhci_roothub_port_state_to_neutral(reg);
 
 	switch (wValue)
@@ -1052,7 +1052,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 			Kprintf("SS port %ld PLS=%ld (%s); upgrading to warm reset (portsc=%08lx)\n",
 					(LONG)portNo, (LONG)(pls >> 5),
 					pls == XDEV_COMPLIANCE ? "Compliance" : "SS.Inactive",
-					(ULONG)readl(&port->or_portsc));
+					(ULONG)mmio_read32(&port->or_portsc));
 
 			/* Clear all pending change bits before the warm reset.
 			 * Stale change bits (especially PLC from the Compliance
@@ -1060,16 +1060,16 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 			 * the link bounces through disconnect/reconnect and recovers
 			 * via normal link training instead, leaving WRC=0 and the
 			 * device in a state where ADDRESS_DEVICE times out. */
-			writel(reg | PORT_CSC | PORT_PEC | PORT_WRC |
+			mmio_write32(reg | PORT_CSC | PORT_PEC | PORT_WRC |
 					   PORT_OCC | PORT_RC | PORT_PLC | PORT_CEC,
 				   &port->or_portsc);
 
 			/* Re-read and re-neutralize after clearing change bits */
-			reg = readl(&port->or_portsc);
+			reg = mmio_read32(&port->or_portsc);
 			reg = xhci_roothub_port_state_to_neutral(reg);
 
 			/* Initiate warm reset */
-			writel(reg | PORT_WR, &port->or_portsc);
+			mmio_write32(reg | PORT_WR, &port->or_portsc);
 
 			/* Poll until the warm reset completes (PORT_RESET clears)
 			 * or we time out.  Linux's hub_port_wait_reset() does the
@@ -1080,7 +1080,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 				for (attempts = 0; attempts < 100; attempts++)
 				{
 					xhci_roothub_delay_ms(10);
-					temp = readl(&port->or_portsc);
+					temp = mmio_read32(&port->or_portsc);
 					if (!(temp & PORT_RESET))
 						break;
 				}
@@ -1107,14 +1107,14 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		{
 			KprintfH("Set port %ld PORT_RESET\n", portNo);
 			reg |= PORT_RESET;
-			writel(reg, &port->or_portsc);
+			mmio_write32(reg, &port->or_portsc);
 		}
 		break;
 	}
 	case USB_PORT_FEAT_POWER:
 		KprintfH("Set port %ld PORT_POWER\n", portNo);
 		reg |= PORT_POWER;
-		writel(reg, &port->or_portsc);
+		mmio_write32(reg, &port->or_portsc);
 		break;
 	case USB_PORT_FEAT_CONNECTION:
 	case USB_PORT_FEAT_OVER_CURRENT:
@@ -1127,21 +1127,21 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	case USB_SS_PORT_FEAT_BH_RESET:
 		KprintfH("Set port %ld PORT_BH_RESET\n", portNo);
 		reg |= PORT_WR;
-		writel(reg, &port->or_portsc);
+		mmio_write32(reg, &port->or_portsc);
 		break;
 	case USB_SS_PORT_FEAT_U1_TIMEOUT:
 		KprintfH("Setting port %ld U1 timeout to %ld microseconds\n", portNo, wIndex >> 8);
-		reg = readl(&port->or_portpmsc);
+		reg = mmio_read32(&port->or_portpmsc);
 		reg &= ~0xff;
 		reg |= PORT_U1_TIMEOUT(wIndex >> 8);
-		writel(reg, &port->or_portpmsc);
+		mmio_write32(reg, &port->or_portpmsc);
 		break;
 	case USB_SS_PORT_FEAT_U2_TIMEOUT:
 		KprintfH("Setting port %ld U2 timeout to %ld microseconds\n", portNo, wIndex >> 8);
-		reg = readl(&port->or_portpmsc);
+		reg = mmio_read32(&port->or_portpmsc);
 		reg &= ~0xff00;
 		reg |= PORT_U2_TIMEOUT(wIndex >> 8);
-		writel(reg, &port->or_portpmsc);
+		mmio_write32(reg, &port->or_portpmsc);
 		break;
 	case USB_PORT_FEAT_LINK_STATE:
 	{
@@ -1152,7 +1152,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 			reg &= ~PORT_PLS_MASK;
 			reg |= PORT_LINK_STROBE;
 			reg |= link_state << 5;
-			writel(reg, &port->or_portsc);
+			mmio_write32(reg, &port->or_portsc);
 		}
 		else
 		{
@@ -1168,14 +1168,14 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		KprintfH("Set port %ld REMOTE_WAKE_MASK to %lx\n", portNo, wake_mask);
 		reg &= ~(PORT_WKCONN_E | PORT_WKDISC_E | PORT_WKOC_E);
 		reg |= wake_mask << 25;
-		writel(reg, &port->or_portsc);
+		mmio_write32(reg, &port->or_portsc);
 		break;
 	}
 	case USB_SS_PORT_FEAT_FORCE_LINKPM_ACCEPT:
 		KprintfH("Set port %ld FORCE_LINKPM_ACCEPT\n", portNo);
-		reg = readl(&port->or_portpmsc);
+		reg = mmio_read32(&port->or_portpmsc);
 		reg |= PORT_FLA;
-		writel(reg, &port->or_portpmsc);
+		mmio_write32(reg, &port->or_portpmsc);
 		break;
 
 	// USB2 specific features
@@ -1184,7 +1184,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		reg &= ~PORT_PLS_MASK;
 		reg |= XDEV_U3;
 		reg |= PORT_LINK_STROBE;
-		writel(reg, &port->or_portsc);
+		mmio_write32(reg, &port->or_portsc);
 		break;
 	case USB_PORT_FEAT_TEST:
 		/* No-op */
@@ -1207,9 +1207,9 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
  */
 void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequest *io)
 {
-	const u16 wIndex = LE16(io->setup.wIndex);
+	const u16 wIndex = le16(io->setup.wIndex);
 #ifdef DEBUG_HIGH
-	const u16 wValue = LE16(io->setup.wValue);
+	const u16 wValue = le16(io->setup.wValue);
 #endif
 
 	struct USBSetupPacket *setup = &io->setup;

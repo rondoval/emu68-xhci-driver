@@ -22,7 +22,9 @@
 #include <exec/memory.h>
 
 #include <debug.h>
-#include <emu_memory.h>
+#include <errors.h>
+#include <memory.h>
+#include <timing.h>
 #include <minlist.h>
 
 #include <xhci/xhci.h>
@@ -55,13 +57,12 @@ void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
 	void *ptr;
 	ULONG cacheline_size = max(XHCI_ALIGNMENT, CACHELINE_SIZE);
 
-	ptr = memalign(ctrl->memoryPool, cacheline_size, ALIGN(size, cacheline_size));
+	ptr = dma_zalloc(ctrl->memoryPool, cacheline_size, ALIGN_UP(size, cacheline_size));
 	if (!ptr)
 	{
-		Kprintf("memalign failed for size %lu\n", (ULONG)size);
+		Kprintf("dma_zalloc failed for size %lu\n", (ULONG)size);
 		return NULL;
 	}
-	_memset(ptr, '\0', size);
 
 	xhci_flush_cache(ptr, size);
 
@@ -79,11 +80,11 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	struct xhci_hccr *hccr = ctrl->hccr;
 	struct xhci_hcor *hcor = ctrl->hcor;
 
-	int num_sp = HCS_MAX_SCRATCHPAD(readl(&hccr->cr_hcsparams2));
+	int num_sp = HCS_MAX_SCRATCHPAD(mmio_read32(&hccr->cr_hcsparams2));
 	if (!num_sp)
 		return 0;
 
-	struct xhci_scratchpad *scratchpad = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_scratchpad));
+	struct xhci_scratchpad *scratchpad = pool_zalloc(ctrl->memoryPool, sizeof(struct xhci_scratchpad));
 	if (!scratchpad)
 		goto fail_sp;
 	ctrl->scratchpad = scratchpad;
@@ -92,10 +93,10 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	if (!scratchpad->sp_array)
 		goto fail_sp2;
 
-	ctrl->dcbaa->dev_context_ptrs[0] = LE64((dma_addr_t)scratchpad->sp_array);
+	ctrl->dcbaa->dev_context_ptrs[0] = le64((dma_addr_t)scratchpad->sp_array);
 	xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[0], sizeof(ctrl->dcbaa->dev_context_ptrs[0]));
 
-	u32 page_size = readl(&hcor->or_pagesize) & 0xffff;
+	u32 page_size = mmio_read32(&hcor->or_pagesize) & 0xffff;
 	int i;
 	for (i = 0; i < 16; i++)
 	{
@@ -110,16 +111,15 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	}
 
 	page_size = 1 << (i + 12);
-	void *buf = memalign(ctrl->memoryPool, page_size, num_sp * page_size);
+	void *buf = dma_zalloc(ctrl->memoryPool, page_size, num_sp * page_size);
 	if (!buf)
 		goto fail_sp3;
-	_memset(buf, '\0', num_sp * page_size);
 	xhci_flush_cache(buf, num_sp * page_size);
 
 	scratchpad->scratchpad = buf;
 	for (i = 0; i < num_sp; i++)
 	{
-		scratchpad->sp_array[i] = LE64((dma_addr_t)buf);
+		scratchpad->sp_array[i] = le64((dma_addr_t)buf);
 		buf += page_size;
 	}
 
@@ -127,10 +127,10 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	return 0;
 
 fail_sp3:
-	memalign_free(ctrl->memoryPool, scratchpad->sp_array);
+	dma_free(ctrl->memoryPool, scratchpad->sp_array);
 
 fail_sp2:
-	FreeVecPooled(ctrl->memoryPool, scratchpad);
+	pool_free(ctrl->memoryPool, scratchpad);
 	ctrl->scratchpad = NULL;
 
 fail_sp:
@@ -150,9 +150,9 @@ static void xhci_scratchpad_free(struct xhci_ctrl *ctrl)
 
 	ctrl->dcbaa->dev_context_ptrs[0] = 0;
 
-	memalign_free(ctrl->memoryPool, ctrl->scratchpad->scratchpad);
-	memalign_free(ctrl->memoryPool, ctrl->scratchpad->sp_array);
-	FreeVecPooled(ctrl->memoryPool, ctrl->scratchpad);
+	dma_free(ctrl->memoryPool, ctrl->scratchpad->scratchpad);
+	dma_free(ctrl->memoryPool, ctrl->scratchpad->sp_array);
+	pool_free(ctrl->memoryPool, ctrl->scratchpad);
 	ctrl->scratchpad = NULL;
 }
 
@@ -192,12 +192,12 @@ static int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	xhci_writeq(&hcor->or_crcr, val_64);
 
 	/* write the address of db register */
-	val = readl(&hccr->cr_dboff);
+	val = mmio_read32(&hccr->cr_dboff);
 	val &= DBOFF_MASK;
 	ctrl->dba = (struct xhci_doorbell_array *)((char *)hccr + val);
 
 	/* write the address of runtime register */
-	val = readl(&hccr->cr_rtsoff);
+	val = mmio_read32(&hccr->cr_rtsoff);
 	val &= RTSOFF_MASK;
 	ctrl->run_regs = (struct xhci_run_regs *)((char *)hccr + val);
 
@@ -219,7 +219,7 @@ static int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	 * or some spurious Device Notification Events
 	 * might screw things here.
 	 */
-	writel(0x0, &hcor->or_dnctrl);
+	mmio_write32(0x0, &hcor->or_dnctrl);
 
 	return 0;
 }
@@ -235,9 +235,9 @@ static void xhci_cleanup(struct xhci_ctrl *ctrl)
 	xhci_ring_free(ctrl, ctrl->event_ring);
 	xhci_ring_free(ctrl, ctrl->cmd_ring);
 	xhci_scratchpad_free(ctrl);
-	memalign_free(ctrl->memoryPool, ctrl->erst.entries);
-	memalign_free(ctrl->memoryPool, ctrl->dcbaa);
-	_memset(ctrl, 0, sizeof(struct xhci_ctrl));
+	dma_free(ctrl->memoryPool, ctrl->erst.entries);
+	dma_free(ctrl->memoryPool, ctrl->dcbaa);
+	mem_zero(ctrl, sizeof(struct xhci_ctrl));
 }
 
 /**
@@ -253,13 +253,20 @@ static void xhci_cleanup(struct xhci_ctrl *ctrl)
 static int handshake(uint32_t volatile *ptr, uint32_t mask, uint32_t done, int usec)
 {
 	uint32_t result;
+	ULONG deadline = get_time() + usec;
 
-	// TODO fixed value ULONG_MAX
-	int ret = readx_poll_timeout(readl, ptr, result, (result & mask) == done || result == 0xffffffff, usec);
-	if (result == 0xffffffff) /* card removed */
-		return -ENODEV;
+	for (;;)
+	{
+		result = mmio_read32(ptr);
+		if ((result & mask) == done)
+			return 0;
+		if (result == 0xffffffff)
+			return -ENODEV;
+		if (usec && time_deadline_passed(get_time(), deadline))
+			break;
+	}
 
-	return ret;
+	return -ETIMEDOUT;
 }
 
 /**
@@ -271,9 +278,9 @@ static int handshake(uint32_t volatile *ptr, uint32_t mask, uint32_t done, int u
 static int xhci_start(struct xhci_hcor *hcor)
 {
 	Kprintf("Starting the controller\n");
-	u32 temp = readl(&hcor->or_usbcmd);
+	u32 temp = mmio_read32(&hcor->or_usbcmd);
 	temp |= (CMD_RUN);
-	writel(temp, &hcor->or_usbcmd);
+	mmio_write32(temp, &hcor->or_usbcmd);
 
 	/*
 	 * Wait for the HCHalted Status bit to be 0 to indicate the host is
@@ -297,12 +304,12 @@ static int xhci_reset(struct xhci_hcor *hcor)
 
 	/* Halting the Host first */
 	Kprintf("// Halt the HC: %lx\n", hcor);
-	u32 state = readl(&hcor->or_usbsts) & STS_HALT;
+	u32 state = mmio_read32(&hcor->or_usbsts) & STS_HALT;
 	if (!state)
 	{
-		cmd = readl(&hcor->or_usbcmd);
+		cmd = mmio_read32(&hcor->or_usbcmd);
 		cmd &= ~CMD_RUN;
-		writel(cmd, &hcor->or_usbcmd);
+		mmio_write32(cmd, &hcor->or_usbcmd);
 	}
 
 	int ret = handshake(&hcor->or_usbsts, STS_HALT, STS_HALT, XHCI_MAX_HALT_USEC);
@@ -313,9 +320,9 @@ static int xhci_reset(struct xhci_hcor *hcor)
 	}
 
 	Kprintf("// Reset the HC\n");
-	cmd = readl(&hcor->or_usbcmd);
+	cmd = mmio_read32(&hcor->or_usbcmd);
 	cmd |= CMD_RESET_USB;
-	writel(cmd, &hcor->or_usbcmd);
+	mmio_write32(cmd, &hcor->or_usbcmd);
 
 	ret = handshake(&hcor->or_usbcmd, CMD_RESET_USB, 0, XHCI_MAX_RESET_USEC);
 	if (ret)
@@ -356,13 +363,13 @@ u32 *xhci_find_next_capability(struct xhci_ctrl *ctrl, u32 cap_id, u32 *init_off
 		return NULL;
 
 	struct xhci_hccr *hccr = ctrl->hccr;
-	u32 hccParams = readl(&hccr->cr_hccparams1);
+	u32 hccParams = mmio_read32(&hccr->cr_hccparams1);
 
 	u32 current_offset = (*init_offset != 0) ? *init_offset : HCC_EXT_CAPS(hccParams) << 2;
 	while (current_offset != XHCI_EXT_CAPS_SEARCH_DONE)
 	{
 		u32 *current = (u32 *)((u8 *)hccr + current_offset);
-		u32 ext_cap = readl(current);
+		u32 ext_cap = mmio_read32(current);
 
 		u32 next_offset = current_offset + (XHCI_EXT_CAPS_NEXT(ext_cap) << 2);
 		if (next_offset == current_offset)
@@ -384,9 +391,9 @@ u32 *xhci_find_next_capability(struct xhci_ctrl *ctrl, u32 cap_id, u32 *init_off
 struct xhci_protocol_caps xhci_get_protocol_caps(u32* base_address)
 {
 	struct xhci_protocol_caps caps = {0};
-	u32 cap00 = readl(base_address + 0);
-	u32 cap08 = readl(base_address + 2);
-	u32 cap0c = readl(base_address + 3);
+	u32 cap00 = mmio_read32(base_address + 0);
+	u32 cap08 = mmio_read32(base_address + 2);
+	u32 cap0c = mmio_read32(base_address + 3);
 
 	caps.minor_revision = XHCI_PROTOCOL_CAP_MINOR_REV(cap00);
 	caps.major_revision = XHCI_PROTOCOL_CAP_MAJOR_REV(cap00);
@@ -414,7 +421,7 @@ struct xhci_protocol_caps xhci_get_protocol_caps(u32* base_address)
 static void xhci_dump_caps(struct xhci_ctrl *ctrl)
 {
 	struct xhci_hccr *hccr = ctrl->hccr;
-	u32 reg = readl(&hccr->cr_hccparams1);
+	u32 reg = mmio_read32(&hccr->cr_hccparams1);
 	if (HCC_64BIT_ADDR(reg))
 		Kprintf("Host controller supports 64-bit addressing\n");
 	if (HCC_64BYTE_CONTEXT(reg))
@@ -422,7 +429,7 @@ static void xhci_dump_caps(struct xhci_ctrl *ctrl)
 	if (HCC_LTC(reg))
 		Kprintf("Host controller supports latency tolerance messaging\n");
 
-	reg = readl(&hccr->cr_hccparams2);
+	reg = mmio_read32(&hccr->cr_hccparams2);
 	if (HCC_U3C(reg))
 		Kprintf("Host controller supports U3 Entry Capability\n");
 	if (HCC_CMC(reg))
@@ -453,10 +460,10 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	 * Program the Number of Device Slots Enabled field in the CONFIG
 	 * register with the max value of slots the HC can handle.
 	 */
-	u32 val = (readl(&hccr->cr_hcsparams1) & HCS_SLOTS_MASK);
-	u32 val2 = readl(&hcor->or_config);
+	u32 val = (mmio_read32(&hccr->cr_hcsparams1) & HCS_SLOTS_MASK);
+	u32 val2 = mmio_read32(&hcor->or_config);
 	val |= (val2 & ~HCS_SLOTS_MASK);
-	writel(val, &hcor->or_config);
+	mmio_write32(val, &hcor->or_config);
 
 	/* initializing xhci data structures */
 	if (xhci_mem_init(ctrl, hccr, hcor) < 0)
@@ -474,10 +481,10 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	}
 
 	/* Zero'ing IRQ control register and IRQ pending register */
-	writel(0x0, &ctrl->ir_set->irq_control);
-	writel(0x0, &ctrl->ir_set->irq_pending);
+	mmio_write32(0x0, &ctrl->ir_set->irq_control);
+	mmio_write32(0x0, &ctrl->ir_set->irq_pending);
 
-	u32 reg = HC_VERSION(readl(&hccr->cr_capbase));
+	u32 reg = HC_VERSION(mmio_read32(&hccr->cr_capbase));
 	Kprintf("USB XHCI %lx.%02lx\n", reg >> 8, reg & 0xff);
 	ctrl->hci_version = reg;
 
@@ -491,10 +498,10 @@ static int xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 	xhci_reset(ctrl->hcor);
 
 	Kprintf("// Disabling event ring interrupts\n");
-	u32 temp = readl(&ctrl->hcor->or_usbsts);
-	writel(temp & ~STS_EINT, &ctrl->hcor->or_usbsts);
-	temp = readl(&ctrl->ir_set->irq_pending);
-	writel(ER_IRQ_DISABLE(temp), &ctrl->ir_set->irq_pending);
+	u32 temp = mmio_read32(&ctrl->hcor->or_usbsts);
+	mmio_write32(temp & ~STS_EINT, &ctrl->hcor->or_usbsts);
+	temp = mmio_read32(&ctrl->ir_set->irq_pending);
+	mmio_write32(ER_IRQ_DISABLE(temp), &ctrl->ir_set->irq_pending);
 
 	xhci_roothub_destroy(ctrl->root_hub);
 	ctrl->root_hub = NULL;

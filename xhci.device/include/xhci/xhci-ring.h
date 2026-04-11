@@ -3,8 +3,8 @@
 
 #include <exec/types.h>
 #include <devices/hcd_api.h>
-#include <emu_bits.h>
-#include <emu_byteorder.h>
+#include <bits.h>
+#include <byteorder.h>
 
 struct xhci_transfer_event
 {
@@ -290,10 +290,10 @@ typedef enum
 
 #define TRB_TYPE_LINK(x) (((x) & TRB_TYPE_BITMASK) == TRB_TYPE(TRB_LINK))
 /* Above, but for __le32 types -- can avoid work by swapping constants: */
-#define TRB_TYPE_LINK_LE32(x) (((x) & LE32(TRB_TYPE_BITMASK)) == \
-							   LE32(TRB_TYPE(TRB_LINK)))
-#define TRB_TYPE_NOOP_LE32(x) (((x) & LE32(TRB_TYPE_BITMASK)) == \
-							   LE32(TRB_TYPE(TRB_TR_NOOP)))
+#define TRB_TYPE_LINK_LE32(x) (((x) & le32(TRB_TYPE_BITMASK)) == \
+							   le32(TRB_TYPE(TRB_LINK)))
+#define TRB_TYPE_NOOP_LE32(x) (((x) & le32(TRB_TYPE_BITMASK)) == \
+							   le32(TRB_TYPE(TRB_TR_NOOP)))
 
 struct xhci_ctrl;
 struct xhci_erst;

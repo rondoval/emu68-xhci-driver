@@ -9,11 +9,11 @@
 
 #include <exec/execbase.h>
 #include <exec/types.h>
-#include <emu_errors.h>
-#include <emu_iomem.h>
-#include <emu_string.h>
-#include <emu_timing.h>
-#include <emu_types.h>
+#include <errors.h>
+#include <iomem.h>
+#include <strutil.h>
+#include <timing.h>
+#include <types.h>
 
 #include <debug.h>
 #include <device.h>
@@ -76,9 +76,9 @@ static int unit_init_onboard_xhci(struct XHCIUnit *unit,
 	*hccr = (struct xhci_hccr *)base;
 	Kprintf("[bcm-xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
 
-	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr + HC_LENGTH(readl(&(*hccr)->cr_capbase)));
+	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr + HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 	Kprintf("[bcm-xhci] %s: init hccr %lx and hcor %lx hc_length %ld\n",
-			__func__, *hccr, *hcor, (u32)HC_LENGTH(readl(&(*hccr)->cr_capbase)));
+			__func__, *hccr, *hcor, (u32)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	return 0;
 }
@@ -203,10 +203,10 @@ static int pcie_xhci_init(struct pci_device *dev, struct xhci_hccr **hccr,
 	Kprintf("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
 
 	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr +
-								 HC_LENGTH(readl(&(*hccr)->cr_capbase)));
+							 HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	Kprintf("[xhci] %s: init hccr %lx and hcor %lx hc_length %ld\n",
-			__func__, *hccr, *hcor, (u32)HC_LENGTH(readl(&(*hccr)->cr_capbase)));
+			__func__, *hccr, *hcor, (u32)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	/* enable busmaster */
 	u32 cmd;

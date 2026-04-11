@@ -18,8 +18,8 @@
  * The EHCI spec says that we must align to at least 32 bytes.  However,
  * some platforms require larger alignment.
  */
-#if ARCH_DMA_MINALIGN > 32
-#define USB_DMA_MINALIGN	ARCH_DMA_MINALIGN
+#if DMA_ALIGN_MIN > 32
+#define USB_DMA_MINALIGN	DMA_ALIGN_MIN
 #else
 #define USB_DMA_MINALIGN	32
 #endif
@@ -40,7 +40,7 @@
 struct usb_interface_altsetting {
 	struct usb_interface_descriptor desc;
 
-	__u8 no_of_ep;
+	u8 no_of_ep;
 
 	struct usb_endpoint_descriptor ep_desc[USB_MAXENDPOINTS];
 	struct usb_ss_ep_comp_descriptor ss_ep_comp_desc[USB_MAXENDPOINTS];
@@ -48,8 +48,8 @@ struct usb_interface_altsetting {
 
 /* Interface */
 struct usb_interface {
-	__u8 interface_number;
-	__u8 num_altsetting;
+	u8 interface_number;
+	u8 num_altsetting;
 	struct usb_interface_altsetting *active_altsetting;
 
 	struct usb_interface_altsetting altsetting[USB_ALTSETTINGALLOC];
@@ -60,7 +60,7 @@ struct usb_config {
 	struct MinNode node;
 	struct usb_config_descriptor desc;
 
-	__u8	no_of_if;	/* number of interfaces */
+	u8	no_of_if;	/* number of interfaces */
 	struct usb_interface if_desc[USB_MAXINTERFACES];
 };
 
@@ -94,22 +94,22 @@ enum {
 
 /* Hub descriptor */
 struct usb_hub_descriptor {
-	__u8  bLength;
-	__u8  bDescriptorType;
-	__u8  bNbrPorts;
-	__u16 wHubCharacteristics;
-	__u8  bPwrOn2PwrGood;
-	__u8  bHubContrCurrent;
+	u8  bLength;
+	u8  bDescriptorType;
+	u8  bNbrPorts;
+	u16 wHubCharacteristics;
+	u8  bPwrOn2PwrGood;
+	u8  bHubContrCurrent;
 	/* 2.0 and 3.0 hubs differ here */
 	union {
 		struct {
 			/* add 1 bit for hub status change; round to bytes */
-			__u8 DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
-			__u8 PortPowerCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
+			u8 DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
+			u8 PortPowerCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
 		} __attribute__ ((packed)) hs;
 
 		struct {
-			__u8 bHubHdrDecLat;
+			u8 bHubHdrDecLat;
 			__le16 wHubDelay;
 			__le16 DeviceRemovable;
 		} __attribute__ ((packed)) ss;

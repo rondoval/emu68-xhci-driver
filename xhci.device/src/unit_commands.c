@@ -19,7 +19,7 @@
 #include <config.h>
 #include <device.h>
 #include <debug.h>
-#include <emu_memory.h>
+#include <memory.h>
 #include <xhci/usb_defs.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
@@ -71,7 +71,7 @@ static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct USBIO
     if ((req->driver_private_flags & REQ_INTERNAL) && req->req.io_Command == CMD_INTERNAL_ABORT_REQUEST)
     {
         if (unit && unit->memoryPool)
-            FreeVecPooled(unit->memoryPool, req);
+            pool_free(unit->memoryPool, req);
         return;
     }
 
@@ -233,12 +233,12 @@ static inline int Do_CMD_DEVICE_RESET(struct USBIORequest *io)
     for (int p = 1; p <= maxp; ++p)
     {
         struct USBIORequest req;
-        _memset(&req, 0, sizeof(req));
+        mem_zero(&req, sizeof(req));
         req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
         req.setup.bRequest = USB_REQ_SET_FEATURE;
-        req.setup.wValue = LE16(USB_PORT_FEAT_RESET);
-        req.setup.wIndex = LE16(p);
-        req.setup.wLength = LE16(0);
+        req.setup.wValue = le16(USB_PORT_FEAT_RESET);
+        req.setup.wIndex = le16(p);
+        req.setup.wLength = le16(0);
         req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
 
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
@@ -271,11 +271,11 @@ static inline int Do_CMD_DEVICE_RESUME(struct USBIORequest *io)
     for (int p = 1; p <= maxp; ++p)
     {
         struct USBIORequest req;
-        _memset(&req, 0, sizeof(req));
+        mem_zero(&req, sizeof(req));
         req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
         req.setup.bRequest = USB_REQ_CLEAR_FEATURE;
-        req.setup.wValue = LE16(USB_PORT_FEAT_SUSPEND);
-        req.setup.wIndex = LE16(p);
+        req.setup.wValue = le16(USB_PORT_FEAT_SUSPEND);
+        req.setup.wIndex = le16(p);
         req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
 
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
@@ -300,11 +300,11 @@ static inline int Do_CMD_STOP(struct USBIORequest *io)
     for (int p = 1; p <= maxp; ++p)
     {
         struct USBIORequest req;
-        _memset(&req, 0, sizeof(req));
+        mem_zero(&req, sizeof(req));
         req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
         req.setup.bRequest = USB_REQ_SET_FEATURE;
-        req.setup.wValue = LE16(USB_PORT_FEAT_SUSPEND);
-        req.setup.wIndex = LE16(p);
+        req.setup.wValue = le16(USB_PORT_FEAT_SUSPEND);
+        req.setup.wIndex = le16(p);
         req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
 
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
@@ -330,11 +330,11 @@ static inline int Do_CMD_START(struct USBIORequest *io)
     for (int p = 1; p <= maxp; ++p)
     {
         struct USBIORequest req;
-        _memset(&req, 0, sizeof(req));
+        mem_zero(&req, sizeof(req));
         req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
         req.setup.bRequest = USB_REQ_SET_FEATURE;
-        req.setup.wValue = LE16(USB_PORT_FEAT_POWER);
-        req.setup.wIndex = LE16(p);
+        req.setup.wValue = le16(USB_PORT_FEAT_POWER);
+        req.setup.wIndex = le16(p);
         req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
 
         xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
@@ -405,7 +405,7 @@ static inline int Do_CMD_INTERNAL_ABORT(struct USBIORequest *io)
         xhci_td_abort_req(orig_req);
 
     if (unit && unit->memoryPool)
-        FreeVecPooled(unit->memoryPool, io);
+        pool_free(unit->memoryPool, io);
 
     return COMMAND_PROCESSED;
 }

@@ -183,7 +183,7 @@ static unsigned int xhci_microframes_to_exponent(unsigned int desc_interval,
                                                  unsigned int min_exponent,
                                                  unsigned int max_exponent)
 {
-    unsigned int interval = fls(desc_interval) - 1;
+    unsigned int interval = log2_floor_u64(desc_interval);
     interval = clamp_val(interval, min_exponent, max_exponent);
 #ifdef DEBUG_HIGH
     if ((1U << interval) != desc_interval)
@@ -342,7 +342,7 @@ u32 xhci_get_max_esit_payload(struct usb_device *udev,
 
     /* SuperSpeed Isoc ep with less than 48k per esit */
     if (udev->speed >= USB_SPEED_SUPER)
-        return LE16(ss_ep_comp_desc->wBytesPerInterval);
+        return le16(ss_ep_comp_desc->wBytesPerInterval);
 
     int max_packet = usb_endpoint_maxp(endpt_desc);
     int max_burst = usb_endpoint_maxp_mult(endpt_desc);
@@ -396,12 +396,12 @@ static void xhci_dump_interface(const char *tag, UBYTE index, const struct usb_i
                 pfx, (ULONG)ep->bLength, (ULONG)ep->bDescriptorType,
                 (ULONG)ep->bEndpointAddress, (ULONG)ep->bmAttributes);
         Kprintf("%s      wMaxPacketSize=%lu bInterval=%lu\n",
-                pfx, (ULONG)LE16(ep->wMaxPacketSize), (ULONG)ep->bInterval);
+                pfx, (ULONG)le16(ep->wMaxPacketSize), (ULONG)ep->bInterval);
         Kprintf("%s      SS Companion: bLength=%lu bDescriptorType=%lu bMaxBurst=%lu bmAttributes=0x%02lx\n",
                 pfx, (ULONG)ss_ep->bLength, (ULONG)ss_ep->bDescriptorType,
                 (ULONG)ss_ep->bMaxBurst, (ULONG)ss_ep->bmAttributes);
         Kprintf("%s      SS Companion: wBytesPerInterval=%lu\n",
-                pfx, (ULONG)LE16(ss_ep->wBytesPerInterval));
+                pfx, (ULONG)le16(ss_ep->wBytesPerInterval));
     }
 }
 
@@ -415,7 +415,7 @@ void xhci_dump_config(const char *tag, const struct usb_config *cfg, UBYTE addr)
     Kprintf("%s Addr %ld configuration dump:\n", pfx, (ULONG)addr);
     Kprintf("%s  bLength=%lu bDescriptorType=%lu wTotalLength=%lu bNumInterfaces=%lu\n",
             pfx, (ULONG)cfg->desc.bLength, (ULONG)cfg->desc.bDescriptorType,
-            (ULONG)LE16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
+            (ULONG)le16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
     Kprintf("%s  bConfigurationValue=%lu iConfiguration=%lu bmAttributes=0x%02lx bMaxPower=%lu\n",
             pfx, (ULONG)cfg->desc.bConfigurationValue, (ULONG)cfg->desc.iConfiguration,
             (ULONG)cfg->desc.bmAttributes, (ULONG)cfg->desc.bMaxPower);

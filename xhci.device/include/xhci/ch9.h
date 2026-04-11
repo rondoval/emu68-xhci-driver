@@ -33,8 +33,8 @@
 #ifndef __LINUX_USB_CH9_H
 #define __LINUX_USB_CH9_H
 
-#include <emu_byteorder.h>
-#include <emu_types.h>
+#include <byteorder.h>
+#include <types.h>
 
 /*-------------------------------------------------------------------------*/
 
@@ -221,21 +221,21 @@
 /* USB_DT_DEVICE: Device descriptor */
 struct usb_device_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
+	u8 bLength;
+	u8 bDescriptorType;
 
 	__le16 bcdUSB;
-	__u8 bDeviceClass;
-	__u8 bDeviceSubClass;
-	__u8 bDeviceProtocol;
-	__u8 bMaxPacketSize0;
+	u8 bDeviceClass;
+	u8 bDeviceSubClass;
+	u8 bDeviceProtocol;
+	u8 bMaxPacketSize0;
 	__le16 idVendor;
 	__le16 idProduct;
 	__le16 bcdDevice;
-	__u8 iManufacturer;
-	__u8 iProduct;
-	__u8 iSerialNumber;
-	__u8 bNumConfigurations;
+	u8 iManufacturer;
+	u8 iProduct;
+	u8 iSerialNumber;
+	u8 bNumConfigurations;
 } __attribute__((packed));
 
 #define USB_DT_DEVICE_SIZE 18
@@ -277,15 +277,15 @@ struct usb_device_descriptor
  */
 struct usb_config_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
+	u8 bLength;
+	u8 bDescriptorType;
 
 	__le16 wTotalLength;
-	__u8 bNumInterfaces;
-	__u8 bConfigurationValue;
-	__u8 iConfiguration;
-	__u8 bmAttributes;
-	__u8 bMaxPower;
+	u8 bNumInterfaces;
+	u8 bConfigurationValue;
+	u8 iConfiguration;
+	u8 bmAttributes;
+	u8 bMaxPower;
 } __attribute__((packed));
 
 #define USB_DT_CONFIG_SIZE 9
@@ -301,10 +301,10 @@ struct usb_config_descriptor
 /* USB_DT_STRING: String descriptor information. */
 struct usb_string_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
+	u8 bLength;
+	u8 bDescriptorType;
 
-	__u8 bString[]; /* UTF-16LE encoded string */
+	u8 bString[]; /* UTF-16LE encoded string */
 } __attribute__((packed));
 
 /*-------------------------------------------------------------------------*/
@@ -312,16 +312,16 @@ struct usb_string_descriptor
 /* USB_DT_INTERFACE: Interface descriptor */
 struct usb_interface_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
+	u8 bLength;
+	u8 bDescriptorType;
 
-	__u8 bInterfaceNumber;
-	__u8 bAlternateSetting;
-	__u8 bNumEndpoints;
-	__u8 bInterfaceClass;
-	__u8 bInterfaceSubClass;
-	__u8 bInterfaceProtocol;
-	__u8 iInterface;
+	u8 bInterfaceNumber;
+	u8 bAlternateSetting;
+	u8 bNumEndpoints;
+	u8 bInterfaceClass;
+	u8 bInterfaceSubClass;
+	u8 bInterfaceProtocol;
+	u8 iInterface;
 } __attribute__((packed));
 
 #define USB_DT_INTERFACE_SIZE 9
@@ -331,18 +331,18 @@ struct usb_interface_descriptor
 /* USB_DT_ENDPOINT: Endpoint descriptor */
 struct usb_endpoint_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
+	u8 bLength;
+	u8 bDescriptorType;
 
-	__u8 bEndpointAddress;
-	__u8 bmAttributes;
+	u8 bEndpointAddress;
+	u8 bmAttributes;
 	__le16 wMaxPacketSize;
-	__u8 bInterval;
+	u8 bInterval;
 
 	/* NOTE:  these two are _only_ in audio endpoints. */
 	/* use USB_DT_ENDPOINT*_SIZE in bLength, not sizeof. */
-	__u8 bRefresh;
-	__u8 bSynchAddress;
+	u8 bRefresh;
+	u8 bSynchAddress;
 } __attribute__((packed));
 
 #define USB_DT_ENDPOINT_SIZE 7
@@ -507,7 +507,7 @@ static inline int usb_endpoint_is_isoc_out(
  */
 static inline int usb_endpoint_maxp(const struct usb_endpoint_descriptor *epd)
 {
-	return LE16(epd->wMaxPacketSize);
+	return le16(epd->wMaxPacketSize);
 }
 
 /**
@@ -519,7 +519,7 @@ static inline int usb_endpoint_maxp(const struct usb_endpoint_descriptor *epd)
 static inline int
 usb_endpoint_maxp_mult(const struct usb_endpoint_descriptor *epd)
 {
-	int maxp = LE16(epd->wMaxPacketSize);
+	int maxp = le16(epd->wMaxPacketSize);
 
 	return USB_EP_MAXP_MULT(maxp) + 1;
 }
@@ -535,11 +535,11 @@ static inline int usb_endpoint_interrupt_type(
 /* USB_DT_SS_ENDPOINT_COMP: SuperSpeed Endpoint Companion descriptor */
 struct usb_ss_ep_comp_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
+	u8 bLength;
+	u8 bDescriptorType;
 
-	__u8 bMaxBurst;
-	__u8 bmAttributes;
+	u8 bMaxBurst;
+	u8 bmAttributes;
 	__le16 wBytesPerInterval;
 } __attribute__((packed));
 
@@ -587,11 +587,11 @@ enum usb_device_speed
 /* USB 3.0 BOS descriptor */
 struct usb_bos_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
+	u8 bLength;
+	u8 bDescriptorType;
 
 	__le16 wTotalLength;
-	__u8 bNumDeviceCaps;
+	u8 bNumDeviceCaps;
 } __attribute__((packed));
 
 #define USB_CAP_DESC_USB20_EXTENSION 0x02
@@ -603,9 +603,9 @@ struct usb_bos_descriptor
 /* USB 2.0 Extension Capability descriptor */
 struct usb_2_0_extension_capability_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
-	__u8 bDevCapabilityType;
+	u8 bLength;
+	u8 bDescriptorType;
+	u8 bDevCapabilityType;
 
 	__le32 bmAttributes;
 } __attribute__((packed));
@@ -615,14 +615,14 @@ struct usb_2_0_extension_capability_descriptor
 /* SuperSpeed USB Device Capability descriptor */
 struct usb_ss_device_capability_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
-	__u8 bDevCapabilityType;
+	u8 bLength;
+	u8 bDescriptorType;
+	u8 bDevCapabilityType;
 
-	__u8 bmAttributes;
+	u8 bmAttributes;
 	__le16 wSpeedsSupported;
-	__u8 bFunctionalitySupport;
-	__u8 bU1DevExitLat;
+	u8 bFunctionalitySupport;
+	u8 bU1DevExitLat;
 	__le16 wU2DevExitLat;
 } __attribute__((packed));
 
@@ -635,22 +635,22 @@ struct usb_ss_device_capability_descriptor
 /* Container ID Capability descriptor */
 struct usb_container_id_capability_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
-	__u8 bDevCapabilityType;
+	u8 bLength;
+	u8 bDescriptorType;
+	u8 bDevCapabilityType;
 
-	__u8 bReserved;
-	__u8 ContainerID[16];
+	u8 bReserved;
+	u8 ContainerID[16];
 } __attribute__((packed));
 
 /* SuperSpeedPlus USB Device Capability descriptor */
 struct usb_ssp_device_capability_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
-	__u8 bDevCapabilityType;
+	u8 bLength;
+	u8 bDescriptorType;
+	u8 bDevCapabilityType;
 
-	__u8 bReserved;
+	u8 bReserved;
 	__le32 bmAttributes;
 	__le16 wFunctionalitySupport;
 	__le16 wReserved;
@@ -685,9 +685,9 @@ struct usb_ssp_device_capability_descriptor
 /* Precision Time Measurement Capability Descriptor */
 struct usb_ptm_capability_descriptor
 {
-	__u8 bLength;
-	__u8 bDescriptorType;
-	__u8 bDevCapabilityType;
+	u8 bLength;
+	u8 bDescriptorType;
+	u8 bDevCapabilityType;
 } __attribute__((packed));
 
 #endif /* __LINUX_USB_CH9_H */

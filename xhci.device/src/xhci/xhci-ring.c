@@ -14,7 +14,7 @@
  */
 
 #include <debug.h>
-#include <emu_memory.h>
+#include <memory.h>
 
 #include <xhci/xhci-ring.h>
 
@@ -34,6 +34,17 @@
 #undef KprintfH
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
+
+static inline void xhci_copy_to_bounce_buffer(CONST_APTR src, APTR dst, ULONG size)
+{
+	if ((((ULONG)src | (ULONG)dst | size) & (sizeof(ULONG) - 1)) == 0)
+	{
+		CopyMemQuick((ULONG *)src, (ULONG *)dst, size);
+		return;
+	}
+
+	CopyMem(src, dst, size);
+}
 
 struct xhci_segment
 {
@@ -73,10 +84,10 @@ struct xhci_ring
  */
 static void xhci_segment_free(struct xhci_ctrl *ctrl, struct xhci_segment *seg)
 {
-	memalign_free(ctrl->memoryPool, seg->trbs);
+	dma_free(ctrl->memoryPool, seg->trbs);
 	seg->trbs = NULL;
 
-	FreeVecPooled(ctrl->memoryPool, seg);
+	pool_free(ctrl->memoryPool, seg);
 }
 
 /**
@@ -103,7 +114,7 @@ void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
 	}
 	xhci_segment_free(ctrl, first_seg);
 
-	FreeVecPooled(ctrl->memoryPool, ring);
+	pool_free(ctrl->memoryPool, ring);
 }
 
 /**
@@ -126,16 +137,16 @@ static void xhci_link_segments(struct xhci_segment *prev,
 	if (link_trbs)
 	{
 		prev->trbs[TRBS_PER_SEGMENT - 1].link.segment_ptr =
-			LE64((dma_addr_t)next->trbs);
+			le64((dma_addr_t)next->trbs);
 
 		/*
 		 * Set the last TRB in the segment to
 		 * have a TRB type ID of Link TRB
 		 */
-		u32 val = LE32(prev->trbs[TRBS_PER_SEGMENT - 1].link.control);
+		u32 val = le32(prev->trbs[TRBS_PER_SEGMENT - 1].link.control);
 		val &= ~TRB_TYPE_BITMASK;
 		val |= TRB_TYPE(TRB_LINK);
-		prev->trbs[TRBS_PER_SEGMENT - 1].link.control = LE32(val);
+		prev->trbs[TRBS_PER_SEGMENT - 1].link.control = le32(val);
 	}
 }
 
@@ -177,16 +188,15 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring)
  */
 static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
 {
-	struct xhci_segment *seg = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_segment));
+	struct xhci_segment *seg = pool_zalloc(ctrl->memoryPool, sizeof(struct xhci_segment));
 	if (!seg)
 	{
-		Kprintf("AllocVecPooled failed for size %lu\n",
+		Kprintf("pool_zalloc failed for size %lu\n",
 				(ULONG)sizeof(struct xhci_segment));
 		return NULL;
 	}
 
 	seg->trbs = xhci_malloc(ctrl, SEGMENT_SIZE);
-	seg->next = NULL;
 
 	return seg;
 }
@@ -215,14 +225,13 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 {
 	unsigned int remaining = num_segs;
 
-	struct xhci_ring *ring = AllocVecPooled(ctrl->memoryPool, sizeof(struct xhci_ring));
+	struct xhci_ring *ring = pool_zalloc(ctrl->memoryPool, sizeof(struct xhci_ring));
 	if (!ring)
 	{
-		Kprintf("AllocVecPooled failed for size %lu\n",
+		Kprintf("pool_zalloc failed for size %lu\n",
 				(ULONG)sizeof(struct xhci_ring));
 		return NULL;
 	}
-	_memset(ring, 0, sizeof(struct xhci_ring));
 	ring->num_segs = num_segs;
 	ring->is_event_ring = is_event_ring;
 	ring->memoryPool = ctrl->memoryPool;
@@ -235,7 +244,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 	if (!ring->first_seg)
 	{
 		Kprintf("xhci_segment_alloc failed\n");
-		FreeVecPooled(ctrl->memoryPool, ring);
+		pool_free(ctrl->memoryPool, ring);
 		return NULL;
 	}
 
@@ -264,7 +273,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 	{
 		/* See section 4.9.2.1 and 6.4.4.1 */
 		prev->trbs[TRBS_PER_SEGMENT - 1].link.control |=
-			LE32(LINK_TOGGLE);
+			le32(LINK_TOGGLE);
 	}
 	xhci_initialize_ring_info(ring);
 
@@ -282,8 +291,8 @@ void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct
 		 val++)
 	{
 		struct xhci_erst_entry *entry = &erst->entries[val];
-		entry->seg_addr = LE64((dma_addr_t)seg->trbs);
-		entry->seg_size = LE32(TRBS_PER_SEGMENT);
+		entry->seg_addr = le64((dma_addr_t)seg->trbs);
+		entry->seg_size = le32(TRBS_PER_SEGMENT);
 		entry->rsvd = 0;
 		seg = seg->next;
 	}
@@ -294,10 +303,10 @@ void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct
 				(u64)(uintptr_t)ring->dequeue & (u64)~ERST_PTR_MASK);
 
 	/* set ERST count with the number of entries in the segment table */
-	val = readl(&ir_set->erst_size);
+	val = mmio_read32(&ir_set->erst_size);
 	val &= ERST_SIZE_MASK;
 	val |= ERST_NUM_SEGS;
-	writel(val, &ir_set->erst_size);
+	mmio_write32(val, &ir_set->erst_size);
 
 	/* this is the event ring segment table pointer */
 	u64 val_64 = xhci_readq(&ir_set->erst_base);
@@ -343,7 +352,7 @@ inline static BOOL last_trb_on_last_seg(struct xhci_ring *ring,
 		return ((trb == &seg->trbs[TRBS_PER_SEGMENT]) &&
 				(seg->next == ring->first_seg));
 	else
-		return LE32(trb->link.control) & LINK_TOGGLE;
+		return le32(trb->link.control) & LINK_TOGGLE;
 }
 
 /**
@@ -369,7 +378,7 @@ inline static BOOL last_trb_on_last_seg(struct xhci_ring *ring,
  */
 inline static void inc_enq(struct xhci_ring *ring, BOOL more_trbs_coming)
 {
-	u32 chain = LE32(ring->enqueue->generic.field[3]) & TRB_CHAIN;
+	u32 chain = le32(ring->enqueue->generic.field[3]) & TRB_CHAIN;
 	union xhci_trb *next = ++(ring->enqueue);
 
 	/*
@@ -397,10 +406,10 @@ inline static void inc_enq(struct xhci_ring *ring, BOOL more_trbs_coming)
 			 * carry over the chain bit of the previous TRB
 			 * (which may mean the chain bit is cleared).
 			 */
-			next->link.control &= LE32(~TRB_CHAIN);
-			next->link.control |= LE32(chain);
+			next->link.control &= le32(~TRB_CHAIN);
+			next->link.control |= le32(chain);
 
-			next->link.control ^= LE32(TRB_CYCLE);
+			next->link.control ^= le32(TRB_CYCLE);
 			xhci_flush_cache(next,
 							 sizeof(union xhci_trb));
 		}
@@ -465,10 +474,10 @@ inline static dma_addr_t xhci_ring_enqueue_trb(struct xhci_ring *ring,
 {
 	struct xhci_generic_trb *trb = &ring->enqueue->generic;
 
-	trb->field[0] = LE32(field0);
-	trb->field[1] = LE32(field1);
-	trb->field[2] = LE32(field2);
-	trb->field[3] = LE32(field3);
+	trb->field[0] = le32(field0);
+	trb->field[1] = le32(field1);
+	trb->field[2] = le32(field2);
+	trb->field[3] = le32(field3);
 
 	xhci_flush_cache(trb, sizeof(struct xhci_generic_trb));
 
@@ -494,9 +503,9 @@ inline static void prepare_ring(struct xhci_ring *ep_ring)
 		 * If we're not dealing with 0.95 hardware or isoc rings
 		 * on AMD 0.96 host, clear the chain bit.
 		 */
-		next->link.control &= LE32(~TRB_CHAIN);
+		next->link.control &= le32(~TRB_CHAIN);
 
-		next->link.control ^= LE32(TRB_CYCLE);
+		next->link.control ^= le32(TRB_CYCLE);
 
 		xhci_flush_cache(next, sizeof(union xhci_trb));
 
@@ -521,7 +530,7 @@ union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring)
 	union xhci_trb *event = ring->dequeue;
 
 	/* Does the HC or OS own the TRB? */
-	if ((LE32(event->event_cmd.flags) & TRB_CYCLE) != ring->cycle_state)
+	if ((le32(event->event_cmd.flags) & TRB_CYCLE) != ring->cycle_state)
 		return NULL;
 
 	return event;
@@ -557,7 +566,7 @@ u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr)
 
 	union xhci_trb *trb = (union xhci_trb *)(uintptr_t)trb_addr;
 	xhci_inval_cache(trb, sizeof(*trb));
-	return trb_addr | (LE32(trb->generic.field[3]) & TRB_CYCLE);
+	return trb_addr | (le32(trb->generic.field[3]) & TRB_CYCLE);
 }
 
 void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, UWORD trb_count, UWORD start_index)
@@ -572,11 +581,11 @@ void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, UWORD trb_count, UWORD 
 			return;
 
 		xhci_inval_cache(trb, sizeof(*trb));
-		u32 cycle = LE32(trb->generic.field[3]) & TRB_CYCLE;
+		u32 cycle = le32(trb->generic.field[3]) & TRB_CYCLE;
 		trb->generic.field[0] = 0;
 		trb->generic.field[1] = 0;
 		trb->generic.field[2] = 0;
-		trb->generic.field[3] = LE32(TRB_TYPE(TRB_TR_NOOP) | cycle);
+		trb->generic.field[3] = le32(TRB_TYPE(TRB_TR_NOOP) | cycle);
 		xhci_flush_cache(trb, sizeof(*trb));
 	}
 }
@@ -605,8 +614,8 @@ dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 sl
 		field3 |= EP_ID_FOR_TRB(ep_index);
 
 	dma_addr_t trb_dma = xhci_ring_enqueue_trb(ring, FALSE,
-											   lower_32_bits(address), /* field0 */
-											   upper_32_bits(address), /* field1 */
+									   u64_lo32(address), /* field0 */
+									   u64_hi32(address), /* field1 */
 											   0,					   /* field2 */
 											   field3);				   /* field3 */
 	return trb_dma;
@@ -617,7 +626,7 @@ dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 sl
  * packets remaining in the TD (*not* including this TRB).
  *
  * Total TD packet count = total_packet_count =
- *     DIV_ROUND_UP(TD size in bytes / wMaxPacketSize)
+ *     ceil(TD size in bytes / wMaxPacketSize)
  *
  * Packets transferred up to and including this TRB = packets_transferred =
  *     rounddown(total bytes transferred including this TRB / wMaxPacketSize)
@@ -649,7 +658,7 @@ inline static u32 xhci_td_remainder(int transferred,
 		trb_buff_len == td_total_len)
 		return 0;
 
-	u32 total_packet_count = DIV_ROUND_UP(td_total_len, maxp);
+	u32 total_packet_count = DIV_CEIL(td_total_len, maxp);
 
 	/* Queueing functions don't count the current TRB into transferred */
 	return (total_packet_count - ((transferred + trb_buff_len) / maxp));
@@ -665,7 +674,7 @@ inline static int ring_has_room(struct xhci_ring *ring, struct ep_context *ep_ct
 
 inline static void prime_first_trb(struct xhci_generic_trb *start_trb)
 {
-	start_trb->field[3] ^= LE32(TRB_CYCLE);
+	start_trb->field[3] ^= le32(TRB_CYCLE);
 	xhci_flush_cache(start_trb, sizeof(struct xhci_generic_trb));
 }
 
@@ -677,7 +686,7 @@ inline static void giveback_first_trb(struct usb_device *udev, int ep_index,
 	prime_first_trb(start_trb);
 
 	/* Ringing EP doorbell here */
-	writel(DB_VALUE(ep_index, 0), &ctrl->dba->doorbell[udev->slot_id]);
+	mmio_write32(DB_VALUE(ep_index, 0), &ctrl->dba->doorbell[udev->slot_id]);
 
 	return;
 }
@@ -706,14 +715,14 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 	if (!ctrl || !ctrl->memoryPool || !addr || size == 0)
 		return (dma_addr_t)addr;
 
-	if (likely(addr > (APTR)0x1FFFFF) && ((ULONG)addr & ARCH_DMA_MINALIGN_MASK) == 0)
+	if (likely(addr > (APTR)0x1FFFFF && ((ULONG)addr & DMA_ALIGN_MIN_MASK) == 0))
 	{
 		xhci_flush_cache(addr, size);
 		return (dma_addr_t)addr;
 	}
 
-	ULONG alloc_len = ALIGN(size, ARCH_DMA_MINALIGN);
-	void *aligned = memalign(ctrl->memoryPool, ARCH_DMA_MINALIGN, alloc_len);
+	ULONG alloc_len = ALIGN_UP(size, DMA_ALIGN_MIN);
+	void *aligned = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, alloc_len);
 	if (!aligned)
 	{
 		Kprintf("failed to allocate bounce buffer for %lx len=%ld\n", (ULONG)addr, (LONG)size);
@@ -724,7 +733,7 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 
 	if (copy)
 	{
-		CopyMem(addr, aligned, size);
+		xhci_copy_to_bounce_buffer(addr, aligned, size);
 	}
 	xhci_flush_cache(aligned, alloc_len);
 
@@ -754,8 +763,8 @@ inline static dma_addr_t xhci_ring_enqueue_setup_trb(struct xhci_ring *ep_ring, 
 	}
 
 	return xhci_ring_enqueue_trb(ep_ring, TRUE,
-								 io->setup.bmRequestType | io->setup.bRequest << 8 | LE16(io->setup.wValue) << 16, /* field 0 */
-								 LE16(io->setup.wIndex) | LE16(io->setup.wLength) << 16,						   /* field 1 */
+								 io->setup.bmRequestType | io->setup.bRequest << 8 | le16(io->setup.wValue) << 16, /* field 0 */
+								 le16(io->setup.wIndex) | le16(io->setup.wLength) << 16,						   /* field 1 */
 								 TRB_LEN(8) | TRB_INTR_TARGET(0),												   /* field 2 */
 								 field3);																		   /* field 3 */
 }
@@ -779,8 +788,8 @@ inline static dma_addr_t xhci_ring_enqueue_data_trb(struct xhci_ctrl *ctrl, stru
 	field3 |= ep_ring->cycle_state;
 
 	return xhci_ring_enqueue_trb(ep_ring, TRUE,
-								 lower_32_bits(buf_64), /* field 0 */
-								 upper_32_bits(buf_64), /* field 1 */
+								 u64_lo32(buf_64), /* field 0 */
+								 u64_hi32(buf_64), /* field 1 */
 								 length_field,			/* field 2 */
 								 field3);				/* field 3 */
 }
@@ -880,8 +889,8 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 		u32 length_field = (TRB_LEN(trb_buff_len) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0));
 
 		dma_addr_t last_transfer_trb_addr = xhci_ring_enqueue_trb(ep_ring, (num_trbs > 1),
-																  lower_32_bits(addr), /* field 0 */
-																  upper_32_bits(addr), /* field 1 */
+											  u64_lo32(addr), /* field 0 */
+											  u64_hi32(addr), /* field 1 */
 																  length_field,		   /* field 2 */
 																  field3);			   /* field 3 */
 		td_trb_addrs[td_trb_index++] = last_transfer_trb_addr;
@@ -924,7 +933,7 @@ inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct USBIORe
 	 * XHCI Spec (Table 49 / 6.4.1) requires we avoid spanning that boundary, so
 	 * we may need several chained TRBs if the buffer crosses it.
 	 */
-	u32 running_total = TRB_MAX_BUFF_SIZE - (lower_32_bits(*addr) & (TRB_MAX_BUFF_SIZE - 1));
+	u32 running_total = TRB_MAX_BUFF_SIZE - (u64_lo32(*addr) & (TRB_MAX_BUFF_SIZE - 1));
 	*trb_buff_len = running_total;
 	running_total &= TRB_MAX_BUFF_SIZE - 1;
 
@@ -936,7 +945,7 @@ inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct USBIORe
 		num_trbs++;
 
 	/* Account for remaining 64KB windows, adding more TRBs as needed. */
-	num_trbs += DIV_ROUND_UP(io->data_buffer_length - running_total, TRB_MAX_BUFF_SIZE);
+	num_trbs += DIV_CEIL(io->data_buffer_length - running_total, TRB_MAX_BUFF_SIZE);
 	return num_trbs;
 }
 
@@ -959,8 +968,8 @@ void xhci_dump_request(const char *tag, const struct USBIORequest *req)
 	if (req->req.io_Command == CMD_REQUEST_CONTROL)
 		Kprintf("%s  SetupData: bmRequestType=0x%02lx bRequest=0x%02lx wValue=0x%04lx wIndex=0x%04lx wLength=%lu\n",
 				pfx, (ULONG)req->setup.bmRequestType, (ULONG)req->setup.bRequest,
-				(ULONG)LE16(req->setup.wValue), (ULONG)LE16(req->setup.wIndex),
-				(ULONG)LE16(req->setup.wLength));
+				(ULONG)le16(req->setup.wValue), (ULONG)le16(req->setup.wIndex),
+				(ULONG)le16(req->setup.wLength));
 }
 
 int xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, unsigned int timeout_ms, BOOL defer_doorbell)
@@ -1012,7 +1021,7 @@ int xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, unsig
 		return ERR_NO_ERROR;
 	}
 
-	dma_addr_t *td_trb_addrs = AllocVecPooled(ctrl->memoryPool, num_trbs * sizeof(dma_addr_t));
+	dma_addr_t *td_trb_addrs = pool_alloc(ctrl->memoryPool, num_trbs * sizeof(dma_addr_t));
 	if (!td_trb_addrs)
 	{
 		Kprintf("Failed to alloc TD TRB list\n");

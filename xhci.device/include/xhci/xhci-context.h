@@ -1,7 +1,7 @@
 #ifndef __XHCI_CONTEXT_H
 #define __XHCI_CONTEXT_H
 
-#include <emu_types.h>
+#include <types.h>
 
 /**
  * struct xhci_container_ctx

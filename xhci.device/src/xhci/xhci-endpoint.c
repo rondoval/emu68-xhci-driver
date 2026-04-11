@@ -9,7 +9,7 @@
 #include <proto/utility.h>
 #endif
 
-#include <emu_memory.h>
+#include <memory.h>
 #include <debug.h>
 #include <config.h>
 #include <minlist.h>
@@ -75,7 +75,7 @@ static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx);
 
 BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packet_size, APTR memoryPool)
 {
-    struct ep_context *ep_ctx = AllocVecPooled(memoryPool, sizeof(struct ep_context));
+    struct ep_context *ep_ctx = pool_zalloc(memoryPool, sizeof(struct ep_context));
     if (!ep_ctx)
     {
         Kprintf("Failed to allocate ep_context for EP %d\n", ep_index);
@@ -97,7 +97,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packe
             xhci_td_destroy_list(ep_ctx->active_tds, ERR_ALLOC_ERROR);
         if (ep_ctx->ring)
             xhci_ring_free(udev->controller, ep_ctx->ring);
-        FreeVecPooled(memoryPool, ep_ctx);
+        pool_free(memoryPool, ep_ctx);
         return FALSE;
     }
 
@@ -126,7 +126,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
 
             if (ep_ctx->rt_template_req)
             {
-                FreeVecPooled(ep_ctx->memoryPool, ep_ctx->rt_template_req);
+                pool_free(ep_ctx->memoryPool, ep_ctx->rt_template_req);
                 ep_ctx->rt_template_req = NULL;
             }
             if (ep_ctx->rt_stop_pending)
@@ -142,7 +142,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
             if (ep_ctx->ring)
                 xhci_ring_free(udev->controller, ep_ctx->ring);
 
-            FreeVecPooled(ep_ctx->memoryPool, ep_ctx);
+            pool_free(ep_ctx->memoryPool, ep_ctx);
             udev->ep_context[i] = NULL;
         }
     }
@@ -288,7 +288,7 @@ void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct USBIORequest *req, 
     if (!result)
     {
         Kprintf("Failed to add TD to active list\n");
-        FreeVecPooled(ep_ctx->memoryPool, trb_addrs);
+        pool_free(ep_ctx->memoryPool, trb_addrs);
         xhci_ep_set_failed(ep_ctx);
         return;
     }
@@ -323,7 +323,7 @@ static BOOL xhci_ep_has_stop_abort_requests(struct ep_context *ep_ctx)
 
 static BOOL xhci_ep_append_stop_abort_request(struct ep_context *ep_ctx, struct USBIORequest *abort_req)
 {
-    IOReqNode *node = AllocVecPooled(ep_ctx->memoryPool, sizeof(*node));
+    IOReqNode *node = pool_alloc(ep_ctx->memoryPool, sizeof(*node));
     if (!node)
         return FALSE;
 
@@ -336,7 +336,7 @@ static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx)
 {
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->stop_abort_reqs)) != NULL)
-        FreeVecPooled(ep_ctx->memoryPool, node);
+        pool_free(ep_ctx->memoryPool, node);
 
     ep_ctx->stop_process_timeouts = FALSE;
 }
@@ -522,7 +522,7 @@ BYTE xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *
     xhci_ep_set_rt_stopped(ep_ctx);
 
     ep_ctx->rt_req = (struct USBRealtimeHooks *)req->data_buffer;
-    ep_ctx->rt_template_req = AllocVecPooled(ep_ctx->memoryPool, sizeof(struct USBIORequest));
+    ep_ctx->rt_template_req = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
     if (!ep_ctx->rt_template_req)
     {
         Kprintf("Failed to allocate memory\n");
@@ -568,7 +568,7 @@ BYTE xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *
     ep_ctx->rt_req = NULL;
     if (ep_ctx->rt_template_req)
     {
-        FreeVecPooled(ep_ctx->memoryPool, ep_ctx->rt_template_req);
+        pool_free(ep_ctx->memoryPool, ep_ctx->rt_template_req);
         ep_ctx->rt_template_req = NULL;
     }
     xhci_ep_set_idle(ep_ctx);
@@ -623,7 +623,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
     while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
     {
         ULONG frame = ep_ctx->rt_next_frame;
-        struct USBIORequest *rt_io = AllocVecPooled(ep_ctx->memoryPool, sizeof(struct USBIORequest));
+        struct USBIORequest *rt_io = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
         if (!rt_io)
         {
             Kprintf("Failed to alloc RT ISO IO req\n");
@@ -648,7 +648,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         if (!rt_buffer_req.data || rt_buffer_req.length == 0)
         {
             KprintfH("RT ISO hook provided no buffer/length\n");
-            FreeVecPooled(ep_ctx->memoryPool, rt_io);
+            pool_free(ep_ctx->memoryPool, rt_io);
             break;
         }
 
@@ -670,7 +670,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         int ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != ERR_NO_ERROR)
         {
-            FreeVecPooled(ep_ctx->memoryPool, rt_io);
+            pool_free(ep_ctx->memoryPool, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
@@ -695,7 +695,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
     while (inflight < RT_ISO_IN_TARGET_TDS)
     {
         ULONG frame = ep_ctx->rt_next_frame;
-        struct USBIORequest *rt_io = AllocVecPooled(ep_ctx->memoryPool, sizeof(struct USBIORequest));
+        struct USBIORequest *rt_io = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
         if (!rt_io)
         {
             Kprintf("Failed to alloc RT ISO IO req\n");
@@ -703,11 +703,11 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         }
         CopyMem(template, rt_io, sizeof(struct USBIORequest));
 
-        rt_io->data_buffer = AllocVecPooled(ep_ctx->memoryPool, ep_ctx->max_packet_size);
+        rt_io->data_buffer = pool_alloc(ep_ctx->memoryPool, ep_ctx->max_packet_size);
         if (!rt_io->data_buffer)
         {
             Kprintf("Failed to alloc RT ISO staging buffer\n");
-            FreeVecPooled(ep_ctx->memoryPool, rt_io);
+            pool_free(ep_ctx->memoryPool, rt_io);
             break;
         }
         rt_io->data_buffer_length = ep_ctx->max_packet_size;
@@ -722,8 +722,8 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         int ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != ERR_NO_ERROR)
         {
-            FreeVecPooled(ep_ctx->memoryPool, rt_io->data_buffer);
-            FreeVecPooled(ep_ctx->memoryPool, rt_io);
+            pool_free(ep_ctx->memoryPool, rt_io->data_buffer);
+            pool_free(ep_ctx->memoryPool, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
@@ -795,7 +795,7 @@ BYTE xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
     }
 
     /* microframe_index is in 125us units; for FS frames use the frame number (divide by 8). */
-    ep_ctx->rt_next_frame = (readl(ep_ctx->udev->controller->run_regs->microframe_index) >> 3) & 0xffff;
+    ep_ctx->rt_next_frame = (mmio_read32(&ep_ctx->udev->controller->run_regs->microframe_index) >> 3) & 0xffff;
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
     xhci_ep_schedule_rt_iso(ep_ctx);
     return ERR_NO_ERROR;

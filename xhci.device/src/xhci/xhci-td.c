@@ -9,7 +9,8 @@
 #include <exec/errors.h>
 
 #include <device.h>
-#include <emu_memory.h>
+#include <memory.h>
+#include <timing.h>
 #include <xhci/xhci-descriptors.h>
 #include <xhci/xhci-context.h>
 #include <xhci/xhci-endpoint.h>
@@ -30,6 +31,17 @@
 #undef KprintfH
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-td] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
+
+static inline void xhci_copy_from_bounce_buffer(CONST_APTR src, APTR dst, ULONG size)
+{
+    if ((((ULONG)src | (ULONG)dst | size) & (sizeof(ULONG) - 1)) == 0)
+    {
+        CopyMemQuick((ULONG *)src, (ULONG *)dst, size);
+        return;
+    }
+
+    CopyMem(src, dst, size);
+}
 
 struct xhci_td
 {
@@ -55,7 +67,7 @@ struct TransferDescriptorList
 
 TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
 {
-    TransferDescriptorList *td_list = AllocVecPooled(ctrl->memoryPool, sizeof(TransferDescriptorList));
+    TransferDescriptorList *td_list = pool_zalloc(ctrl->memoryPool, sizeof(TransferDescriptorList));
     if (!td_list)
     {
         Kprintf("Failed to alloc TransferDescriptorList\n");
@@ -78,7 +90,7 @@ void xhci_td_destroy_list(TransferDescriptorList *td_list, UBYTE error_code)
 
     xhci_td_fail_all(td_list, error_code);
 
-    FreeVecPooled(td_list->memoryPool, td_list);
+    pool_free(td_list->memoryPool, td_list);
 }
 
 BOOL xhci_td_is_empty(TransferDescriptorList *td_list)
@@ -139,14 +151,12 @@ static struct xhci_td *td_create(TransferDescriptorList *td_list,
     if (!td_list)
         return NULL;
 
-    struct xhci_td *td = AllocVecPooled(td_list->memoryPool, sizeof(struct xhci_td));
+    struct xhci_td *td = pool_zalloc(td_list->memoryPool, sizeof(struct xhci_td));
     if (!td)
     {
         Kprintf("Failed to alloc xhci_td\n");
         return NULL;
     }
-
-    _memset(td, 0, sizeof(struct xhci_td));
 
     td->req = io_req;
 
@@ -258,10 +268,10 @@ inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct USBIORequest *r
     if (copy)
     {
         xhci_inval_cache(bounce, size);
-        CopyMem(bounce, addr, size);
+        xhci_copy_from_bounce_buffer(bounce, addr, size);
     }
 
-    memalign_free(ctrl->memoryPool, bounce);
+    dma_free(ctrl->memoryPool, bounce);
     req->driver_private_flags &= ~REQ_DMA_MAPPED;
     req->driver_private_dma_address = NULL;
 }
@@ -270,11 +280,11 @@ static void xhci_td_free(TransferDescriptorList *td_list, struct xhci_td *td)
 {
     if (td->trb_addrs)
     {
-        FreeVecPooled(td_list->memoryPool, td->trb_addrs);
+        pool_free(td_list->memoryPool, td->trb_addrs);
         td->trb_addrs = NULL;
     }
 
-    FreeVecPooled(td_list->memoryPool, td);
+    pool_free(td_list->memoryPool, td);
 }
 
 BOOL xhci_td_has_request(TransferDescriptorList *td_list, struct USBIORequest *io_req)
@@ -489,9 +499,9 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
             if (td->req->data_buffer)
                 xhci_dma_unmap(td_list->ctrl, td->req, FALSE);
             if (td->is_rt_iso && td->req->direction == DIRECTION_IN && td->req->data_buffer)
-                FreeVecPooled(td_list->memoryPool, td->req->data_buffer);
+                pool_free(td_list->memoryPool, td->req->data_buffer);
             if (td->is_rt_iso)
-                FreeVecPooled(td_list->memoryPool, td->req);
+                pool_free(td_list->memoryPool, td->req);
             else
                 xhci_udev_io_reply_failed(td_list->ctrl, td->req, io_Error);
         }

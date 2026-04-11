@@ -22,9 +22,9 @@
 
 #include <device.h>
 #include <debug.h>
-#include <emu_bits.h>
-#include <emu_byteorder.h>
-#include <emu_memory.h>
+#include <bits.h>
+#include <byteorder.h>
+#include <memory.h>
 #include <minlist.h>
 
 #ifdef DEBUG
@@ -49,14 +49,13 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD virtual_address
     if (ctrl->devices_by_virtual_address[virtual_address])
         xhci_udev_free(ctrl->devices_by_virtual_address[virtual_address]);
 
-    struct usb_device *udev = AllocVecPooled(ctrl->memoryPool, sizeof(*udev));
+    struct usb_device *udev = pool_zalloc(ctrl->memoryPool, sizeof(*udev));
     if (!udev)
     {
         Kprintf("Failed to allocate usb_device for addr %ld\n", (LONG)virtual_address);
         goto nothing;
     }
 
-    _memset(udev, 0, sizeof(*udev));
     udev->virtual_address = virtual_address;
     udev->controller = ctrl;
     udev->speed = ctrl->pending_parent_speed;
@@ -89,7 +88,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD virtual_address
 destroy_out_ctx:
     xhci_free_container_ctx(ctrl, udev->out_ctx);
 free_udev:
-    FreeVecPooled(ctrl->memoryPool, udev);
+    pool_free(ctrl->memoryPool, udev);
 nothing:
     return NULL;
 }
@@ -146,7 +145,7 @@ void xhci_udev_free(struct usb_device *udev)
     while ((node = RemHeadMinList(&udev->configurations)) != NULL)
     {
         struct usb_config *conf = (struct usb_config *)node;
-        FreeVecPooled(ctrl->memoryPool, conf);
+        pool_free(ctrl->memoryPool, conf);
     }
 
     if (udev->in_ctx)
@@ -157,7 +156,7 @@ void xhci_udev_free(struct usb_device *udev)
     ctrl->dcbaa->dev_context_ptrs[udev->slot_id] = 0;
     ctrl->devices_by_virtual_address[udev->virtual_address] = NULL;
     ctrl->devices_by_slot_id[udev->slot_id] = NULL;
-    FreeVecPooled(ctrl->memoryPool, udev);
+    pool_free(ctrl->memoryPool, udev);
 }
 
 static UBYTE xhci_udev_find_epaddr_by_num(struct usb_device *udev, UBYTE epnum)
@@ -194,7 +193,7 @@ static void xhci_udev_patch_endpoint_address(struct usb_device *udev, struct USB
         return;
 
     /* If direction bit is already present, leave untouched. */
-    UWORD wIndex = LE16(setup->wIndex);
+    UWORD wIndex = le16(setup->wIndex);
     if (wIndex & 0x0080)
         return;
 
@@ -206,7 +205,7 @@ static void xhci_udev_patch_endpoint_address(struct usb_device *udev, struct USB
     if (!fixed || fixed == (UBYTE)wIndex)
         return;
 
-    setup->wIndex = cpu_to_le16(fixed);
+    setup->wIndex = le16(fixed);
 
     KprintfH("Patched endpoint address wIndex from %02lx to %02lx for epnum %ld\n",
              (ULONG)wIndex, (ULONG)fixed, (LONG)epnum);
@@ -224,15 +223,15 @@ static BOOL xhci_udev_filter_emulated_hub_ctrl_request(struct usb_device *udev, 
     if ((setup->bmRequestType & (USB_TYPE_MASK | USB_RECIP_MASK)) != (USB_TYPE_CLASS | USB_RECIP_OTHER))
         return FALSE;
 
-    const u16 wValue = LE16(setup->wValue);
-    const u8 portNo = LE16(setup->wIndex) & 0xFF;
+    const u16 wValue = le16(setup->wValue);
+    const u8 portNo = le16(setup->wIndex) & 0xFF;
     switch (wValue)
     {
     case USB_PORT_FEAT_SUSPEND:
     {
         const u8 link_state = (setup->bRequest == USB_REQ_CLEAR_FEATURE) ? 0 : 3;
-        setup->wValue = LE16(USB_PORT_FEAT_LINK_STATE);
-        setup->wIndex = LE16(portNo | (link_state << 8));
+        setup->wValue = le16(USB_PORT_FEAT_LINK_STATE);
+        setup->wIndex = le16(portNo | (link_state << 8));
         return FALSE;
     }
 
@@ -247,7 +246,7 @@ static BOOL xhci_udev_filter_emulated_hub_ctrl_request(struct usb_device *udev, 
         return TRUE;
 
     case USB_PORT_FEAT_C_SUSPEND: // this is only used for clear feature
-        setup->wValue = LE16(USB_SS_PORT_FEAT_C_LINK_STATE);
+        setup->wValue = le16(USB_SS_PORT_FEAT_C_LINK_STATE);
         return FALSE;
 
     default:
@@ -280,9 +279,9 @@ static int xhci_udev_send_ctrl_first(struct usb_device *udev, struct USBIOReques
     KprintfH("bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx\n",
              (ULONG)io->setup.bmRequestType,
              (ULONG)io->setup.bRequest,
-             LE16(io->setup.wValue),
-             LE16(io->setup.wIndex),
-             LE16(io->setup.wLength));
+             le16(io->setup.wValue),
+             le16(io->setup.wIndex),
+             le16(io->setup.wLength));
 
     /* Translate USB 2.0 hub requests to SS format for SS hubs */
     xhci_udev_translate_hub_descriptor_request(udev, io);
@@ -324,7 +323,7 @@ static int xhci_udev_send_ctrl_first(struct usb_device *udev, struct USBIOReques
                 return ERR_NO_ERROR;
         }
 
-        int ret = xhci_set_configuration(udev, LE16(setup->wValue) & 0xff);
+        int ret = xhci_set_configuration(udev, le16(setup->wValue) & 0xff);
         if (ret != ERR_NO_ERROR)
         {
             Kprintf("Failed to configure xHCI endpoint\n");
@@ -415,7 +414,7 @@ void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, 
         if (io->driver_private_flags & REQ_INTERNAL)
         {
             if (ctrl)
-                FreeVecPooled(ctrl->memoryPool, io);
+                pool_free(ctrl->memoryPool, io);
             return;
         }
 
@@ -435,7 +434,7 @@ static void xhci_udev_handle_hub_prefetch(struct usb_device *udev, struct USBIOR
 
     if (ctrl && io->data_buffer)
     {
-        memalign_free(ctrl->memoryPool, io->data_buffer);
+        dma_free(ctrl->memoryPool, io->data_buffer);
         io->data_buffer = NULL;
     }
 
@@ -444,7 +443,7 @@ static void xhci_udev_handle_hub_prefetch(struct usb_device *udev, struct USBIOR
     udev->pending_set_config_req = NULL;
 
     /* Now run the deferred xhci_set_configuration — hub data is cached */
-    UWORD config_value = LE16(orig_req->setup.wValue) & 0xff;
+    UWORD config_value = le16(orig_req->setup.wValue) & 0xff;
     int ret = xhci_set_configuration(udev, config_value);
     if (ret != ERR_NO_ERROR)
     {
@@ -482,7 +481,7 @@ void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, i
 
         struct xhci_ctrl *ctrl = udev->controller;
         if (ctrl)
-            FreeVecPooled(ctrl->memoryPool, io);
+            pool_free(ctrl->memoryPool, io);
         return;
     }
 
@@ -505,30 +504,29 @@ static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
     const UBYTE desc_type = (udev->speed >= USB_SPEED_SUPER) ? USB_DT_SS_HUB : USB_DT_HUB;
     const UBYTE desc_len = (desc_type == USB_DT_SS_HUB) ? 12 : 9;
 
-    const ULONG alloc_len = ALIGN(desc_len, ARCH_DMA_MINALIGN);
-    UBYTE *buf = memalign(ctrl->memoryPool, ARCH_DMA_MINALIGN, alloc_len);
-    struct USBIORequest *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
+    const ULONG alloc_len = ALIGN_UP(desc_len, DMA_ALIGN_MIN);
+    UBYTE *buf = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, alloc_len);
+    struct USBIORequest *io = pool_zalloc(ctrl->memoryPool, sizeof(*io));
     if (!io || !buf)
     {
         Kprintf("xhci_udev_fetch_hub_descriptor: alloc failed, falling back to SET_CONFIGURATION without hub data\n");
         if (buf)
-            memalign_free(ctrl->memoryPool, buf);
+            dma_free(ctrl->memoryPool, buf);
         if (io)
-            FreeVecPooled(ctrl->memoryPool, io);
+            pool_free(ctrl->memoryPool, io);
         udev->pending_set_config_req = NULL;
         return FALSE;
     }
 
-    _memset(io, 0, sizeof(*io));
     io->req.io_Command = CMD_REQUEST_CONTROL;
     io->req.io_Flags = IOF_QUICK;
     io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED | REQ_HUB_DESC_FETCH;
 
     io->setup.bmRequestType = USB_DIR_IN | USB_RT_HUB;
     io->setup.bRequest = USB_REQ_GET_DESCRIPTOR;
-    io->setup.wValue = cpu_to_le16((u16)(desc_type << 8));
+    io->setup.wValue = le16((u16)(desc_type << 8));
     io->setup.wIndex = 0;
-    io->setup.wLength = cpu_to_le16(desc_len);
+    io->setup.wLength = le16(desc_len);
 
     io->virtual_address = udev->virtual_address;
     io->data_buffer = buf;
@@ -545,8 +543,8 @@ static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
     if (ring_ret != ERR_NO_ERROR)
     {
         Kprintf("xhci_udev_fetch_hub_descriptor: ring_enqueue_td failed (%ld), falling back\n", (LONG)ring_ret);
-        memalign_free(ctrl->memoryPool, buf);
-        FreeVecPooled(ctrl->memoryPool, io);
+        dma_free(ctrl->memoryPool, buf);
+        pool_free(ctrl->memoryPool, io);
         udev->pending_set_config_req = NULL;
         return FALSE;
     }
@@ -563,20 +561,19 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, int e
         return;
 
     struct xhci_ctrl *ctrl = udev->controller;
-    struct USBIORequest *io = AllocVecPooled(ctrl->memoryPool, sizeof(*io));
+    struct USBIORequest *io = pool_zalloc(ctrl->memoryPool, sizeof(*io));
     if (!io)
         return;
 
-    _memset(io, 0, sizeof(*io));
     io->req.io_Command = CMD_REQUEST_CONTROL;
     io->req.io_Flags = IOF_QUICK;                           /* no reply port */
     io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED; /* magic tag to free on completion */
 
     io->setup.bmRequestType = bmRequestType;
     io->setup.bRequest = bRequest;
-    io->setup.wValue = cpu_to_le16(wValue);
-    io->setup.wIndex = cpu_to_le16(wIndex);
-    io->setup.wLength = cpu_to_le16(wLength);
+    io->setup.wValue = le16(wValue);
+    io->setup.wIndex = le16(wIndex);
+    io->setup.wLength = le16(wLength);
 
     io->virtual_address = udev->virtual_address;
 
@@ -584,7 +581,7 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, int e
     if (!ep_ctx)
     {
         Kprintf("No ep context for ep index %d\n", ep_index);
-        FreeVecPooled(ctrl->memoryPool, io);
+        pool_free(ctrl->memoryPool, io);
         return;
     }
     if (enqueue)
@@ -705,13 +702,12 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         return;
     }
 
-    struct usb_config *conf = AllocVecPooled(udev->controller->memoryPool, sizeof(*conf));
+    struct usb_config *conf = pool_zalloc(udev->controller->memoryPool, sizeof(*conf));
     if (!conf)
     {
-        Kprintf("AllocVecPooled failed\n");
+		Kprintf("pool_zalloc failed\n");
         return;
     }
-    _memset(conf, 0, sizeof(*conf));
 
     struct usb_config_descriptor *desc = (struct usb_config_descriptor *)data;
     if (desc->bDescriptorType != USB_DT_CONFIG)
@@ -720,7 +716,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         goto error;
     }
 
-    UWORD total_len = LE16(desc->wTotalLength);
+    UWORD total_len = le16(desc->wTotalLength);
     if ((UWORD)len < total_len)
     {
         KprintfH("short buffer len=%ld total_len=%ld\n", (LONG)len, (LONG)total_len);
@@ -739,7 +735,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
     cursor += desc->bLength;
 
     KprintfH("wTotalLength=%ld bNumInterfaces=%ld bConfigurationValue=%ld iConfiguration=%ld bmAttributes=0x%02lx bMaxPower=%ld\n",
-             (LONG)LE16(desc->wTotalLength),
+             (LONG)le16(desc->wTotalLength),
              (LONG)desc->bNumInterfaces,
              (LONG)desc->bConfigurationValue,
              (LONG)desc->iConfiguration,
@@ -799,7 +795,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
                 }
                 interface_map[iface_number] = if_index;
                 current_if = &conf->if_desc[if_index];
-                _memset(current_if, 0, sizeof(struct usb_interface));
+                mem_zero(current_if, sizeof(struct usb_interface));
                 current_if->interface_number = (u8)iface_number;
                 current_if->num_altsetting = 0;
                 current_if->active_altsetting = NULL;
@@ -823,7 +819,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
 
             current_alt_index = current_if->num_altsetting++;
             current_alt = &current_if->altsetting[current_alt_index];
-            _memset(current_alt, 0, sizeof(struct usb_interface_altsetting));
+            mem_zero(current_alt, sizeof(struct usb_interface_altsetting));
 
             CopyMem(ifd, &current_alt->desc, sizeof(struct usb_interface_descriptor));
             current_alt->no_of_ep = 0;
@@ -864,7 +860,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
                      (LONG)ep_idx,
                      (LONG)epd->bEndpointAddress,
                      (LONG)epd->bmAttributes,
-                     (LONG)LE16(epd->wMaxPacketSize),
+                     (LONG)le16(epd->wMaxPacketSize),
                      (LONG)epd->bInterval);
 
             current_alt->no_of_ep++;
@@ -905,7 +901,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
         {
             KprintfH("removing old config with value %ld\n", (LONG)oldconf->desc.bConfigurationValue);
             RemoveMinNode(n);
-            FreeVecPooled(udev->controller->memoryPool, oldconf);
+            pool_free(udev->controller->memoryPool, oldconf);
             break;
         }
     }
@@ -914,7 +910,7 @@ static void parse_config_descriptor(struct usb_device *udev, UBYTE *data, UWORD 
     return;
 
 error:
-    FreeVecPooled(udev->controller->memoryPool, conf);
+    pool_free(udev->controller->memoryPool, conf);
 }
 
 static void xhci_filter_ss_ep_companion_desc(struct USBIORequest *io)
@@ -926,7 +922,7 @@ static void xhci_filter_ss_ep_companion_desc(struct USBIORequest *io)
     if (desc->bDescriptorType != USB_DT_CONFIG)
         return;
 
-    UWORD total_len = LE16(desc->wTotalLength);
+    UWORD total_len = le16(desc->wTotalLength);
     if (total_len > io->actual_length)
         total_len = io->actual_length;
 
@@ -955,11 +951,11 @@ static void xhci_filter_ss_ep_companion_desc(struct USBIORequest *io)
     }
 
     if (write < end)
-        _memset(write, 0, end - write);
+        mem_zero(write, end - write);
 
     UWORD new_total = (UWORD)(write - (UBYTE *)io->data_buffer);
     if (new_total != total_len)
-        desc->wTotalLength = LE16(new_total);
+        desc->wTotalLength = le16(new_total);
 
     io->actual_length = new_total;
 }
@@ -1132,7 +1128,7 @@ static ULONG xhci_udev_build_usb2_hub_descriptor(struct usb_device *udev, UBYTE 
         return 0;
 
     struct usb_hub_descriptor hub;
-    _memset(&hub, 0, sizeof(hub));
+    mem_zero(&hub, sizeof(hub));
 
     const UBYTE ports = udev->hub_num_ports;
     const UBYTE needed = min((ports + 1U + 7U) / 8U, sizeof(hub.u.hs.DeviceRemovable));
@@ -1161,7 +1157,7 @@ static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, 
         return;
 
     struct USBSetupPacket *setup = &io->setup;
-    const u8 descriptorType = (LE16(setup->wValue) >> 8) & 0xFF;
+    const u8 descriptorType = (le16(setup->wValue) >> 8) & 0xFF;
     const u16 typeReq = setup->bRequest | setup->bmRequestType << 8;
 
     /* Only translate GetHubDescriptor requests for USB_DT_HUB */
@@ -1169,11 +1165,11 @@ static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, 
         return;
 
     /* Modify the request to ask for SS hub descriptor instead */
-    u16 old_value = LE16(setup->wValue);
-    setup->wValue = cpu_to_le16((USB_DT_SS_HUB << 8) | (old_value & 0xFF));
+    u16 old_value = le16(setup->wValue);
+    setup->wValue = le16((USB_DT_SS_HUB << 8) | (old_value & 0xFF));
 
     KprintfH("SS hub addr=%ld: modified wValue from 0x%04lx (USB_DT_HUB) to 0x%04lx (USB_DT_SS_HUB)\n",
-             (LONG)udev->virtual_address, (ULONG)old_value, (ULONG)LE16(setup->wValue));
+             (LONG)udev->virtual_address, (ULONG)old_value, (ULONG)le16(setup->wValue));
 
     /* Return FALSE to let the request proceed normally - it will be translated back in parse */
     return;
@@ -1238,14 +1234,14 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct USBIORe
     KprintfH("Device Descriptor: bLength=%ld bDescriptorType=%ld bcdUSB=0x%04lx bDeviceClass=0x%02lx bDeviceSubClass=0x%02lx bDeviceProtocol=0x%02lx bMaxPacketSize0=%ld idVendor=0x%04lx idProduct=0x%04lx bcdDevice=0x%04lx iManufacturer=%ld iProduct=%ld iSerialNumber=%ld bNumConfigurations=%ld\n",
              (LONG)dev_desc->bLength,
              (LONG)dev_desc->bDescriptorType,
-             (ULONG)LE16(dev_desc->bcdUSB),
+             (ULONG)le16(dev_desc->bcdUSB),
              (LONG)dev_desc->bDeviceClass,
              (LONG)dev_desc->bDeviceSubClass,
              (LONG)dev_desc->bDeviceProtocol,
              (LONG)dev_desc->bMaxPacketSize0,
-             (ULONG)LE16(dev_desc->idVendor),
-             (ULONG)LE16(dev_desc->idProduct),
-             (ULONG)LE16(dev_desc->bcdDevice),
+             (ULONG)le16(dev_desc->idVendor),
+             (ULONG)le16(dev_desc->idProduct),
+             (ULONG)le16(dev_desc->bcdDevice),
              (LONG)dev_desc->iManufacturer,
              (LONG)dev_desc->iProduct,
              (LONG)dev_desc->iSerialNumber,
@@ -1289,14 +1285,14 @@ static void handle_get_hub_descriptor(struct usb_device *udev, struct USBIOReque
              (LONG)hub->bLength,
              (LONG)hub->bDescriptorType,
              (LONG)hub->bNbrPorts,
-             (ULONG)LE16(hub->wHubCharacteristics),
+             (ULONG)le16(hub->wHubCharacteristics),
              (LONG)hub->bPwrOn2PwrGood,
              (LONG)hub->bHubContrCurrent);
 
     /* Update TT think time if changed */
     if (udev->parent)
     {
-        const UWORD characteristics = LE16(hub->wHubCharacteristics);
+        const UWORD characteristics = le16(hub->wHubCharacteristics);
         udev->tt_think_time = (u8)((characteristics >> 5) & 0x3);
         KprintfH("hub addr %ld TT think time code=%ld (bit-times=%ld)\n",
                  (LONG)udev->virtual_address, (LONG)udev->tt_think_time, (LONG)((udev->tt_think_time + 1) * 8));
@@ -1380,10 +1376,10 @@ static void handle_get_port_status(struct usb_device *udev, struct USBIORequest 
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
         return;
-    const u16 port = LE16(io->setup.wIndex);
+    const u16 port = le16(io->setup.wIndex);
 
-    u16 wStatus = LE16(((u16 *)io->data_buffer)[0]);
-    u16 wChange = LE16(((u16 *)io->data_buffer)[1]);
+    u16 wStatus = le16(((u16 *)io->data_buffer)[0]);
+    u16 wChange = le16(((u16 *)io->data_buffer)[1]);
     const u16 rawStatus = wStatus;
     const u16 rawChange = wChange;
     /* Extract speed from the appropriate bit positions based on hub type */
@@ -1392,8 +1388,8 @@ static void handle_get_port_status(struct usb_device *udev, struct USBIORequest 
     if (udev->ss_hub_emulation)
     {
         xhci_udev_map_ss_port_status(&wStatus, &wChange, speed);
-        ((u16 *)io->data_buffer)[0] = LE16(wStatus);
-        ((u16 *)io->data_buffer)[1] = LE16(wChange);
+        ((u16 *)io->data_buffer)[0] = le16(wStatus);
+        ((u16 *)io->data_buffer)[1] = le16(wChange);
     }
 
     KprintfH("hub addr=%ld port=%ld status=%04lx change=%04lx\n", (LONG)udev->virtual_address, (LONG)port, (ULONG)wStatus, (ULONG)wChange);
@@ -1452,7 +1448,7 @@ static void handle_get_port_status(struct usb_device *udev, struct USBIORequest 
 static void handle_set_address(struct usb_device *udev, struct USBIORequest *io)
 {
     UWORD old_addr = io->virtual_address & 0x7F;
-    UWORD new_addr = (UWORD)(LE16(io->setup.wValue) & 0x7F);
+    UWORD new_addr = (UWORD)(le16(io->setup.wValue) & 0x7F);
     if (new_addr == old_addr)
         return;
 
@@ -1482,8 +1478,8 @@ static void handle_set_address(struct usb_device *udev, struct USBIORequest *io)
 
 static void handle_set_interface(struct usb_device *udev, struct USBIORequest *io)
 {
-    unsigned int iface = (unsigned int)(LE16(io->setup.wIndex) & 0xFF);
-    unsigned int alt = (unsigned int)(LE16(io->setup.wValue) & 0xFF);
+    unsigned int iface = (unsigned int)(le16(io->setup.wIndex) & 0xFF);
+    unsigned int alt = (unsigned int)(le16(io->setup.wValue) & 0xFF);
     /*
      * This is a workaround for Poseidon issue.
      * Poseidon issues SET_INTERFACE for all devices after connecting a new one.
@@ -1512,12 +1508,12 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBI
              (ULONG)udev, (ULONG)udev->virtual_address,
              (ULONG)io->setup.bmRequestType,
              (ULONG)io->setup.bRequest,
-             LE16(io->setup.wValue),
-             LE16(io->setup.wIndex),
-             LE16(io->setup.wLength),
+             le16(io->setup.wValue),
+             le16(io->setup.wIndex),
+             le16(io->setup.wLength),
              (LONG)io->actual_length);
 
-    const u8 descriptorType = (LE16(io->setup.wValue) >> 8) & 0xFF;
+    const u8 descriptorType = (le16(io->setup.wValue) >> 8) & 0xFF;
     const u16 typeReq = io->setup.bRequest | io->setup.bmRequestType << 8;
 
     switch (typeReq)
@@ -1540,7 +1536,7 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBI
             break;
         case USB_DT_STRING:
         {
-            const u16 string_index = LE16(io->setup.wValue) & 0xFF;
+            const u16 string_index = le16(io->setup.wValue) & 0xFF;
             if (string_index && string_index == udev->product_string_index)
             {
                 xhci_trim_string_descriptor(io);
