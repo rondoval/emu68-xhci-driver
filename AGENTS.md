@@ -18,6 +18,7 @@
 - Safe `AbortIO()` behavior is to mark and defer hardware teardown work to UnitTask rather than manipulating command or transfer rings directly from caller context.
 - Root-hub emulation and descriptor translation in `xhci-root-hub.c` and `xhci-udev.c` are compatibility glue for Poseidon; preserve behavior unless the task is explicitly about hub semantics.
 - Prefer targeted fixes in `xhci/` internals over broad reshaping of the public device-layer code.
+- Licensing in this repo was audited against Linux/U-Boot provenance; preserve the current GPL-family SPDX headers and do not reintroduce broader dual-license wording without new provenance evidence.
 
 ## Validation
 
