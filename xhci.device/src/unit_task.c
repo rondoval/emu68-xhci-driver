@@ -26,7 +26,13 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     // Initialize the built in msg port, we'll receive commands here
     _NewMinList((struct MinList *)&unit->unit.unit_MsgPort.mp_MsgList);
     unit->unit.unit_MsgPort.mp_SigTask = FindTask(NULL);
-    unit->unit.unit_MsgPort.mp_SigBit = AllocSignal(-1);
+    BYTE msg_sigbit = AllocSignal(-1);
+    if (msg_sigbit == -1)
+    {
+        Kprintf("[xhci] %s: Failed to allocate message signal\n", __func__);
+        goto free_signals;
+    }
+    unit->unit.unit_MsgPort.mp_SigBit = (UBYTE)msg_sigbit;
     unit->unit.unit_MsgPort.mp_Flags = PA_SIGNAL;
     unit->unit.unit_MsgPort.mp_Node.ln_Type = NT_MSGPORT;
 
@@ -47,14 +53,14 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
         goto free_ports;
     }
 
-    UBYTE ret = OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, (struct IORequest *)packetTimerReq, LIB_MIN_VERSION);
+    LONG ret = OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, (struct IORequest *)packetTimerReq, LIB_MIN_VERSION);
     if (ret)
     {
         Kprintf("[xhci] %s: Failed to open timer device ret=%ld\n", __func__, ret);
         goto free_ports;
     }
 
-    const ULONG delay = UNIT_TASK_POLL_DELAY_MS * 1000;
+    const u32 delay = UNIT_TASK_POLL_DELAY_MS * 1000;
 
     // Set a timer... we need to pull on RX
     packetTimerReq->tr_node.io_Command = TR_ADDREQUEST;
@@ -128,13 +134,13 @@ free_ports:
     DeleteMsgPort(microHZTimerPort);
 free_signals:
     FreeSignal(unit->irq_signal);
-    FreeSignal(unit->unit.unit_MsgPort.mp_SigBit);
+    FreeSignal((BYTE)unit->unit.unit_MsgPort.mp_SigBit);
 
     Signal(parent, SIGBREAKF_CTRL_C);
     unit->task = NULL;
 }
 
-int UnitTaskStart(struct XHCIUnit *unit)
+s32 UnitTaskStart(struct XHCIUnit *unit)
 {
     Kprintf("[xhci] %s: xhci task starting\n", __func__);
 

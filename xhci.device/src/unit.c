@@ -28,7 +28,7 @@
 #include <xhci/xhci.h>
 #include <config.h>
 
-static int unit_init_onboard_xhci(struct XHCIUnit *unit,
+static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 								  struct xhci_hccr **hccr,
 								  struct xhci_hcor **hcor)
 {
@@ -66,8 +66,8 @@ static int unit_init_onboard_xhci(struct XHCIUnit *unit,
 
 	Kprintf("[bcm-xhci] %s: compatible: %s\n", __func__, compatible);
 
-	unit->irq_line = DT_GetInterrupt(key, 0);
-	Kprintf("[bcm-xhci] %s: IRQ = %ld\n", __func__, unit->irq_line);
+	unit->irq_line = (u32)DT_GetInterrupt(key, 0);
+	Kprintf("[bcm-xhci] %s: IRQ = %lu\n", __func__, (ULONG)unit->irq_line);
 	unit->irq_line += 32;
 
 	// We're done with the device tree
@@ -77,8 +77,8 @@ static int unit_init_onboard_xhci(struct XHCIUnit *unit,
 	Kprintf("[bcm-xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
 
 	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr + HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
-	Kprintf("[bcm-xhci] %s: init hccr %lx and hcor %lx hc_length %ld\n",
-			__func__, *hccr, *hcor, (u32)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
+	Kprintf("[bcm-xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
+			__func__, *hccr, *hcor, (ULONG)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	return 0;
 }
@@ -86,7 +86,7 @@ static int unit_init_onboard_xhci(struct XHCIUnit *unit,
 /*
  * Initialize and enumerate the PCIe bus
  */
-static int pcie_init(struct XHCIDevice *device)
+static s32 pcie_init(struct XHCIDevice *device)
 {
 	if (device->pcie != NULL)
 		return 0;
@@ -144,9 +144,9 @@ static int pcie_init(struct XHCIDevice *device)
 	return 0;
 }
 
-static int vl805_init(void)
+static s32 vl805_init(void)
 {
-	int ret = bcm2711_reload_vl805_firmware();
+	s32 ret = bcm2711_reload_vl805_firmware();
 	if (ret != 0)
 	{
 		Kprintf("[vl805] %s: Failed to load VL805 firmware: %ld\n", __func__, ret);
@@ -164,12 +164,12 @@ static BOOL pcie_xhci_is_supported(struct pci_device *dev)
 	UBYTE revision, prog_if, subclass, baseclass;
 	ULONG mcu_firmware;
 
-	dm_pci_read_config32(dev, PCI_VENDOR_ID, &vendor_device);
-	dm_pci_read_config8(dev, PCI_REVISION_ID, &revision);
-	dm_pci_read_config8(dev, PCI_CLASS_PROG, &prog_if);
-	dm_pci_read_config8(dev, PCI_CLASS_DEVICE, &subclass);
-	dm_pci_read_config8(dev, PCI_CLASS_DEVICE + 1, &baseclass);
-	dm_pci_read_config32(dev, 0x50, &mcu_firmware);
+	pci_read_config32(dev, PCI_VENDOR_ID, &vendor_device);
+	pci_read_config8(dev, PCI_REVISION_ID, &revision);
+	pci_read_config8(dev, PCI_CLASS_PROG, &prog_if);
+	pci_read_config8(dev, PCI_CLASS_DEVICE, &subclass);
+	pci_read_config8(dev, PCI_CLASS_DEVICE + 1, &baseclass);
+	pci_read_config32(dev, 0x50, &mcu_firmware);
 
 	Kprintf("[pcie] %s: Device Info:\n", __func__);
 	Kprintf("[pcie] %s:   Vendor:Device = 0x%08lx\n", __func__, vendor_device);
@@ -189,10 +189,10 @@ static BOOL pcie_xhci_is_supported(struct pci_device *dev)
 /*
  * Map BAR, get register pointers and enable bus mastering
  */
-static int pcie_xhci_init(struct pci_device *dev, struct xhci_hccr **hccr,
+static s32 pcie_xhci_init(struct pci_device *dev, struct xhci_hccr **hccr,
 						  struct xhci_hcor **hcor)
 {
-	*hccr = (struct xhci_hccr *)dm_pci_map_bar(dev,
+	*hccr = (struct xhci_hccr *)pci_map_bar(dev,
 											   PCI_BASE_ADDRESS_0, 0, 0, PCI_REGION_TYPE,
 											   PCI_REGION_MEM);
 	if (!*hccr)
@@ -205,32 +205,32 @@ static int pcie_xhci_init(struct pci_device *dev, struct xhci_hccr **hccr,
 	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr +
 							 HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
-	Kprintf("[xhci] %s: init hccr %lx and hcor %lx hc_length %ld\n",
-			__func__, *hccr, *hcor, (u32)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
+	Kprintf("[xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
+			__func__, *hccr, *hcor, (ULONG)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	/* enable busmaster */
 	u32 cmd;
-	dm_pci_read_config32(dev, PCI_COMMAND, &cmd);
+	pci_read_config32(dev, PCI_COMMAND, &cmd);
 	cmd |= PCI_COMMAND_MASTER;
-	dm_pci_write_config32(dev, PCI_COMMAND, cmd);
+	pci_write_config32(dev, PCI_COMMAND, cmd);
 	return 0;
 }
 
-static int unit_init_pcie_xhci(LONG unitNumber, struct pci_device **ret_xhci_dev,
+static s32 unit_init_pcie_xhci(LONG unitNumber, struct pci_device **ret_xhci_dev,
 							   struct xhci_hccr **ret_hccr,
 							   struct xhci_hcor **ret_hcor,
 							   struct XHCIDevice *device)
 {
 	struct pci_device *xhci_dev = NULL;
-	int result = pcie_init(device);
+	s32 result = pcie_init(device);
 	if (result != 0)
 	{
 		Kprintf("[xhci] %s: Failed to initialize PCIe: %ld\n", __func__, result);
 		return result;
 	}
 
-	/* -1 because unit 0 is always the OTG port and dm_pci_find_class indexes from 0 */
-	dm_pci_find_class(device->pcie, 0x0C0330, unitNumber - 1, &xhci_dev);
+	/* -1 because unit 0 is always the OTG port and pci_find_class indexes from 0 */
+	pci_find_class(device->pcie, 0x0C0330, unitNumber - 1, &xhci_dev);
 	if (xhci_dev == NULL)
 	{
 		Kprintf("[xhci] %s: Failed to find XHCI PCI device\n", __func__);
@@ -265,7 +265,7 @@ static int unit_init_pcie_xhci(LONG unitNumber, struct pci_device **ret_xhci_dev
 	return 0;
 }
 
-static int unit_init_xhci_hw(struct XHCIUnit *unit, LONG unitNumber,
+static s32 unit_init_xhci_hw(struct XHCIUnit *unit, LONG unitNumber,
 							 struct pci_device **ret_xhci_dev,
 							 struct xhci_hccr **ret_hccr,
 							 struct xhci_hcor **ret_hcor)
@@ -278,7 +278,7 @@ static int unit_init_xhci_hw(struct XHCIUnit *unit, LONG unitNumber,
 	return unit_init_pcie_xhci(unitNumber, ret_xhci_dev, ret_hccr, ret_hcor, unit->device);
 }
 
-static int unit_attach_xhci(struct XHCIUnit *unit, struct pci_device *xhci_dev,
+static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_device *xhci_dev,
 							struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
 	struct xhci_ctrl *xhci_ctrl = AllocMem(sizeof(struct xhci_ctrl), MEMF_CLEAR | MEMF_PUBLIC);
@@ -291,7 +291,7 @@ static int unit_attach_xhci(struct XHCIUnit *unit, struct pci_device *xhci_dev,
 	xhci_ctrl->utilityBase = unit->device->utilityBase;
 	xhci_ctrl->pci_dev = xhci_dev;
 
-	int result = xhci_register(xhci_ctrl, hccr, hcor);
+	s32 result = xhci_register(xhci_ctrl, hccr, hcor);
 	if (result)
 	{
 		Kprintf("[xhci] %s: xhci_register failed: %ld\n", __func__, result);
@@ -326,13 +326,13 @@ err_free_ctrl:
 	return result;
 }
 
-int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
+s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 {
 	Kprintf("[xhci] %s: Opening unit %ld with flags %lx\n", __func__, unitNumber, flags);
 	if (unit->unit.unit_OpenCnt > 0)
 	{
 		unit->unit.unit_OpenCnt++;
-		Kprintf("[xhci] %s: Unit opened successfully, current open count: %ld\n", __func__, unit->unit.unit_OpenCnt);
+		Kprintf("[xhci] %s: Unit opened successfully, current open count: %lu\n", __func__, (ULONG)unit->unit.unit_OpenCnt);
 		return ERR_NO_ERROR;
 	}
 
@@ -350,7 +350,7 @@ int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	struct xhci_hccr *hccr;
 	struct xhci_hcor *hcor;
 	struct pci_device *xhci_dev = NULL;
-	int result = unit_init_xhci_hw(unit, unitNumber, &xhci_dev, &hccr, &hcor);
+	s32 result = unit_init_xhci_hw(unit, unitNumber, &xhci_dev, &hccr, &hcor);
 	if (result != ERR_NO_ERROR)
 		goto err_del_pool;
 
@@ -366,7 +366,7 @@ err_del_pool:
 	return result;
 }
 
-int UnitClose(struct XHCIUnit *unit)
+s32 UnitClose(struct XHCIUnit *unit)
 {
 	Kprintf("[xhci] %s: Closing unit %ld\n", __func__, unit->unitNumber);
 

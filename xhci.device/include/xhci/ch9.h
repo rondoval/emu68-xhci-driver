@@ -37,6 +37,7 @@
 
 #include <byteorder.h>
 #include <types.h>
+#include <bits.h>
 
 /*-------------------------------------------------------------------------*/
 
@@ -223,21 +224,21 @@
 /* USB_DT_DEVICE: Device descriptor */
 struct usb_device_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
+	__le8 bLength;
+	__le8 bDescriptorType;
 
 	__le16 bcdUSB;
-	u8 bDeviceClass;
-	u8 bDeviceSubClass;
-	u8 bDeviceProtocol;
-	u8 bMaxPacketSize0;
+	__le8 bDeviceClass;
+	__le8 bDeviceSubClass;
+	__le8 bDeviceProtocol;
+	__le8 bMaxPacketSize0;
 	__le16 idVendor;
 	__le16 idProduct;
 	__le16 bcdDevice;
-	u8 iManufacturer;
-	u8 iProduct;
-	u8 iSerialNumber;
-	u8 bNumConfigurations;
+	__le8 iManufacturer;
+	__le8 iProduct;
+	__le8 iSerialNumber;
+	__le8 bNumConfigurations;
 } __attribute__((packed));
 
 #define USB_DT_DEVICE_SIZE 18
@@ -279,34 +280,34 @@ struct usb_device_descriptor
  */
 struct usb_config_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
+	__le8 bLength;
+	__le8 bDescriptorType;
 
 	__le16 wTotalLength;
-	u8 bNumInterfaces;
-	u8 bConfigurationValue;
-	u8 iConfiguration;
-	u8 bmAttributes;
-	u8 bMaxPower;
+	__le8 bNumInterfaces;
+	__le8 bConfigurationValue;
+	__le8 iConfiguration;
+	__le8 bmAttributes;
+	__le8 bMaxPower;
 } __attribute__((packed));
 
 #define USB_DT_CONFIG_SIZE 9
 
 /* from config descriptor bmAttributes */
-#define USB_CONFIG_ATT_ONE (1 << 7)		  /* must be set */
-#define USB_CONFIG_ATT_SELFPOWER (1 << 6) /* self powered */
-#define USB_CONFIG_ATT_WAKEUP (1 << 5)	  /* can wakeup */
-#define USB_CONFIG_ATT_BATTERY (1 << 4)	  /* battery powered */
+#define USB_CONFIG_ATT_ONE BIT(7)		  /* must be set */
+#define USB_CONFIG_ATT_SELFPOWER BIT(6) /* self powered */
+#define USB_CONFIG_ATT_WAKEUP BIT(5)	  /* can wakeup */
+#define USB_CONFIG_ATT_BATTERY BIT(4)	  /* battery powered */
 
 /*-------------------------------------------------------------------------*/
 
 /* USB_DT_STRING: String descriptor information. */
 struct usb_string_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
+	__le8 bLength;
+	__le8 bDescriptorType;
 
-	u8 bString[]; /* UTF-16LE encoded string */
+	__le8 bString[]; /* UTF-16LE encoded string bytes */
 } __attribute__((packed));
 
 /*-------------------------------------------------------------------------*/
@@ -314,16 +315,16 @@ struct usb_string_descriptor
 /* USB_DT_INTERFACE: Interface descriptor */
 struct usb_interface_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
+	__le8 bLength;
+	__le8 bDescriptorType;
 
-	u8 bInterfaceNumber;
-	u8 bAlternateSetting;
-	u8 bNumEndpoints;
-	u8 bInterfaceClass;
-	u8 bInterfaceSubClass;
-	u8 bInterfaceProtocol;
-	u8 iInterface;
+	__le8 bInterfaceNumber;
+	__le8 bAlternateSetting;
+	__le8 bNumEndpoints;
+	__le8 bInterfaceClass;
+	__le8 bInterfaceSubClass;
+	__le8 bInterfaceProtocol;
+	__le8 iInterface;
 } __attribute__((packed));
 
 #define USB_DT_INTERFACE_SIZE 9
@@ -333,18 +334,18 @@ struct usb_interface_descriptor
 /* USB_DT_ENDPOINT: Endpoint descriptor */
 struct usb_endpoint_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
+	__le8 bLength;
+	__le8 bDescriptorType;
 
-	u8 bEndpointAddress;
-	u8 bmAttributes;
+	__le8 bEndpointAddress;
+	__le8 bmAttributes;
 	__le16 wMaxPacketSize;
-	u8 bInterval;
+	__le8 bInterval;
 
 	/* NOTE:  these two are _only_ in audio endpoints. */
 	/* use USB_DT_ENDPOINT*_SIZE in bLength, not sizeof. */
-	u8 bRefresh;
-	u8 bSynchAddress;
+	__le8 bRefresh;
+	__le8 bSynchAddress;
 } __attribute__((packed));
 
 #define USB_DT_ENDPOINT_SIZE 7
@@ -372,11 +373,11 @@ struct usb_endpoint_descriptor
 /* The USB 3.0 spec redefines bits 5:4 of bmAttributes as interrupt ep type. */
 #define USB_ENDPOINT_INTRTYPE 0x30
 #define USB_ENDPOINT_INTR_PERIODIC (0 << 4)
-#define USB_ENDPOINT_INTR_NOTIFICATION (1 << 4)
+#define USB_ENDPOINT_INTR_NOTIFICATION BIT(4)
 
 #define USB_ENDPOINT_SYNCTYPE 0x0c
 #define USB_ENDPOINT_SYNC_NONE (0 << 2)
-#define USB_ENDPOINT_SYNC_ASYNC (1 << 2)
+#define USB_ENDPOINT_SYNC_ASYNC BIT(2)
 #define USB_ENDPOINT_SYNC_ADAPTIVE (2 << 2)
 #define USB_ENDPOINT_SYNC_SYNC (3 << 2)
 
@@ -393,7 +394,7 @@ struct usb_endpoint_descriptor
  *
  * Returns @epd's number: 0 to 15.
  */
-static inline int usb_endpoint_num(const struct usb_endpoint_descriptor *epd)
+static inline u8 usb_endpoint_num(const struct usb_endpoint_descriptor *epd)
 {
 	return epd->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
 }
@@ -507,7 +508,7 @@ static inline int usb_endpoint_is_isoc_out(
  *
  * Returns @epd's max packet
  */
-static inline int usb_endpoint_maxp(const struct usb_endpoint_descriptor *epd)
+static inline u16 usb_endpoint_maxp(const struct usb_endpoint_descriptor *epd)
 {
 	return le16(epd->wMaxPacketSize);
 }
@@ -518,15 +519,15 @@ static inline int usb_endpoint_maxp(const struct usb_endpoint_descriptor *epd)
  *
  * Return @epd's wMaxPacketSize[12:11] + 1
  */
-static inline int
+static inline u8
 usb_endpoint_maxp_mult(const struct usb_endpoint_descriptor *epd)
 {
-	int maxp = le16(epd->wMaxPacketSize);
+	u32 maxp = le16(epd->wMaxPacketSize);
 
-	return USB_EP_MAXP_MULT(maxp) + 1;
+	return (u8)(USB_EP_MAXP_MULT(maxp) + 1);
 }
 
-static inline int usb_endpoint_interrupt_type(
+static inline u32 usb_endpoint_interrupt_type(
 	const struct usb_endpoint_descriptor *epd)
 {
 	return epd->bmAttributes & USB_ENDPOINT_INTRTYPE;
@@ -537,11 +538,11 @@ static inline int usb_endpoint_interrupt_type(
 /* USB_DT_SS_ENDPOINT_COMP: SuperSpeed Endpoint Companion descriptor */
 struct usb_ss_ep_comp_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
+	__le8 bLength;
+	__le8 bDescriptorType;
 
-	u8 bMaxBurst;
-	u8 bmAttributes;
+	__le8 bMaxBurst;
+	__le8 bmAttributes;
 	__le16 wBytesPerInterval;
 } __attribute__((packed));
 
@@ -589,11 +590,11 @@ enum usb_device_speed
 /* USB 3.0 BOS descriptor */
 struct usb_bos_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
+	__le8 bLength;
+	__le8 bDescriptorType;
 
 	__le16 wTotalLength;
-	u8 bNumDeviceCaps;
+	__le8 bNumDeviceCaps;
 } __attribute__((packed));
 
 #define USB_CAP_DESC_USB20_EXTENSION 0x02
@@ -605,9 +606,9 @@ struct usb_bos_descriptor
 /* USB 2.0 Extension Capability descriptor */
 struct usb_2_0_extension_capability_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
-	u8 bDevCapabilityType;
+	__le8 bLength;
+	__le8 bDescriptorType;
+	__le8 bDevCapabilityType;
 
 	__le32 bmAttributes;
 } __attribute__((packed));
@@ -617,42 +618,42 @@ struct usb_2_0_extension_capability_descriptor
 /* SuperSpeed USB Device Capability descriptor */
 struct usb_ss_device_capability_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
-	u8 bDevCapabilityType;
+	__le8 bLength;
+	__le8 bDescriptorType;
+	__le8 bDevCapabilityType;
 
-	u8 bmAttributes;
+	__le8 bmAttributes;
 	__le16 wSpeedsSupported;
-	u8 bFunctionalitySupport;
-	u8 bU1DevExitLat;
+	__le8 bFunctionalitySupport;
+	__le8 bU1DevExitLat;
 	__le16 wU2DevExitLat;
 } __attribute__((packed));
 
-#define USB_SS_DEVICE_ATT_LATENCY_TOLERANCE_MESSAGES (1 << 1)
-#define USB_SS_DEVICE_LOWSPEED_SUPPORT (1 << 0)
-#define USB_SS_DEVICE_FULLSPEED_SUPPORT (1 << 1)
-#define USB_SS_DEVICE_HIGHSPEED_SUPPORT (1 << 2)
-#define USB_SS_DEVICE_SUPERSPEED_SUPPORT (1 << 3)
+#define USB_SS_DEVICE_ATT_LATENCY_TOLERANCE_MESSAGES BIT(1)
+#define USB_SS_DEVICE_LOWSPEED_SUPPORT BIT(0)
+#define USB_SS_DEVICE_FULLSPEED_SUPPORT BIT(1)
+#define USB_SS_DEVICE_HIGHSPEED_SUPPORT BIT(2)
+#define USB_SS_DEVICE_SUPERSPEED_SUPPORT BIT(3)
 
 /* Container ID Capability descriptor */
 struct usb_container_id_capability_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
-	u8 bDevCapabilityType;
+	__le8 bLength;
+	__le8 bDescriptorType;
+	__le8 bDevCapabilityType;
 
-	u8 bReserved;
-	u8 ContainerID[16];
+	__le8 bReserved;
+	__le8 ContainerID[16];
 } __attribute__((packed));
 
 /* SuperSpeedPlus USB Device Capability descriptor */
 struct usb_ssp_device_capability_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
-	u8 bDevCapabilityType;
+	__le8 bLength;
+	__le8 bDescriptorType;
+	__le8 bDevCapabilityType;
 
-	u8 bReserved;
+	__le8 bReserved;
 	__le32 bmAttributes;
 	__le16 wFunctionalitySupport;
 	__le16 wReserved;
@@ -676,20 +677,20 @@ struct usb_ssp_device_capability_descriptor
 #define USB_SSP_SUBLINK_LANE_SPEED_EXPONENT_MASK 0x3
 #define USB_SSP_SUBLINK_LANE_SPEED_EXPONENT_SHIFT 4
 #define USB_SSP_SUBLINK_TYPE_SYMMETRIC (0 << 6)
-#define USB_SSP_SUBLINK_TYPE_ASYMMETRIC (1 << 6)
+#define USB_SSP_SUBLINK_TYPE_ASYMMETRIC BIT(6)
 #define USB_SSP_SUBLINK_RECEIVE_MODE (0 << 7)
-#define USB_SSP_SUBLINK_TRANSMIT_MODE (1 << 7)
+#define USB_SSP_SUBLINK_TRANSMIT_MODE BIT(7)
 #define USB_SSP_SUBLINK_PROTOCOL_SUPERSPEED (0 << 14)
-#define USB_SSP_SUBLINK_PROTOCOL_SUPERSPEED_PLUS (1 << 14)
+#define USB_SSP_SUBLINK_PROTOCOL_SUPERSPEED_PLUS BIT(14)
 #define USB_SSP_SUBLINK_LANE_SPEED_MANTISSA_MASK 0xffff
 #define USB_SSP_SUBLINK_LANE_SPEED_MANTISSA_SHIFT 16
 
 /* Precision Time Measurement Capability Descriptor */
 struct usb_ptm_capability_descriptor
 {
-	u8 bLength;
-	u8 bDescriptorType;
-	u8 bDevCapabilityType;
+	__le8 bLength;
+	__le8 bDescriptorType;
+	__le8 bDevCapabilityType;
 } __attribute__((packed));
 
 #endif /* __LINUX_USB_CH9_H */

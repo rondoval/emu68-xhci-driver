@@ -37,9 +37,9 @@
 struct ep_context
 {
     struct usb_device *udev; /* back reference to device */
-    int ep_index;            /* Endpoint context index (0-30) */
+    u8 ep_index;             /* Endpoint context index (0-30) */
     enum ep_state state;     /* Current endpoint state */
-    int max_packet_size;     /* Cached max packet size for this endpoint */
+    u32 max_packet_size;     /* Cached max packet size for this endpoint */
     APTR memoryPool;         /* Memory pool for this endpoint */
 
     IOReqList pending_reqs;             /* list of pending requests */
@@ -63,19 +63,19 @@ struct ep_context
     struct USBIORequest *rt_stop_pending;
 
     /* RT ISO frame tracking (monotonic frame number modulo 2^16) */
-    ULONG rt_next_frame;
+    u16 rt_next_frame;
 
     /* Cache the last RT ISO buffer so hooks can omit repeating it */
     APTR rt_last_buffer;
-    ULONG rt_last_filled;
+    u32 rt_last_filled;
 
     /* RT ISO inflight accounting */
-    ULONG rt_inflight_bytes;
+    u32 rt_inflight_bytes;
 };
 
 static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx);
 
-BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packet_size, APTR memoryPool)
+BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, APTR memoryPool)
 {
     struct ep_context *ep_ctx = pool_zalloc(memoryPool, sizeof(struct ep_context));
     if (!ep_ctx)
@@ -109,14 +109,14 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packe
     return TRUE;
 }
 
-void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
+void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code)
 {
     for (int i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
     {
         struct ep_context *ep_ctx = udev->ep_context[i];
         if (ep_ctx)
         {
-            KprintfH("tearing down addr %ld EP %ld context, state %ld\n", (LONG)udev->virtual_address, (LONG)i, (LONG)ep_ctx->state);
+            KprintfH("tearing down addr %lu EP %lu context, state %lu\n", (ULONG)udev->virtual_address, (ULONG)i, (ULONG)ep_ctx->state);
             struct MinNode *node;
             while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
             {
@@ -150,18 +150,18 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
     }
 }
 
-struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, int ep_index)
+struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, u8 ep_index)
 {
-    if (ep_index < 0 || ep_index >= USB_MAX_ENDPOINT_CONTEXTS)
+    if (ep_index >= USB_MAX_ENDPOINT_CONTEXTS)
     {
-        Kprintf("Invalid endpoint index %ld\n", (LONG)ep_index);
+        Kprintf("Invalid endpoint index %lu\n", (ULONG)ep_index);
         return NULL;
     }
 
     return udev->ep_context[ep_index];
 }
 
-void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, int max_packet_size)
+void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, u32 max_packet_size)
 {
     if (!ep_ctx || !ep_ctx->ring)
         return;
@@ -180,7 +180,7 @@ void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, int max_packet_size)
 
 void xhci_ep_set_failed(struct ep_context *ep_ctx)
 {
-    Kprintf("EP %ld state %ld -> FAILED\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
+    Kprintf("EP %lu state %lu -> FAILED\n", (ULONG)ep_ctx->ep_index, (ULONG)ep_ctx->state);
     ep_ctx->state = USB_DEV_EP_STATE_FAILED;
     xhci_ep_clear_stop_processing(ep_ctx);
     xhci_td_fail_all(ep_ctx->active_tds, ERR_HCI_ERROR);
@@ -196,9 +196,9 @@ void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io)
         AddTailMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
     }
 
-    KprintfH("Ring busy, queued request cmd=%ld ep=%ld\n",
-             (LONG)io->req.io_Command,
-             (LONG)(io->endpoint & 0x0F));
+    KprintfH("Ring busy, queued request cmd=%lu ep=%lu\n",
+             (ULONG)io->req.io_Command,
+             (ULONG)(io->endpoint & 0x0F));
 }
 
 BOOL xhci_ep_has_request(struct ep_context *ep_ctx, struct USBIORequest *io)
@@ -224,11 +224,11 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
     {
         struct USBIORequest *req = (struct USBIORequest *)node;
 
-        KprintfH("starting queued request cmd=%ld ep=%ld\n",
-                 (LONG)req->req.io_Command,
-                 (LONG)(req->endpoint & 0x0F));
+        KprintfH("starting queued request cmd=%lu ep=%lu\n",
+                 (ULONG)req->req.io_Command,
+                 (ULONG)(req->endpoint & 0x0F));
 
-        int err;
+        s8 err;
         if (req->driver_private_flags & REQ_INTERNAL)
             err = xhci_udev_send_ctrl(ep_ctx->udev, req);
         else
@@ -257,11 +257,11 @@ void xhci_ep_set_idle(struct ep_context *ep_ctx)
         xhci_ep_schedule_next(ep_ctx);
 }
 
-void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct USBIORequest *req, dma_addr_t *trb_addrs, ULONG timeout_ms, unsigned int trb_count)
+void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct USBIORequest *req, dma_addr_t *trb_addrs, u32 timeout_ms, u32 trb_count)
 {
     if (!trb_addrs || trb_count == 0)
     {
-        Kprintf("Invalid TRB list for EP %ld\n", (LONG)ep_ctx->ep_index);
+        Kprintf("Invalid TRB list for EP %lu\n", (ULONG)ep_ctx->ep_index);
         xhci_ep_set_failed(ep_ctx);
         return;
     }
@@ -403,7 +403,7 @@ void xhci_ep_request_stop(struct ep_context *ep_ctx)
         state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
         return;
 
-    KprintfH("EP %ld state %ld -> ABORTING (stop requested)\n", (LONG)ep_ctx->ep_index, (LONG)state);
+    KprintfH("EP %lu state %lu -> ABORTING (stop requested)\n", (ULONG)ep_ctx->ep_index, (ULONG)state);
     xhci_ep_set_aborting(ep_ctx);
     xhci_stop_ring(ep_ctx->udev, ep_ctx->ep_index);
 }
@@ -418,7 +418,7 @@ void xhci_ep_process_stop(struct ep_context *ep_ctx, dma_addr_t *deq_ptr)
     if (!xhci_ep_has_stop_abort_requests(ep_ctx) && !ep_ctx->stop_process_timeouts)
         return;
 
-    dma_addr_t stopped_deq_ptr = xhci_get_endpoint_deq_ptr(ep_ctx->udev, ep_ctx->ep_index);
+    dma_addr_t stopped_deq_ptr = (dma_addr_t)xhci_get_endpoint_deq_ptr(ep_ctx->udev, ep_ctx->ep_index);
 
     xhci_td_patch_recovery(ep_ctx->active_tds,
                            ep_ctx->ring,
@@ -434,7 +434,7 @@ enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx)
     return ep_ctx->state;
 }
 
-int xhci_ep_get_ep_index(struct ep_context *ep_ctx)
+u8 xhci_ep_get_ep_index(struct ep_context *ep_ctx)
 {
     return ep_ctx->ep_index;
 }
@@ -464,17 +464,17 @@ struct USBIORequest *xhci_ep_get_by_trb(struct ep_context *ep_ctx, dma_addr_t tr
     return xhci_td_get_by_trb(td_list, trb_addr);
 }
 
-int xhci_ep_get_active_trb_count(struct ep_context *ep_ctx)
+u32 xhci_ep_get_active_trb_count(struct ep_context *ep_ctx)
 {
     return xhci_td_get_queued_trb_count(ep_ctx->active_tds);
 }
 
-inline static int xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
+inline static u32 xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
 {
     return xhci_td_get_queued_td_count(ep_ctx->active_tds);
 }
 
-void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code)
+void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code)
 {
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
@@ -509,7 +509,7 @@ static void xhci_ep_set_rt_stopped(struct ep_context *ep_ctx)
     xhci_ep_rt_iso_zero_counters(ep_ctx);
 }
 
-BYTE xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
+s8 xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
     if (!req || !ep_ctx)
         return FALSE;
@@ -517,7 +517,7 @@ BYTE xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *
     if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
     {
         /* can only enable RT ISO if EP is idle */
-        Kprintf("EP not idle. Current state: %ld\n", ep_ctx->state);
+        Kprintf("EP not idle. Current state: %lu\n", (ULONG)ep_ctx->state);
         return ERR_HCI_ERROR;
     }
 
@@ -537,17 +537,17 @@ BYTE xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *
     struct USBRealtimeHooks *rt = (struct USBRealtimeHooks *)req->data_buffer;
     if (req->direction == DIRECTION_IN)
     {
-        KprintfH("Added ISO handler: EP %ld in req hook: %lx, in done hook: %lx, prefetch: %ld\n", ep_ctx->ep_index, rt->input_request_hook, rt->input_done_hook, rt->max_output_prefetch);
+        KprintfH("Added ISO handler: EP %lu in req hook: %lx, in done hook: %lx, prefetch: %lu\n", (ULONG)ep_ctx->ep_index, (ULONG)rt->input_request_hook, (ULONG)rt->input_done_hook, (ULONG)rt->max_output_prefetch);
     }
     else
     {
-        KprintfH("Added ISO handler: EP %ld out req hook: %lx, out done hook: %lx, prefetch: %ld\n", ep_ctx->ep_index, rt->output_request_hook, rt->output_done_hook, rt->max_output_prefetch);
+        KprintfH("Added ISO handler: EP %lu out req hook: %lx, out done hook: %lx, prefetch: %lu\n", (ULONG)ep_ctx->ep_index, (ULONG)rt->output_request_hook, (ULONG)rt->output_done_hook, (ULONG)rt->max_output_prefetch);
     }
 #endif
     return ERR_NO_ERROR;
 }
 
-BYTE xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
+s8 xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
     if (!req || !ep_ctx)
     {
@@ -557,7 +557,7 @@ BYTE xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *
 
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
     {
-        Kprintf("EP not in RT_ISO_STOPPED/IDLE state. Current state: %ld\n", ep_ctx->state);
+        Kprintf("EP not in RT_ISO_STOPPED/IDLE state. Current state: %lu\n", (ULONG)ep_ctx->state);
         return ERR_HCI_ERROR;
     }
 
@@ -578,7 +578,7 @@ BYTE xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *
     return ERR_NO_ERROR;
 }
 
-void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, ULONG act_len)
+void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len)
 {
     /* Pull a destination buffer from the class, copy staged DMA into it, then signal completion. */
     struct USBBufferRequest rt_buffer_req;
@@ -591,7 +591,7 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, ULON
 
     if (rt_buffer_req.data)
     {
-        ULONG copy_len = min(act_len, rt_buffer_req.length);
+        u32 copy_len = act_len < rt_buffer_req.length ? act_len : rt_buffer_req.length;
         CopyMem(req->data_buffer, rt_buffer_req.data, copy_len);
         rt_buffer_req.length = copy_len;
 
@@ -601,7 +601,7 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, ULON
     xhci_ep_rt_iso_update_counters(ep_ctx, req);
 }
 
-void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, ULONG act_len)
+void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len)
 {
     if (ep_ctx->rt_req->output_done_hook)
     {
@@ -620,11 +620,11 @@ void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, ULO
 static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 {
     struct USBIORequest *template = ep_ctx->rt_template_req;
-    ULONG prefetch_bytes = ep_ctx->rt_req->max_output_prefetch;
+    u32 prefetch_bytes = ep_ctx->rt_req->max_output_prefetch;
 
     while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
     {
-        ULONG frame = ep_ctx->rt_next_frame;
+        u16 frame = ep_ctx->rt_next_frame;
         struct USBIORequest *rt_io = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
         if (!rt_io)
         {
@@ -654,7 +654,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
             break;
         }
 
-        ULONG offset = 0;
+        u32 offset = 0;
         if (rt_buffer_req.data == ep_ctx->rt_last_buffer)
         {
             offset = ep_ctx->rt_last_filled;
@@ -665,11 +665,11 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         }
         ep_ctx->rt_last_filled = offset + rt_buffer_req.length;
 
-        rt_io->data_buffer = (APTR)((ULONG)rt_buffer_req.data + offset);
+        rt_io->data_buffer = (APTR)((u8 *)rt_buffer_req.data + offset);
         rt_io->data_buffer_length = rt_buffer_req.length;
-        rt_io->usb_frame = (UWORD)frame;
+        rt_io->usb_frame = frame & 0xffffU;
 
-        int ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
+        s8 ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != ERR_NO_ERROR)
         {
             pool_free(ep_ctx->memoryPool, rt_io);
@@ -677,7 +677,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
             break;
         }
 
-        ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
+        ep_ctx->rt_next_frame = ((u32)frame + 1U) & 0xffffU;
         ep_ctx->rt_inflight_bytes += rt_io->data_buffer_length;
         KprintfH("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -693,10 +693,11 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 {
     struct USBIORequest *template = ep_ctx->rt_template_req;
 
-    int inflight = xhci_ep_get_active_td_count(ep_ctx);
+    u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
     while (inflight < RT_ISO_IN_TARGET_TDS)
     {
-        ULONG frame = ep_ctx->rt_next_frame;
+        u16 frame = ep_ctx->rt_next_frame;
+        const u32 packet_size = ep_ctx->max_packet_size;
         struct USBIORequest *rt_io = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
         if (!rt_io)
         {
@@ -705,15 +706,15 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         }
         CopyMem(template, rt_io, sizeof(struct USBIORequest));
 
-        rt_io->data_buffer = pool_alloc(ep_ctx->memoryPool, ep_ctx->max_packet_size);
+        rt_io->data_buffer = pool_alloc(ep_ctx->memoryPool, packet_size);
         if (!rt_io->data_buffer)
         {
             Kprintf("Failed to alloc RT ISO staging buffer\n");
             pool_free(ep_ctx->memoryPool, rt_io);
             break;
         }
-        rt_io->data_buffer_length = ep_ctx->max_packet_size;
-        rt_io->usb_frame = (UWORD)frame;
+        rt_io->data_buffer_length = packet_size;
+        rt_io->usb_frame = frame & 0xffffU;
 
         KprintfH("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -721,7 +722,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)ep_ctx->rt_inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
-        int ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
+        s8 ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != ERR_NO_ERROR)
         {
             pool_free(ep_ctx->memoryPool, rt_io->data_buffer);
@@ -731,7 +732,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         }
         ++inflight;
 
-        ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
+        ep_ctx->rt_next_frame = ((u32)frame + 1U) & 0xffffU;
         ep_ctx->rt_inflight_bytes += rt_io->data_buffer_length;
         KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -788,7 +789,7 @@ void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx)
         xhci_ep_schedule_rt_iso_out(ep_ctx);
 }
 
-BYTE xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
+s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
 {
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
     {
@@ -803,7 +804,7 @@ BYTE xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
     return ERR_NO_ERROR;
 }
 
-BYTE xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIORequest *req)
+s8 xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
@@ -832,9 +833,9 @@ BYTE xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIORequest *req)
     }
     else
     {
-        KprintfH("RT ISO stopping addr=%ld ep=%ld inflight_tds=%lu inflight_bytes=%lu\n",
-                 (LONG)req->virtual_address,
-                 (LONG)ep_ctx->ep_index,
+        KprintfH("RT ISO stopping addr=%lu ep=%lu inflight_tds=%lu inflight_bytes=%lu\n",
+                 (ULONG)req->virtual_address,
+                 (ULONG)ep_ctx->ep_index,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx),
                  (ULONG)ep_ctx->rt_inflight_bytes);
         ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPING;

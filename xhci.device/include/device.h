@@ -39,7 +39,7 @@ struct XHCIUnit
 	struct xhci_ctrl *xhci_ctrl;
 
 	struct Interrupt irq_isr;
-	LONG irq_line;
+	u32 irq_line;
 	BYTE irq_signal;
 	char vendor_str[5];
 	char device_str[5];
@@ -56,16 +56,19 @@ struct XHCIDevice
 	struct MinList units;
 };
 
+void beginIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+LONG abortIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+
 /* Unit interface */
-int UnitTaskStart(struct XHCIUnit *unit);
+s32 UnitTaskStart(struct XHCIUnit *unit);
 void UnitTaskStop(struct XHCIUnit *unit);
 
-int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
-int UnitClose(struct XHCIUnit *unit);
+s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
+s32 UnitClose(struct XHCIUnit *unit);
 
 void ProcessCommand(struct USBIORequest *io);
 
-int xhci_int_enable(struct XHCIUnit *unit);
+s32 xhci_int_enable(struct XHCIUnit *unit);
 void xhci_int_shutdown(struct XHCIUnit *unit);
 void xhci_int_rearm(struct XHCIUnit *unit);
 

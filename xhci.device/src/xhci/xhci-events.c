@@ -49,7 +49,7 @@ typedef void (*ep_state_handler)(struct usb_device *udev, struct ep_context *ep_
 
 static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
-static void ep_handle_rt_iso(struct USBIORequest *req, ULONG act_len, struct ep_context *ep_ctx, struct usb_device *udev);
+static void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, struct ep_context *ep_ctx, struct usb_device *udev);
 static void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
@@ -69,19 +69,20 @@ static const ep_state_handler ep_state_dispatch[] = {
  */
 static void dispatch_ep_event(struct usb_device *udev, union xhci_trb *event)
 {
-    UWORD ep_index = TRB_TO_EP_INDEX(le32(event->trans_event.flags));
+    const u32 flags = le32(event->trans_event.flags);
+    const u8 ep_index = TRB_TO_EP_INDEX(flags);
 
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
     {
-        KprintfH("No ep context for addr %ld ep %ld\n", (LONG)udev->virtual_address, (LONG)ep_index);
+        KprintfH("No ep context for addr %lu ep %lu\n", (ULONG)udev->virtual_address, (ULONG)ep_index);
         return;
     }
     enum ep_state state = xhci_ep_get_state(ep_ctx);
 
     if (ep_state_dispatch[state])
     {
-        KprintfH("addr %ld EP %ld state %ld -> handling event\n", udev->virtual_address, (LONG)ep_index, (LONG)state);
+        KprintfH("addr %lu EP %lu state %lu -> handling event\n", (ULONG)udev->virtual_address, (ULONG)ep_index, (ULONG)state);
         ep_state_handler handler = ep_state_dispatch[state];
         handler(udev, ep_ctx, event);
     }
@@ -105,22 +106,23 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
         {
         case TRB_TRANSFER:
         {
-            int slot = TRB_TO_SLOT_ID(le32(event->trans_event.flags));
-            KprintfH("Transfer Event TRB detected: slot %ld ep %ld (%08lx %08lx %08lx %08lx)\n",
-                     (LONG)slot,
-                     (LONG)TRB_TO_EP_INDEX(le32(event->trans_event.flags)),
-                     (LONG)le32(event->generic.field[0]),
-                     (LONG)le32(event->generic.field[1]),
-                     (LONG)le32(event->generic.field[2]),
-                     (LONG)le32(event->generic.field[3]));
+            const u32 flags = le32(event->trans_event.flags);
+            const u32 slot = TRB_TO_SLOT_ID(flags);
+            KprintfH("Transfer Event TRB detected: slot %lu ep %lu (%08lx %08lx %08lx %08lx)\n",
+                     (ULONG)slot,
+                     (ULONG)TRB_TO_EP_INDEX(flags),
+                     (ULONG)le32(event->generic.field[0]),
+                     (ULONG)le32(event->generic.field[1]),
+                     (ULONG)le32(event->generic.field[2]),
+                     (ULONG)le32(event->generic.field[3]));
 
             struct usb_device *udev = ctrl->devices_by_slot_id[slot];
             if (!udev)
             {
-                Kprintf("No usb_device for slot %ld\n", slot);
+                Kprintf("No usb_device for slot %lu\n", (ULONG)slot);
                 break;
             }
-            KprintfH("USB device addr %ld on slot %ld\n", (LONG)udev->virtual_address, (LONG)slot);
+            KprintfH("USB device addr %lu on slot %lu\n", (ULONG)udev->virtual_address, (ULONG)slot);
 
             dispatch_ep_event(udev, event);
         }
@@ -133,10 +135,13 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
         case TRB_PORT_STATUS:
         {
 #ifdef DEBUG_HIGH
-            const ULONG port_field = (ULONG)le32(event->generic.field[0]);
-            const ULONG flags = (ULONG)le32(event->generic.field[3]);
-            const ULONG port_id = (ULONG)GET_PORT_ID(port_field);
-            ULONG portsc = 0;
+            const u32 port_field = le32(event->generic.field[0]);
+            const u32 field1 = le32(event->generic.field[1]);
+            const u32 field2 = le32(event->generic.field[2]);
+            const u32 flags = le32(event->generic.field[3]);
+            const u32 port_id = GET_PORT_ID(port_field);
+            const u32 usbsts = mmio_read32(&ctrl->hcor->or_usbsts);
+            u32 portsc = 0;
 
             if (port_id > 0 && port_id <= MAX_HC_PORTS)
                 portsc = mmio_read32(&ctrl->hcor->portregs[port_id - 1].or_portsc);
@@ -144,17 +149,17 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
             Kprintf("Port Status Change Event port=%lu portsc=%08lx usbsts=%08lx trb=(%08lx %08lx %08lx %08lx)\n",
                     port_id,
                     portsc,
-                    (ULONG)mmio_read32(&ctrl->hcor->or_usbsts),
+                    usbsts,
                     port_field,
-                    (ULONG)le32(event->generic.field[1]),
-                    (ULONG)le32(event->generic.field[2]),
+                    field1,
+                    field2,
                     flags);
 #endif
             xhci_roothub_complete_int_request(ctrl->root_hub);
             break;
         }
         default:
-            Kprintf("Unexpected XHCI event type %ld, skipping... (%08lx %08lx %08lx %08lx)\n",
+            Kprintf("Unexpected XHCI event type %lu, skipping... (%08lx %08lx %08lx %08lx)\n",
                     (ULONG)type,
                     (ULONG)le32(event->generic.field[0]),
                     (ULONG)le32(event->generic.field[1]),
@@ -168,27 +173,27 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
 
 void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
 {
-    for (int i = 0; i < USB_MAX_ADDRESS; i++)
+    for (u32 i = 0; i < USB_MAX_ADDRESS; i++)
     {
         struct usb_device *udev = ctrl->devices_by_virtual_address[i];
         if (!udev)
             continue;
 
-        for (int ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
+        for (u8 ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
         {
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
             if (ep_ctx && xhci_ep_is_expired(ep_ctx))
             {
-                KprintfH("XHCI TD timeout on slot %ld ep %ld\n", (LONG)udev->slot_id, (LONG)ep_index);
+                KprintfH("XHCI TD timeout on slot %lu ep %lu\n", (ULONG)udev->slot_id, (ULONG)ep_index);
                 xhci_ep_request_timeout_recovery(ep_ctx);
             }
         }
     }
 }
 
-inline static ULONG translate_status(xhci_comp_code comp)
+inline static s8 translate_status(xhci_comp_code comp)
 {
-    ULONG status;
+    s8 status;
 
     switch (comp)
     {
@@ -229,7 +234,7 @@ inline static ULONG translate_status(xhci_comp_code comp)
         status = ERR_TIMEOUT;
         break;
     default:
-        Kprintf("Unhandled completion code %ld\n", (LONG)comp);
+        Kprintf("Unhandled completion code %lu\n", (ULONG)comp);
         status = ERR_HCI_ERROR;
     }
 
@@ -247,8 +252,9 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
 {
     (void)event;
     enum ep_state state = xhci_ep_get_state(ep_ctx);
-    int ep_index = xhci_ep_get_ep_index(ep_ctx);
-    Kprintf("No handler for endpoint %ld state %ld addr %ld\n", ep_index, state, udev->virtual_address);
+    const u8 ep_index = xhci_ep_get_ep_index(ep_ctx);
+
+    Kprintf("No handler for endpoint %lu state %lu addr %lu\n", (ULONG)ep_index, (ULONG)state, (ULONG)udev->virtual_address);
     KprintfH("Event TRB: (%08lx %08lx %08lx %08lx)\n",
              (ULONG)le32(event->generic.field[0]),
              (ULONG)le32(event->generic.field[1]),
@@ -259,15 +265,16 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
 
-    u32 flags = le32(event->trans_event.flags);
-    int ep_index = TRB_TO_EP_INDEX(flags);
-    u64 trb_addr = le64(event->trans_event.buffer);
-    xhci_comp_code comp = GET_COMP_CODE(le32(event->trans_event.transfer_len));
+    const u32 flags = le32(event->trans_event.flags);
+    const u8 ep_index = TRB_TO_EP_INDEX(flags);
+    const u64 trb_addr = le64(event->trans_event.buffer);
+    const u32 transfer_len = le32(event->trans_event.transfer_len);
+    const xhci_comp_code comp = GET_COMP_CODE(transfer_len);
 
 #ifdef DEBUG_CONTEXT
     KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
              (ULONG)flags,
-             (ULONG)le32(event->trans_event.transfer_len),
+             (ULONG)transfer_len,
              (ULONG)u64_hi32(trb_addr),
              (ULONG)u64_lo32(trb_addr));
     xhci_dump_slot_ctx("[xhci-event] ep_handle_receiving_generic:", udev, FALSE);
@@ -278,11 +285,11 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     if ((comp == COMP_UNDERRUN || comp == COMP_OVERRUN) && trb_addr == 0)
     {
         enum ep_state state = xhci_ep_get_state(ep_ctx);
-        Kprintf("Ring %s on addr %ld EP %ld state=%ld\n",
+        Kprintf("Ring %s on addr %lu EP %lu state=%lu\n",
                 (comp == COMP_UNDERRUN) ? "underrun" : "overrun",
-                (LONG)udev->virtual_address,
-                (LONG)ep_index,
-                (LONG)state);
+                (ULONG)udev->virtual_address,
+                (ULONG)ep_index,
+                (ULONG)state);
 
         if (state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
             xhci_ep_schedule_rt_iso(ep_ctx);
@@ -290,15 +297,15 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         return;
     }
 
-    struct USBIORequest *req = xhci_ep_get_by_trb(ep_ctx, trb_addr);
+    struct USBIORequest *req = xhci_ep_get_by_trb(ep_ctx, (dma_addr_t)trb_addr);
     if (!req)
     {
-        Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %ld\n",
-                (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)le32(event->trans_event.transfer_len), (LONG)ep_index);
+        Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %lu\n",
+            (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
         return;
     }
 
-    ULONG act_len = req->data_buffer_length - EVENT_TRB_LEN(le32(event->trans_event.transfer_len));
+        u32 act_len = req->data_buffer_length - EVENT_TRB_LEN(transfer_len);
 
     BOOL is_rt_iso = req->req.io_Command == CMD_REGISTER_ISOCHRONOUS_HOOKS;
     if (is_rt_iso)
@@ -310,8 +317,8 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         return;
     }
 
-    ULONG status = translate_status(comp);
-    KprintfH("result status=%ld act_len=%ld comp=%ld\n", (LONG)status, (LONG)act_len, (LONG)comp);
+    s8 status = translate_status(comp);
+    KprintfH("result status=%ld act_len=%lu comp=%lu\n", (LONG)status, (ULONG)act_len, (ULONG)comp);
 
     /* Flag short IN transfers as runts unless explicitly allowed or expected (control). */
     if (status == ERR_NO_ERROR && act_len < req->data_buffer_length &&
@@ -336,7 +343,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         xhci_ep_set_idle(ep_ctx);
 }
 
-void ep_handle_rt_iso(struct USBIORequest *req, ULONG act_len, struct ep_context *ep_ctx, struct usb_device *udev)
+void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, struct ep_context *ep_ctx, struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
@@ -378,12 +385,12 @@ static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ct
     u32 flags = le32(event->trans_event.flags);
     if (TRB_TO_SLOT_ID(flags) != udev->slot_id)
     {
-        Kprintf("Expected a TRB for slot %ld, got %ld\n", udev->slot_id, TRB_TO_SLOT_ID(flags));
+        Kprintf("Expected a TRB for slot %lu, got %lu\n", (ULONG)udev->slot_id, (ULONG)TRB_TO_SLOT_ID(flags));
         return;
     }
     if (GET_COMP_CODE(le32(event->trans_event.transfer_len)) != COMP_STOP)
     {
-        Kprintf("Expected a TRB with STOP, got %ld\n", GET_COMP_CODE(le32(event->trans_event.transfer_len)));
+        Kprintf("Expected a TRB with STOP, got %lu\n", (ULONG)GET_COMP_CODE(le32(event->trans_event.transfer_len)));
     }
 
     /* no state change - that is done by handle_abort_stop_ring */

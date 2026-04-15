@@ -52,10 +52,10 @@
  * @param size	size of memory to be allocated
  * Return: allocates the memory and returns the aligned pointer
  */
-void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
+void *xhci_malloc(struct xhci_ctrl *ctrl, u32 size)
 {
 	void *ptr;
-	ULONG cacheline_size = max(XHCI_ALIGNMENT, CACHELINE_SIZE);
+	u32 cacheline_size = (XHCI_ALIGNMENT > CACHELINE_SIZE) ? XHCI_ALIGNMENT : CACHELINE_SIZE;
 
 	ptr = dma_zalloc(ctrl->memoryPool, cacheline_size, ALIGN_UP(size, cacheline_size));
 	if (!ptr)
@@ -75,12 +75,12 @@ void *xhci_malloc(struct xhci_ctrl *ctrl, unsigned int size)
  * @ctrl	host controller data structure
  * Return:	-ENOMEM if buffer allocation fails, 0 on success
  */
-static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
+static s32 xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 {
 	struct xhci_hccr *hccr = ctrl->hccr;
 	struct xhci_hcor *hcor = ctrl->hcor;
 
-	int num_sp = HCS_MAX_SCRATCHPAD(mmio_read32(&hccr->cr_hcsparams2));
+	u32 num_sp = HCS_MAX_SCRATCHPAD(mmio_read32(&hccr->cr_hcsparams2));
 	if (!num_sp)
 		return 0;
 
@@ -93,11 +93,11 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	if (!scratchpad->sp_array)
 		goto fail_sp2;
 
-	ctrl->dcbaa->dev_context_ptrs[0] = le64((dma_addr_t)scratchpad->sp_array);
+	ctrl->dcbaa->dev_context_ptrs[0] = le64(scratchpad->sp_array);
 	xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[0], sizeof(ctrl->dcbaa->dev_context_ptrs[0]));
 
 	u32 page_size = mmio_read32(&hcor->or_pagesize) & 0xffff;
-	int i;
+	u32 i;
 	for (i = 0; i < 16; i++)
 	{
 		if ((0x1 & page_size) != 0)
@@ -110,7 +110,7 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 		goto fail_sp3;
 	}
 
-	page_size = 1 << (i + 12);
+	page_size = (u32)1 << (i + 12);
 	void *buf = dma_zalloc(ctrl->memoryPool, page_size, num_sp * page_size);
 	if (!buf)
 		goto fail_sp3;
@@ -119,7 +119,7 @@ static int xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	scratchpad->scratchpad = buf;
 	for (i = 0; i < num_sp; i++)
 	{
-		scratchpad->sp_array[i] = le64((dma_addr_t)buf);
+		scratchpad->sp_array[i] = le64(scratchpad->scratchpad + (i * page_size));
 		buf += page_size;
 	}
 
@@ -165,7 +165,7 @@ static void xhci_scratchpad_free(struct xhci_ctrl *ctrl)
  * @param hcor	pointer to HOST Controller Operational Registers
  * Return: 0 if successful else -1 on failure
  */
-static int xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
+static s32 xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 						 struct xhci_hcor *hcor)
 {
 	uint32_t val;
@@ -250,10 +250,10 @@ static void xhci_cleanup(struct xhci_ctrl *ctrl)
  * @param usec	time to wait till
  * Return: 0 if handshake is success else < 0 on failure
  */
-static int handshake(uint32_t volatile *ptr, uint32_t mask, uint32_t done, int usec)
+static s32 handshake(volatile u32 *ptr, u32 mask, u32 done, u32 usec)
 {
-	uint32_t result;
-	ULONG deadline = get_time() + usec;
+	u32 result;
+	u32 deadline = get_time() + usec;
 
 	for (;;)
 	{
@@ -275,7 +275,7 @@ static int handshake(uint32_t volatile *ptr, uint32_t mask, uint32_t done, int u
  * @param hcor	pointer to host controller operation registers
  * Return: status of the Handshake
  */
-static int xhci_start(struct xhci_hcor *hcor)
+static s32 xhci_start(struct xhci_hcor *hcor)
 {
 	Kprintf("Starting the controller\n");
 	u32 temp = mmio_read32(&hcor->or_usbcmd);
@@ -286,7 +286,7 @@ static int xhci_start(struct xhci_hcor *hcor)
 	 * Wait for the HCHalted Status bit to be 0 to indicate the host is
 	 * running.
 	 */
-	int ret = handshake(&hcor->or_usbsts, STS_HALT, 0, XHCI_MAX_HALT_USEC);
+	s32 ret = handshake(&hcor->or_usbsts, STS_HALT, 0, XHCI_MAX_HALT_USEC);
 	if (ret)
 		Kprintf("Host took too long to start, waited %lu microseconds.\n", XHCI_MAX_HALT_USEC);
 	return ret;
@@ -298,7 +298,7 @@ static int xhci_start(struct xhci_hcor *hcor)
  * @param hcor	pointer to host controller operation registers
  * Return: -EBUSY if XHCI Controller is not halted else status of handshake
  */
-static int xhci_reset(struct xhci_hcor *hcor)
+static s32 xhci_reset(struct xhci_hcor *hcor)
 {
 	u32 cmd;
 
@@ -312,7 +312,7 @@ static int xhci_reset(struct xhci_hcor *hcor)
 		mmio_write32(cmd, &hcor->or_usbcmd);
 	}
 
-	int ret = handshake(&hcor->or_usbsts, STS_HALT, STS_HALT, XHCI_MAX_HALT_USEC);
+	s32 ret = handshake(&hcor->or_usbsts, STS_HALT, STS_HALT, XHCI_MAX_HALT_USEC);
 	if (ret)
 	{
 		Kprintf("Host not halted after %lu microseconds.\n", XHCI_MAX_HALT_USEC);
@@ -388,7 +388,7 @@ u32 *xhci_find_next_capability(struct xhci_ctrl *ctrl, u32 cap_id, u32 *init_off
 	return NULL;
 }
 
-struct xhci_protocol_caps xhci_get_protocol_caps(u32* base_address)
+struct xhci_protocol_caps xhci_get_protocol_caps(u32 *base_address)
 {
 	struct xhci_protocol_caps caps = {0};
 	u32 cap00 = mmio_read32(base_address + 0);
@@ -413,7 +413,7 @@ struct xhci_protocol_caps xhci_get_protocol_caps(u32* base_address)
 		caps.max_hub_depth = XHCI_PROTOCOL_CAP_USB2_MHD(cap08);
 	}
 	caps.protocol_speed_id_count = XHCI_PROTOCOL_CAP_SPEED_ID_COUNT(cap08);
-	caps.protocol_slot_type |= XHCI_PROTOCOL_CAP_SLOT_TYPE(cap0c);
+	caps.protocol_slot_type = (u8)(caps.protocol_slot_type | XHCI_PROTOCOL_CAP_SLOT_TYPE(cap0c));
 
 	return caps;
 }
@@ -452,7 +452,7 @@ static void xhci_dump_caps(struct xhci_ctrl *ctrl)
 		Kprintf("Host controller supports Virtualization Based Trusted I/O Capability\n");
 }
 
-static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
+static s32 xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 {
 	struct xhci_hccr *hccr = ctrl->hccr;
 	struct xhci_hcor *hcor = ctrl->hcor;
@@ -486,14 +486,14 @@ static int xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 
 	u32 reg = HC_VERSION(mmio_read32(&hccr->cr_capbase));
 	Kprintf("USB XHCI %lx.%02lx\n", reg >> 8, reg & 0xff);
-	ctrl->hci_version = reg;
+	ctrl->hci_version = reg & 0xffffU;
 
 	xhci_dump_caps(ctrl);
 
 	return 0;
 }
 
-static int xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
+static void xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 {
 	xhci_reset(ctrl->hcor);
 
@@ -505,15 +505,13 @@ static int xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 
 	xhci_roothub_destroy(ctrl->root_hub);
 	ctrl->root_hub = NULL;
-
-	return 0;
 }
 
-int xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hcor *hcor)
+s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
 	Kprintf("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
 
-	int ret = xhci_reset(hcor);
+	s32 ret = xhci_reset(hcor);
 	if (ret)
 		goto err;
 
@@ -544,7 +542,7 @@ err:
 	return ret;
 }
 
-int xhci_deregister(struct xhci_ctrl *ctrl)
+void xhci_deregister(struct xhci_ctrl *ctrl)
 {
 	xhci_lowlevel_stop(ctrl);
 	xhci_cleanup(ctrl);
@@ -554,6 +552,4 @@ int xhci_deregister(struct xhci_ctrl *ctrl)
 		DeletePool(ctrl->memoryPool);
 		ctrl->memoryPool = NULL;
 	}
-
-	return 0;
 }

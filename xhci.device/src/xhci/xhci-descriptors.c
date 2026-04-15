@@ -37,25 +37,25 @@
  * @param desc	USB enpdoint Descriptor
  * Return: index of the Endpoint
  */
-unsigned int xhci_get_ep_index(struct usb_endpoint_descriptor *desc)
+u8 xhci_get_ep_index(struct usb_endpoint_descriptor *desc)
 {
-    unsigned int index;
+    u8 index;
 
     if (usb_endpoint_xfer_control(desc))
-        index = (unsigned int)(usb_endpoint_num(desc) * 2);
+        index = (u8)(usb_endpoint_num(desc) * 2);
     else
-        index = (unsigned int)((usb_endpoint_num(desc) * 2) -
+        index = (u8)((usb_endpoint_num(desc) * 2) -
                                (usb_endpoint_dir_in(desc) ? 0 : 1));
 
     return index;
 }
 
-struct usb_interface *xhci_find_interface(struct usb_config *cfg, unsigned int iface_number)
+struct usb_interface *xhci_find_interface(struct usb_config *cfg, u32 iface_number)
 {
     if (!cfg)
         return NULL;
 
-    for (unsigned int i = 0; i < cfg->no_of_if; ++i)
+    for (u32 i = 0; i < cfg->no_of_if; ++i)
     {
         if (cfg->if_desc[i].interface_number == iface_number)
             return &cfg->if_desc[i];
@@ -64,12 +64,12 @@ struct usb_interface *xhci_find_interface(struct usb_config *cfg, unsigned int i
     return NULL;
 }
 
-struct usb_interface_altsetting *xhci_find_altsetting(struct usb_interface *iface, unsigned int alt_setting)
+struct usb_interface_altsetting *xhci_find_altsetting(struct usb_interface *iface, u8 alt_setting)
 {
     if (!iface)
         return NULL;
 
-    for (unsigned int idx = 0; idx < iface->num_altsetting; ++idx)
+    for (u32 idx = 0; idx < iface->num_altsetting; ++idx)
     {
         struct usb_interface_altsetting *candidate = &iface->altsetting[idx];
         if (candidate->desc.bAlternateSetting == alt_setting)
@@ -79,17 +79,17 @@ struct usb_interface_altsetting *xhci_find_altsetting(struct usb_interface *ifac
     return NULL;
 }
 
-u32 xhci_collect_ep_mask(const struct usb_interface_altsetting *alt, unsigned int *max_flag)
+u32 xhci_collect_ep_mask(const struct usb_interface_altsetting *alt, u32 *max_flag)
 {
     if (!alt)
         return 0;
 
     u32 mask = 0;
 
-    for (unsigned int i = 0; i < alt->no_of_ep; ++i)
+    for (u32 i = 0; i < alt->no_of_ep; ++i)
     {
         const struct usb_endpoint_descriptor *epd = &alt->ep_desc[i];
-        unsigned int ep_index = xhci_get_ep_index((struct usb_endpoint_descriptor *)epd);
+        u8 ep_index = xhci_get_ep_index((struct usb_endpoint_descriptor *)epd);
         mask |= 1U << (ep_index + 1);
         if (max_flag && ep_index > *max_flag)
             *max_flag = ep_index;
@@ -98,22 +98,22 @@ u32 xhci_collect_ep_mask(const struct usb_interface_altsetting *alt, unsigned in
     return mask;
 }
 
-u32 xhci_collect_config_masks(const struct usb_config *cfg, unsigned int limit, unsigned int *max_flag)
+u32 xhci_collect_config_masks(const struct usb_config *cfg, u32 limit, u32 *max_flag)
 {
     if (!cfg)
         return 0;
 
     u32 mask = 0;
-    unsigned int max_if = min(limit, cfg->no_of_if);
+    u32 max_if = limit < (u32)cfg->no_of_if ? limit : (u32)cfg->no_of_if;
 
-    for (unsigned int ifnum = 0; ifnum < max_if; ++ifnum)
+    for (u32 ifnum = 0; ifnum < max_if; ++ifnum)
     {
         const struct usb_interface *iface = &cfg->if_desc[ifnum];
         const struct usb_interface_altsetting *active_alt = iface->active_altsetting;
         if (!active_alt)
             continue;
 
-        KprintfH("Preparing iface=%ld alt=%ld\n", (ULONG)ifnum, (LONG)active_alt->desc.bAlternateSetting);
+        KprintfH("Preparing iface=%lu alt=%lu\n", (ULONG)ifnum, (ULONG)active_alt->desc.bAlternateSetting);
 
         mask |= xhci_collect_ep_mask(active_alt, max_flag);
     }
@@ -129,7 +129,7 @@ struct usb_config *xhci_find_config(struct usb_device *udev, int config_value)
     for (struct MinNode *node = udev->configurations.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
     {
         struct usb_config *cfg = (struct usb_config *)node;
-        KprintfH("  found config: bConfigurationValue=%ld\n", (LONG)cfg->desc.bConfigurationValue);
+        KprintfH("  found config: bConfigurationValue=%lu\n", (ULONG)cfg->desc.bConfigurationValue);
         if (cfg->desc.bConfigurationValue == config_value)
             return cfg;
     }
@@ -149,7 +149,7 @@ struct usb_interface_altsetting *xhci_select_active_alt(struct usb_interface *if
         return NULL;
 
     struct usb_interface_altsetting *fallback = NULL;
-    for (unsigned int idx = 0; idx < iface->num_altsetting; ++idx)
+    for (u32 idx = 0; idx < iface->num_altsetting; ++idx)
     {
         struct usb_interface_altsetting *candidate = &iface->altsetting[idx];
         if (candidate->desc.bAlternateSetting == 0)
@@ -166,12 +166,12 @@ struct usb_interface_altsetting *xhci_select_active_alt(struct usb_interface *if
     return fallback;
 }
 
-unsigned int compute_max_ep_flag(const struct usb_config *cfg)
+u32 compute_max_ep_flag(const struct usb_config *cfg)
 {
     if (!cfg)
         return 0;
 
-    unsigned int max_flag = 0;
+    u32 max_flag = 0;
     xhci_collect_config_masks(cfg, cfg->no_of_if, &max_flag);
 
     return max_flag;
@@ -181,22 +181,22 @@ unsigned int compute_max_ep_flag(const struct usb_config *cfg)
  * Convert bInterval expressed in microframes (in 1-255 range) to exponent of
  * microframes, rounded down to nearest power of 2.
  */
-static unsigned int xhci_microframes_to_exponent(unsigned int desc_interval,
-                                                 unsigned int min_exponent,
-                                                 unsigned int max_exponent)
+static u8 xhci_microframes_to_exponent(u32 desc_interval,
+                                       u32 min_exponent,
+                                       u32 max_exponent)
 {
-    unsigned int interval = log2_floor_u64(desc_interval);
+    u32 interval = log2_floor_u64(desc_interval);
     interval = clamp_val(interval, min_exponent, max_exponent);
 #ifdef DEBUG_HIGH
     if ((1U << interval) != desc_interval)
-        KprintfH("rounding interval to %ld microframes, ep desc says %ld microframes\n",
-                 1U << interval, desc_interval);
+        KprintfH("rounding interval to %lu microframes, ep desc says %lu microframes\n",
+                 (ULONG)(1U << interval), (ULONG)desc_interval);
 #endif
 
-    return interval;
+    return (u8)interval;
 }
 
-static unsigned int xhci_parse_microframe_interval(struct usb_endpoint_descriptor *endpt_desc)
+static u8 xhci_parse_microframe_interval(struct usb_endpoint_descriptor *endpt_desc)
 {
     if (endpt_desc->bInterval == 0)
         return 0;
@@ -204,24 +204,24 @@ static unsigned int xhci_parse_microframe_interval(struct usb_endpoint_descripto
     return xhci_microframes_to_exponent(endpt_desc->bInterval, 0, 15);
 }
 
-static unsigned int xhci_parse_frame_interval(struct usb_endpoint_descriptor *endpt_desc)
+static u8 xhci_parse_frame_interval(struct usb_endpoint_descriptor *endpt_desc)
 {
-    return xhci_microframes_to_exponent(endpt_desc->bInterval * 8, 3, 10);
+    return xhci_microframes_to_exponent((u32)endpt_desc->bInterval * 8U, 3, 10);
 }
 
 /*
  * Convert interval expressed as 2^(bInterval - 1) == interval into
  * straight exponent value 2^n == interval.
  */
-static unsigned int xhci_parse_exponent_interval(struct usb_device *udev,
-                                                 struct usb_endpoint_descriptor *endpt_desc)
+static u8 xhci_parse_exponent_interval(struct usb_device *udev,
+                                       struct usb_endpoint_descriptor *endpt_desc)
 {
-    unsigned int interval;
+    u8 interval;
 
-    interval = clamp_val(endpt_desc->bInterval, 1, 16) - 1;
+    interval = (u8)(clamp_val(endpt_desc->bInterval, 1, 16) - 1);
     if (interval != endpt_desc->bInterval - 1U)
-        Kprintf("ep %#lx - rounding interval to %ld %sframes\n",
-                endpt_desc->bEndpointAddress, 1 << interval,
+        Kprintf("ep %#lx - rounding interval to %lu %sframes\n",
+                (ULONG)endpt_desc->bEndpointAddress, (ULONG)(1U << interval),
                 udev->speed == USB_SPEED_FULL ? "" : "micro");
 
     if (udev->speed == USB_SPEED_FULL)
@@ -231,7 +231,7 @@ static unsigned int xhci_parse_exponent_interval(struct usb_device *udev,
          * not microframes. We are using microframes everywhere,
          * so adjust accordingly.
          */
-        interval += 3; /* 1 frame = 2^3 uframes */
+        interval = (u8)(interval + 3u); /* 1 frame = 2^3 uframes */
     }
 
     return interval;
@@ -246,9 +246,9 @@ static unsigned int xhci_parse_exponent_interval(struct usb_device *udev,
  * The NAK interval is one NAK per 1 to 255 microframes, or no NAKs if interval
  * is set to 0.
  */
-unsigned int xhci_get_endpoint_interval(struct usb_device *udev, struct usb_endpoint_descriptor *endpt_desc)
+u8 xhci_get_endpoint_interval(struct usb_device *udev, struct usb_endpoint_descriptor *endpt_desc)
 {
-    unsigned int interval = 0;
+    u8 interval = 0;
 
     switch (udev->speed)
     {
@@ -293,7 +293,7 @@ unsigned int xhci_get_endpoint_interval(struct usb_device *udev, struct usb_endp
         break;
 
     default:
-        Kprintf("Unsupported USB speed: %ld\n", udev->speed);
+        Kprintf("Unsupported USB speed: %lu\n", (ULONG)udev->speed);
     }
 
     return interval;
@@ -305,9 +305,9 @@ unsigned int xhci_get_endpoint_interval(struct usb_device *udev, struct usb_endp
  * transaction opportunities per microframe", but that goes in the Max Burst
  * endpoint context field.
  */
-u32 xhci_get_endpoint_mult(struct usb_device *udev,
-                           struct usb_endpoint_descriptor *endpt_desc,
-                           struct usb_ss_ep_comp_descriptor *ss_ep_comp_desc)
+u8 xhci_get_endpoint_mult(struct usb_device *udev,
+                          struct usb_endpoint_descriptor *endpt_desc,
+                          struct usb_ss_ep_comp_descriptor *ss_ep_comp_desc)
 {
     if (udev->speed < USB_SPEED_SUPER || !usb_endpoint_xfer_isoc(endpt_desc))
         return 0;
@@ -315,16 +315,16 @@ u32 xhci_get_endpoint_mult(struct usb_device *udev,
     return ss_ep_comp_desc->bmAttributes;
 }
 
-u32 xhci_get_endpoint_max_burst(struct usb_device *udev,
-                                struct usb_endpoint_descriptor *endpt_desc,
-                                struct usb_ss_ep_comp_descriptor *ss_ep_comp_desc)
+u8 xhci_get_endpoint_max_burst(struct usb_device *udev,
+                               struct usb_endpoint_descriptor *endpt_desc,
+                               struct usb_ss_ep_comp_descriptor *ss_ep_comp_desc)
 {
     /* Super speed and Plus have max burst in ep companion desc */
     if (udev->speed >= USB_SPEED_SUPER)
         return ss_ep_comp_desc->bMaxBurst;
 
     if (udev->speed == USB_SPEED_HIGH && (usb_endpoint_xfer_isoc(endpt_desc) || usb_endpoint_xfer_int(endpt_desc)))
-        return usb_endpoint_maxp_mult(endpt_desc) - 1;
+        return (u8)(usb_endpoint_maxp_mult(endpt_desc) - 1u);
 
     return 0;
 }
@@ -346,14 +346,14 @@ u32 xhci_get_max_esit_payload(struct usb_device *udev,
     if (udev->speed >= USB_SPEED_SUPER)
         return le16(ss_ep_comp_desc->wBytesPerInterval);
 
-    int max_packet = usb_endpoint_maxp(endpt_desc);
-    int max_burst = usb_endpoint_maxp_mult(endpt_desc);
+    u32 max_packet = usb_endpoint_maxp(endpt_desc);
+    u8 max_burst = usb_endpoint_maxp_mult(endpt_desc);
 
-    /* A 0 in max burst means 1 transfer per ESIT */
+    /* usb_endpoint_maxp_mult() already returns the encoded multiplier + 1. */
     return max_packet * max_burst;
 }
 
-static void xhci_dump_interface(const char *tag, UBYTE index, const struct usb_interface *iface)
+static void xhci_dump_interface(const char *tag, u8 index, const struct usb_interface *iface)
 {
     if (!iface)
         return;
@@ -389,7 +389,7 @@ static void xhci_dump_interface(const char *tag, UBYTE index, const struct usb_i
         return;
     }
 
-    for (UBYTE j = 0; j < active_alt->no_of_ep; ++j)
+    for (u8 j = 0; j < active_alt->no_of_ep; ++j)
     {
         const struct usb_endpoint_descriptor *ep = &active_alt->ep_desc[j];
         const struct usb_ss_ep_comp_descriptor *ss_ep = &active_alt->ss_ep_comp_desc[j];
@@ -407,14 +407,14 @@ static void xhci_dump_interface(const char *tag, UBYTE index, const struct usb_i
     }
 }
 
-void xhci_dump_config(const char *tag, const struct usb_config *cfg, UBYTE addr)
+void xhci_dump_config(const char *tag, const struct usb_config *cfg, u16 addr)
 {
     if (!cfg)
         return;
 
     const char *pfx = tag ? tag : "";
 
-    Kprintf("%s Addr %ld configuration dump:\n", pfx, (ULONG)addr);
+    Kprintf("%s Addr %lu configuration dump:\n", pfx, (ULONG)addr);
     Kprintf("%s  bLength=%lu bDescriptorType=%lu wTotalLength=%lu bNumInterfaces=%lu\n",
             pfx, (ULONG)cfg->desc.bLength, (ULONG)cfg->desc.bDescriptorType,
             (ULONG)le16(cfg->desc.wTotalLength), (ULONG)cfg->desc.bNumInterfaces);
@@ -422,6 +422,6 @@ void xhci_dump_config(const char *tag, const struct usb_config *cfg, UBYTE addr)
             pfx, (ULONG)cfg->desc.bConfigurationValue, (ULONG)cfg->desc.iConfiguration,
             (ULONG)cfg->desc.bmAttributes, (ULONG)cfg->desc.bMaxPower);
     Kprintf("%s  no_of_if=%lu\n", pfx, (ULONG)cfg->no_of_if);
-    for (UBYTE i = 0; i < cfg->no_of_if; ++i)
+    for (u8 i = 0; i < cfg->no_of_if; ++i)
         xhci_dump_interface(pfx, i, &cfg->if_desc[i]);
 }

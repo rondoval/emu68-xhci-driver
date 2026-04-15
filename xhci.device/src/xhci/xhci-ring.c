@@ -35,9 +35,9 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-static inline void xhci_copy_to_bounce_buffer(CONST_APTR src, APTR dst, ULONG size)
+static inline void xhci_copy_to_bounce_buffer(CONST_APTR src, APTR dst, u32 size)
 {
-	if ((((ULONG)src | (ULONG)dst | size) & (sizeof(ULONG) - 1)) == 0)
+	if ((((uintptr_t)src | (uintptr_t)dst | size) & (sizeof(ULONG) - 1)) == 0)
 	{
 		CopyMemQuick((ULONG *)src, (ULONG *)dst, size);
 		return;
@@ -56,9 +56,9 @@ struct xhci_segment
 struct xhci_ring
 {
 	BOOL is_event_ring;
-	int ep_index; /* for transfer rings, the endpoint index this ring is associated with. For event rings, unused and set to 0. */
-	unsigned int num_segs;
-	int max_packet_size;
+	u8 ep_index; /* for transfer rings, the endpoint index this ring is associated with. For event rings, unused and set to 0. */
+	u32 num_segs;
+	u32 max_packet_size;
 	APTR memoryPool;
 
 	struct xhci_segment *first_seg;
@@ -144,7 +144,7 @@ static void xhci_link_segments(struct xhci_segment *prev,
 		 * have a TRB type ID of Link TRB
 		 */
 		u32 val = le32(prev->trbs[TRBS_PER_SEGMENT - 1].link.control);
-		val &= ~TRB_TYPE_BITMASK;
+		val &= (u32)~TRB_TYPE_BITMASK;
 		val |= TRB_TYPE(TRB_LINK);
 		prev->trbs[TRBS_PER_SEGMENT - 1].link.control = le32(val);
 	}
@@ -220,10 +220,10 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
  * @param maxpacketsize maximum packet size for the endpoint, unused for event rings
  * Return: pointer to the newly created RING
  */
-struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
-								  BOOL link_trbs, BOOL is_event_ring, int ep_index, int max_packet_size)
+struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
+								  BOOL link_trbs, BOOL is_event_ring, u8 ep_index, u32 max_packet_size)
 {
-	unsigned int remaining = num_segs;
+	u32 remaining = num_segs;
 
 	struct xhci_ring *ring = pool_zalloc(ctrl->memoryPool, sizeof(struct xhci_ring));
 	if (!ring)
@@ -282,7 +282,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
 
 void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct xhci_intr_reg *ir_set)
 {
-	uint32_t val;
+	u32 val;
 	struct xhci_segment *seg;
 	erst->num_entries = ERST_NUM_SEGS;
 
@@ -311,7 +311,7 @@ void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct
 	/* this is the event ring segment table pointer */
 	u64 val_64 = xhci_readq(&ir_set->erst_base);
 	val_64 &= ERST_PTR_MASK;
-	val_64 |= (dma_addr_t)erst->entries & ~ERST_PTR_MASK;
+	val_64 |= ((dma_addr_t)erst->entries & ~ERST_PTR_MASK);
 
 	xhci_writeq(&ir_set->erst_base, val_64);
 }
@@ -551,7 +551,7 @@ void xhci_ring_acknowledge_event(struct xhci_ctrl *ctrl)
 	inc_deq(ctrl->event_ring);
 
 	/* Inform the hardware */
-	xhci_writeq(&ctrl->ir_set->erst_dequeue, (dma_addr_t)ctrl->event_ring->dequeue | ERST_EHB);
+	xhci_writeq(&ctrl->ir_set->erst_dequeue, ((dma_addr_t)ctrl->event_ring->dequeue) | ERST_EHB);
 }
 
 u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring)
@@ -569,12 +569,12 @@ u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr)
 	return trb_addr | (le32(trb->generic.field[3]) & TRB_CYCLE);
 }
 
-void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, UWORD trb_count, UWORD start_index)
+void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, u32 trb_count, u32 start_index)
 {
 	if (!trb_addrs || start_index >= trb_count)
 		return;
 
-	for (UWORD index = start_index; index < trb_count; ++index)
+	for (u32 index = start_index; index < trb_count; ++index)
 	{
 		union xhci_trb *trb = (union xhci_trb *)(uintptr_t)trb_addrs[index];
 		if (!trb)
@@ -590,17 +590,17 @@ void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, UWORD trb_count, UWORD 
 	}
 }
 
-int xhci_ring_get_max_packet_size(struct xhci_ring *ring)
+u32 xhci_ring_get_max_packet_size(struct xhci_ring *ring)
 {
 	return ring->max_packet_size;
 }
 
-void xhci_ring_set_max_packet_size(struct xhci_ring *ring, int max_packet_size)
+void xhci_ring_set_max_packet_size(struct xhci_ring *ring, u32 max_packet_size)
 {
 	ring->max_packet_size = max_packet_size;
 }
 
-dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u32 ep_index, trb_type cmd)
+dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u8 ep_index, trb_type cmd)
 {
 	prepare_ring(ring);
 
@@ -614,10 +614,10 @@ dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 sl
 		field3 |= EP_ID_FOR_TRB(ep_index);
 
 	dma_addr_t trb_dma = xhci_ring_enqueue_trb(ring, FALSE,
-									   u64_lo32(address), /* field0 */
-									   u64_hi32(address), /* field1 */
-											   0,					   /* field2 */
-											   field3);				   /* field3 */
+											   u64_lo32(address), /* field0 */
+											   u64_hi32(address), /* field1 */
+											   0,				  /* field2 */
+											   field3);			  /* field3 */
 	return trb_dma;
 }
 
@@ -649,9 +649,9 @@ dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 sl
  * @param more_trbs_coming	indicate last trb in TD
  * Return: remainder
  */
-inline static u32 xhci_td_remainder(int transferred,
-									unsigned int trb_buff_len, unsigned int td_total_len,
-									int maxp, BOOL more_trbs_coming)
+inline static u32 xhci_td_remainder(u32 transferred,
+									u32 trb_buff_len, u32 td_total_len,
+									u32 maxp, BOOL more_trbs_coming)
 {
 	/* One TRB with a zero-length data packet. */
 	if (!more_trbs_coming || (transferred == 0 && trb_buff_len == 0) ||
@@ -664,11 +664,11 @@ inline static u32 xhci_td_remainder(int transferred,
 	return (total_packet_count - ((transferred + trb_buff_len) / maxp));
 }
 
-inline static int ring_has_room(struct xhci_ring *ring, struct ep_context *ep_ctx, unsigned int needed)
+inline static BOOL ring_has_room(struct xhci_ring *ring, struct ep_context *ep_ctx, u32 needed)
 {
-	unsigned int capacity = ring->num_segs * (TRBS_PER_SEGMENT - 1);
+	u32 capacity = ring->num_segs * (TRBS_PER_SEGMENT - 1);
 	if (capacity == 0)
-		return 0;
+		return FALSE;
 	return xhci_ep_get_active_trb_count(ep_ctx) + needed <= capacity;
 }
 
@@ -678,7 +678,7 @@ inline static void prime_first_trb(struct xhci_generic_trb *start_trb)
 	xhci_flush_cache(start_trb, sizeof(struct xhci_generic_trb));
 }
 
-inline static void giveback_first_trb(struct usb_device *udev, int ep_index,
+inline static void giveback_first_trb(struct usb_device *udev, u8 ep_index,
 									  struct xhci_generic_trb *start_trb)
 {
 	struct xhci_ctrl *ctrl = udev->controller;
@@ -710,22 +710,22 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 		return NULL;
 
 	APTR addr = req->data_buffer;
-	ULONG size = req->data_buffer_length;
+	u32 size = req->data_buffer_length;
 
 	if (!ctrl || !ctrl->memoryPool || !addr || size == 0)
 		return (dma_addr_t)addr;
 
-	if (likely(addr > (APTR)0x1FFFFF && ((ULONG)addr & DMA_ALIGN_MIN_MASK) == 0))
+	if (likely(addr > (APTR)0x1FFFFF && (((uintptr_t)addr & DMA_ALIGN_MIN_MASK) == 0)))
 	{
 		xhci_flush_cache(addr, size);
 		return (dma_addr_t)addr;
 	}
 
-	ULONG alloc_len = ALIGN_UP(size, DMA_ALIGN_MIN);
+	u32 alloc_len = ALIGN_UP(size, DMA_ALIGN_MIN);
 	void *aligned = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, alloc_len);
 	if (!aligned)
 	{
-		Kprintf("failed to allocate bounce buffer for %lx len=%ld\n", (ULONG)addr, (LONG)size);
+		Kprintf("failed to allocate bounce buffer for %lx len=%lu\n", (ULONG)addr, (ULONG)size);
 		return (dma_addr_t)addr;
 	}
 
@@ -763,10 +763,10 @@ inline static dma_addr_t xhci_ring_enqueue_setup_trb(struct xhci_ring *ep_ring, 
 	}
 
 	return xhci_ring_enqueue_trb(ep_ring, TRUE,
-								 io->setup.bmRequestType | io->setup.bRequest << 8 | le16(io->setup.wValue) << 16, /* field 0 */
-								 le16(io->setup.wIndex) | le16(io->setup.wLength) << 16,						   /* field 1 */
-								 TRB_LEN(8) | TRB_INTR_TARGET(0),												   /* field 2 */
-								 field3);																		   /* field 3 */
+								 io->setup.bmRequestType | ((u32)io->setup.bRequest << 8) | ((u32)le16(io->setup.wValue) << 16), /* field 0 */
+								 le16(io->setup.wIndex) | ((u32)le16(io->setup.wLength) << 16),									 /* field 1 */
+								 TRB_LEN(8) | TRB_INTR_TARGET(0),																 /* field 2 */
+								 field3);																						 /* field 3 */
 }
 
 inline static dma_addr_t xhci_ring_enqueue_data_trb(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring, struct USBIORequest *io)
@@ -790,8 +790,8 @@ inline static dma_addr_t xhci_ring_enqueue_data_trb(struct xhci_ctrl *ctrl, stru
 	return xhci_ring_enqueue_trb(ep_ring, TRUE,
 								 u64_lo32(buf_64), /* field 0 */
 								 u64_hi32(buf_64), /* field 1 */
-								 length_field,			/* field 2 */
-								 field3);				/* field 3 */
+								 length_field,	   /* field 2 */
+								 field3);		   /* field 3 */
 }
 
 inline static dma_addr_t xhci_ring_enqueue_status_trb(struct xhci_ring *ep_ring, struct USBIORequest *io)
@@ -816,8 +816,8 @@ inline static dma_addr_t xhci_ring_enqueue_status_trb(struct xhci_ring *ep_ring,
 
 inline static void xhci_ring_enqueue_control_trbs(struct xhci_ctrl *ctrl, struct xhci_ring *ep_ring, struct USBIORequest *io, dma_addr_t *td_trb_addrs)
 {
-	unsigned int td_trb_index = 0;
-	const unsigned int length = io->data_buffer_length;
+	u32 td_trb_index = 0;
+	const u32 length = io->data_buffer_length;
 
 	dma_addr_t setup_trb = xhci_ring_enqueue_setup_trb(ep_ring, io);
 	td_trb_addrs[td_trb_index++] = setup_trb;
@@ -840,7 +840,7 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 
 	const u32 length = io->data_buffer_length;
 	const u32 enable_short_packet = (!is_iso && (io->direction == DIRECTION_IN)) ? TRB_ISP : 0;
-	const u32 trb_type_bits = (is_iso) ? ((u32)TRB_TYPE(TRB_ISOC) | TRB_SIA) : (TRB_TYPE(TRB_NORMAL) | enable_short_packet);
+	const u32 trb_type_bits = is_iso ? (TRB_TYPE(TRB_ISOC) | TRB_SIA) : (TRB_TYPE(TRB_NORMAL) | enable_short_packet);
 
 	u32 running_total = 0;
 	u32 td_trb_index = 0;
@@ -883,27 +883,27 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 		u32 remainder = xhci_td_remainder(running_total, trb_buff_len,
 										  length, ep_ring->max_packet_size,
 										  num_trbs > 1);
-		//TODO TBC in isoch - length_field. set ETE=1. 4.11.2.3
-		//TODO TLBPC in isoch - field3
+		// TODO TBC in isoch - length_field. set ETE=1. 4.11.2.3
+		// TODO TLBPC in isoch - field3
 
-		u32 length_field = (TRB_LEN(trb_buff_len) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0));
+		u32 length_field = TRB_LEN(trb_buff_len) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0);
 
 		dma_addr_t last_transfer_trb_addr = xhci_ring_enqueue_trb(ep_ring, (num_trbs > 1),
-											  u64_lo32(addr), /* field 0 */
-											  u64_hi32(addr), /* field 1 */
-																  length_field,		   /* field 2 */
-																  field3);			   /* field 3 */
+																  u64_lo32(addr), /* field 0 */
+																  u64_hi32(addr), /* field 1 */
+																  length_field,	  /* field 2 */
+																  field3);		  /* field 3 */
 		td_trb_addrs[td_trb_index++] = last_transfer_trb_addr;
 		--num_trbs;
 		running_total += trb_buff_len;
 
 		/* Calculate length for next transfer */
 		addr += trb_buff_len;
-		trb_buff_len = min((length - running_total), TRB_MAX_BUFF_SIZE);
+		trb_buff_len = (length - running_total < TRB_MAX_BUFF_SIZE) ? (length - running_total) : TRB_MAX_BUFF_SIZE;
 	} while (running_total < length);
 }
 
-inline static void xhci_ring_finalize_first_trb(struct usb_device *udev, int ep_index, struct xhci_ring *ep_ring, struct xhci_generic_trb *start_trb, BOOL defer_doorbell)
+inline static void xhci_ring_finalize_first_trb(struct usb_device *udev, u8 ep_index, struct xhci_ring *ep_ring, struct xhci_generic_trb *start_trb, BOOL defer_doorbell)
 {
 	/* Hand the first TRB back to the controller once the TD is ready. */
 	if (defer_doorbell)
@@ -949,7 +949,7 @@ inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct USBIORe
 	return num_trbs;
 }
 
-void xhci_dump_request(const char *tag, const struct USBIORequest *req)
+static void __attribute__((unused)) xhci_dump_request(const char *tag, const struct USBIORequest *req)
 {
 	if (!req)
 		return;
@@ -972,14 +972,14 @@ void xhci_dump_request(const char *tag, const struct USBIORequest *req)
 				(ULONG)le16(req->setup.wLength));
 }
 
-int xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, unsigned int timeout_ms, BOOL defer_doorbell)
+s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell)
 {
 	// #ifdef DEBUG_HIGH
 	// 	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
 	// #endif
 	struct xhci_ctrl *ctrl = udev->controller;
 
-	const int ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
+	const u8 ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
 	struct ep_context *udev_ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
 	if (!udev_ep_ctx)
 	{

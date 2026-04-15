@@ -25,7 +25,8 @@
     Put the function at the very beginning of the file in order to avoid
     unexpected results when user executes the device by mistake
 */
-int __attribute__((used, no_reorder)) doNotExecute()
+int doNotExecute(void);
+int __attribute__((used, no_reorder)) doNotExecute(void)
 {
     return -1;
 }
@@ -108,7 +109,7 @@ static void xhci_close_libraries(struct XHCIDevice *base)
     }
 }
 
-static int xhci_open_libraries(struct XHCIDevice *base)
+static s32 xhci_open_libraries(struct XHCIDevice *base)
 {
     if (base->utilityBase != NULL && base->gic400Base != NULL)
         return 0;
@@ -156,7 +157,7 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
 
     if (io->req.io_Message.mn_Length < sizeof(struct IOStdReq))
     {
-        Kprintf("[xhci] %s: Invalid request length %ld\n", __func__, io->req.io_Message.mn_Length);
+        Kprintf("[xhci] %s: Invalid request length %lu\n", __func__, (ULONG)io->req.io_Message.mn_Length);
         io->req.io_Error = IOERR_OPENFAIL;
         return;
     }
@@ -207,14 +208,14 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
         return;
     }
 
-    int result = UnitOpen(unit, unitNumber, flags);
+    int result = UnitOpen(unit, unitNumber, (LONG)flags);
 
     if (result == ERR_NO_ERROR)
     {
         Kprintf("[xhci] %s: Unit opened successfully\n", __func__);
         io->req.io_Unit = (struct Unit *)unit;
         base->device.dd_Library.lib_OpenCnt++;
-        base->device.dd_Library.lib_Flags &= ~LIBF_DELEXP;
+        base->device.dd_Library.lib_Flags &= (UBYTE)~LIBF_DELEXP;
         io->req.io_Message.mn_Node.ln_Type = NT_REPLYMSG;
     }
     else
@@ -279,7 +280,7 @@ ULONG expungeLib(struct XHCIDevice *base asm("a6"))
         Permit();
 
         /* Calculate size of device base and deallocate memory */
-        ULONG size = base->device.dd_Library.lib_NegSize + base->device.dd_Library.lib_PosSize;
+        ULONG size = (ULONG)(base->device.dd_Library.lib_NegSize + base->device.dd_Library.lib_PosSize);
         APTR pointer = (APTR)((ULONG)base - base->device.dd_Library.lib_NegSize);
         FreeMem(pointer, size);
 

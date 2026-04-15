@@ -94,22 +94,22 @@ enum {
 
 /* Hub descriptor */
 struct usb_hub_descriptor {
-	u8  bLength;
-	u8  bDescriptorType;
-	u8  bNbrPorts;
-	u16 wHubCharacteristics;
-	u8  bPwrOn2PwrGood;
-	u8  bHubContrCurrent;
+	__le8  bLength;
+	__le8  bDescriptorType;
+	__le8  bNbrPorts;
+	__le16 wHubCharacteristics;
+	__le8  bPwrOn2PwrGood;
+	__le8  bHubContrCurrent;
 	/* 2.0 and 3.0 hubs differ here */
 	union {
 		struct {
 			/* add 1 bit for hub status change; round to bytes */
-			u8 DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
-			u8 PortPowerCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
+			__le8 DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
+			__le8 PortPowerCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
 		} __attribute__ ((packed)) hs;
 
 		struct {
-			u8 bHubHdrDecLat;
+			__le8 bHubHdrDecLat;
 			__le16 wHubDelay;
 			__le16 DeviceRemovable;
 		} __attribute__ ((packed)) ss;
@@ -145,9 +145,9 @@ enum slot_state {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
-	unsigned int	virtual_address;			/* Device address as seen by the driver user */
-	unsigned int    xhci_address;				/* Device address as seen by xHCI */
-	unsigned int	slot_id;		/* Slot ID for xHCI */
+	u16	virtual_address;			/* Device address as seen by the driver user */
+	u8    xhci_address;				/* Device address as seen by xHCI */
+	u8	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */
 	enum slot_state  slot_state;	/* current slot state */
 
@@ -167,10 +167,10 @@ struct usb_device {
 
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
-	unsigned int parent_port;     /* Parent hub downstream port (all speeds) */
-	unsigned int route;           /* xHCI route string nibble-packed */
+	u8 parent_port;               /* Parent hub downstream port (all speeds) */
+	u32 route;                    /* xHCI route string nibble-packed */
 	u8 route_depth;
-	unsigned int tt_think_time;   /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
+	u8 tt_think_time;             /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
 
 	/* Requests state data */
 	struct ep_context *ep_context[USB_MAX_ENDPOINT_CONTEXTS];
@@ -194,23 +194,23 @@ struct XHCIUnit;
 struct xhci_ctrl;
 
 /* Access udev */
-struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD virtual_address);
-struct usb_device *xhci_udev_get(struct XHCIUnit *unit, UWORD virtual_address);
+struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address);
+struct usb_device *xhci_udev_get(struct XHCIUnit *unit, u16 virtual_address);
 void xhci_udev_free(struct usb_device *udev);
 
 /* Dispatch */
-int xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io);
-int xhci_udev_send(struct USBIORequest *req);
+s8 xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io);
+s8 xhci_udev_send(struct USBIORequest *req);
 
 /* Track replies */
-void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, int err);
-void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, int err, ULONG actual);
+void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, s8 err);
+void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, s8 err, u32 actual);
 
 /* Send commands to device */
-void xhci_udev_clear_feature_halt(struct usb_device *udev, ULONG ep_index);
-void xhci_udev_clear_tt_buffer(struct usb_device *udev, ULONG ep_index, int ep_type);
+void xhci_udev_clear_feature_halt(struct usb_device *udev, u8 ep_index);
+void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type);
 
 /* Descriptor access */
-int xhci_ep_type_for_index(struct usb_device *udev, u32 ep_index);
+s32 xhci_ep_type_for_index(struct usb_device *udev, u8 ep_index);
 
 #endif /* __XHCI_UDEV_H__ */

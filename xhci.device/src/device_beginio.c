@@ -16,6 +16,6 @@ void beginIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
 
     io->req.io_Error = ERR_NO_ERROR;
-    io->req.io_Flags &= ~IOF_QUICK;
+    io->req.io_Flags &= (UBYTE)~IOF_QUICK;
     PutMsg(&unit->unit.unit_MsgPort, (struct Message *)io);
 }

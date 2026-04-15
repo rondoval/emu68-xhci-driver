@@ -113,11 +113,11 @@ void xhci_int_rearm(struct XHCIUnit *unit)
 	xhci_irq_enable_runtime(ctrl);
 }
 
-static int xhci_intx_enable(struct XHCIUnit *unit)
+static s32 xhci_intx_enable(struct XHCIUnit *unit)
 {
 	Kprintf("[xhci] %s: enabling INTx\n", __func__);
 	// UBYTE irq_line_cfg;
-	// dm_pci_read_config8(unit->xhci_ctrl->pci_dev, PCI_INTERRUPT_LINE, &irq_line_cfg);
+	// pci_read_config8(unit->xhci_ctrl->pci_dev, PCI_INTERRUPT_LINE, &irq_line_cfg);
 	// if (irq_line_cfg == 0 || irq_line_cfg == 0xff)
 	// {
 	// 	Kprintf("[xhci] %s: controller reports no legacy INTx line (value=0x%02lx)\n", __func__, (ULONG)irq_line_cfg);
@@ -125,12 +125,12 @@ static int xhci_intx_enable(struct XHCIUnit *unit)
 	// }
 
 	// unit->irq_line = irq_line_cfg + 32;
-	unit->irq_line = unit->xhci_ctrl->pci_dev->irq + 32;
+	unit->irq_line = (u32)(unit->xhci_ctrl->pci_dev->irq + 32);
 
-	int ret = AddIntServerEx((ULONG)unit->irq_line, 0, FALSE, &unit->irq_isr);
+	s32 ret = AddIntServerEx((ULONG)unit->irq_line, 0, FALSE, &unit->irq_isr);
 	if (ret < 0)
 	{
-		Kprintf("[xhci] %s: AddIntServerEx failed for IRQ %ld (ret=%ld)\n", __func__, unit->irq_line, (LONG)ret);
+		Kprintf("[xhci] %s: AddIntServerEx failed for IRQ %lu (ret=%ld)\n", __func__, (ULONG)unit->irq_line, (LONG)ret);
 		return ret;
 	}
 
@@ -142,7 +142,7 @@ static int xhci_intx_enable(struct XHCIUnit *unit)
 	return 0;
 }
 
-static int xhci_msi_enable(struct XHCIUnit *unit)
+static s32 xhci_msi_enable(struct XHCIUnit *unit)
 {
 	Kprintf("[xhci] %s: enabling MSI\n", __func__);
 	if (unit->xhci_ctrl->pci_dev->msi.enabled)
@@ -157,9 +157,9 @@ static int xhci_msi_enable(struct XHCIUnit *unit)
 		return xhci_intx_enable(unit);
 	}
 
-	unit->irq_line = unit->xhci_ctrl->pci_dev->msi.irq + 32;
+	unit->irq_line = (u32)(unit->xhci_ctrl->pci_dev->msi.irq + 32);
 
-	int ret = add_int_server(unit->xhci_ctrl->pci_dev, &unit->irq_isr);
+	s32 ret = add_int_server(unit->xhci_ctrl->pci_dev, &unit->irq_isr);
 	if (ret < 0)
 	{
 		Kprintf("[xhci] %s: add_int_server failed (ret=%ld)\n", __func__, (LONG)ret);
@@ -169,11 +169,11 @@ static int xhci_msi_enable(struct XHCIUnit *unit)
 	return 0;
 }
 
-int xhci_int_enable(struct XHCIUnit *unit)
+s32 xhci_int_enable(struct XHCIUnit *unit)
 {
 	xhci_setup_isr(unit);
 
-	int result = 0;
+	s32 result = 0;
 	if (!unit->xhci_ctrl->pci_dev)
 		result = AddIntServerEx((ULONG)unit->irq_line, 0, FALSE, &unit->irq_isr);
 	else if (DEVICE_USE_MSI)
