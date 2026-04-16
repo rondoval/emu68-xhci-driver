@@ -12,6 +12,10 @@ The API is not an exact match — certain fields passed by the stack are intenti
 > Unit 0 used to be the VL805 (PCIe).  It is now the onboard OTG port.
 > Unit 1 is now the VL805.  Update your USB stack configuration accordingly.
 
+> **Note for users upgrading from 3.x releases:** `bcmpcie.library` must be installed
+> in `LIBS:` for PCIe-based units (unit 1+, VL805 on Pi 4B) to work.
+> See [RELEASE-NOTES-4.0.md](RELEASE-NOTES-4.0.md) for details.
+
 ---
 
 ## Status
@@ -57,11 +61,11 @@ On `OpenDevice()`:
 
 1. For unit 0 (OTG), the BCM2711 onboard xHCI controller is located via the Emu68
    device tree (`/scb/xhci`).
-2. For unit 1+ (PCIe), [`emu68-pcie-library`](https://github.com/rondoval/emu68-pcie-library)
-   initialises the Broadcom STB PCIe controller, enumerates the bus and assigns BARs.
+2. For unit 1+ (PCIe), `bcmpcie.library` initialises the Broadcom STB PCIe
+   controller, enumerates the bus and assigns BARs.
    If a VIA VL805 is found, its firmware is loaded via the VideoCore mailbox.
-   Because `emu68-pcie-library` is statically linked, the PCIe bus state is private to
-   this driver — no other driver can share the bus while it is open.
+   `bcmpcie.library` is a shared dynamic library; it must be present in `LIBS:`
+   before opening any PCIe-based unit.
 3. The xHCI controller is reset: command, event and transfer rings are allocated, the
    DCBAA is set up and the controller is started.
 4. An interrupt handler is registered via `gic400.library` (MSI) or a wired IRQ line.
@@ -209,6 +213,7 @@ interrupt is removed and the PCIe controller is left in a quiescent state.
 - [PiStorm32-lite](https://github.com/PiStorm/pistorm32-lite) with Raspberry Pi 4B or CM4
 - Emu68 1.1 alpha.1 or later — required for MMU mapping of the PCIe BAR window into the lower 4 GB
 - `gic400.library` — [emu68-gic400-library](https://github.com/rondoval/emu68-gic400-library)
+- `bcmpcie.library` — [emu68-pcie-library](https://github.com/rondoval/emu68-pcie-library) — **required for unit 1+ (VL805 / PCIe)**
 
 ---
 
@@ -219,7 +224,7 @@ Build dependencies (must be installed first):
 | Package | Where | Purpose |
 |---|---|---|
 | `Emu68Common` | `emu68-common` | Pool allocators, shared utilities |
-| `Emu68PCIe` | `emu68-pcie-library` | BCM2711 PCIe controller + bus enumeration |
+| `Emu68PCIe` | `emu68-pcie-library` | BCM2711 PCIe controller + bus enumeration (builds `bcmpcie.library`) |
 | `GIC400` | `emu68-gic400-library` | ARM GIC-400 interrupt controller (MSI) |
 
 ```sh
