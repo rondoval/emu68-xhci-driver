@@ -51,13 +51,16 @@ struct XHCIDevice
 	ULONG segList;
 	struct Library *utilityBase;
 	struct Library *gic400Base;
-	struct pci_controller *pcie;
+	struct Library *pcieBase;    /* NULL until first PCIe unit opens */
 
 	struct MinList units;
 };
 
 void beginIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
 LONG abortIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+
+/* PCI library: lazy-open on first PCIe unit, tries bcmpcie.library then openpci.library */
+s32 xhci_open_pcie_library(struct XHCIDevice *base);
 
 /* Unit interface */
 s32 UnitTaskStart(struct XHCIUnit *unit);

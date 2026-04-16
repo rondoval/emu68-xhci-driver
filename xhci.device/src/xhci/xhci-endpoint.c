@@ -240,6 +240,11 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
             continue;
         }
 
+        /* If the request was deferred (ring full or ep busy), stop and wait for a
+         * completion to free ring space. xhci_ep_set_idle() will re-enter here. */
+        if ((struct MinNode *)req == ep_ctx->pending_reqs.mlh_Head)
+            break;
+
         /* If the endpoint went idle immediately (e.g. zero-length or error), keep draining */
         if (xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_FAILED)
             return;

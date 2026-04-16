@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
+#include <clib/bcmpcie_protos.h>
 #else
 #define __NOLIBBASE__
 #define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
+#define BCMPCIE_BASE_NAME pcielibBase
+#include <proto/bcmpcie.h>
 #endif
 
 #include <exec/execbase.h>
@@ -23,8 +26,8 @@
 #include <devtree.h>
 
 #include <devices/hcd_api.h>
-#include <pci_types.h>
-#include <pci.h>
+#include <libraries/pci_constants.h>
+#include <libraries/openpci.h>
 #include <xhci/xhci.h>
 #include <config.h>
 
@@ -47,7 +50,7 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 	}
 
 	CONST_STRPTR status = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "status"));
-	if (status != NULL && _Stricmp(status, (CONST_STRPTR)"disabled") == 0)
+	if (status != NULL && _Stricmp(status, (CONST_STRPTR) "disabled") == 0)
 	{
 		Kprintf("[bcm-xhci] %s: Node %s is disabled\n", __func__, "/scb/xhci");
 		DT_CloseKey(key);
@@ -83,105 +86,28 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 	return 0;
 }
 
-/*
- * Initialize and enumerate the PCIe bus
- */
-static s32 pcie_init(struct XHCIDevice *device)
+static BOOL pcie_xhci_is_supported(struct Library *pcielibBase, struct pci_dev *pd)
 {
-	if (device->pcie != NULL)
-		return 0;
-
-	device->pcie = AllocMem(sizeof(struct pci_controller), MEMF_CLEAR | MEMF_PUBLIC);
-	if (!device->pcie)
-	{
-		Kprintf("[pcie] %s: Failed to allocate memory for PCIe controller\n", __func__);
-		return -ENOMEM;
-	}
-	_NewMinList(&device->pcie->buses);
-
-	int ret = brcm_pcie_probe(device->pcie, /* bus number */ 0);
-	if (ret < 0)
-	{
-		Kprintf("[pcie] %s: brcm_pcie_probe failed: %ld\n", __func__, ret);
-		FreeMem(device->pcie, sizeof(*device->pcie));
-		device->pcie = NULL;
-		return -ENODEV;
-	}
-	Kprintf("[pcie] %s: brcm_pcie_probe succeeded\n", __func__);
-
-	struct pci_bus *root_bus = AllocMem(sizeof(*root_bus), MEMF_CLEAR);
-	if (!root_bus)
-	{
-		Kprintf("[pcie] %s: Failed to allocate memory for root bus\n", __func__);
-		return -ENOMEM;
-	}
-
-	_NewMinList(&root_bus->devices);
-	root_bus->controller = device->pcie;
-	root_bus->parent = NULL;
-	root_bus->pci_bridge = NULL;
-	CopyMem((APTR)"pcie0", root_bus->name, sizeof("pcie0"));
-	root_bus->bus_number = 0;
-	root_bus->bus_number_last_sub = 0;
-	AddTailMinList(&device->pcie->buses, (struct MinNode *)root_bus);
-
-	ret = pci_bind_bus_devices(root_bus);
-	if (ret)
-	{
-		Kprintf("[pcie] %s: pci_bind_bus_devices failed: %ld\n", __func__, ret);
-		FreeMem(root_bus, sizeof(*root_bus));
-		return -ENODEV;
-	}
-
-	ret = pci_auto_config_devices(root_bus);
-	if (ret < 0)
-	{
-		Kprintf("[pcie] %s: pci_auto_config_devices failed: %ld\n", __func__, ret);
-		FreeMem(root_bus, sizeof(*root_bus));
-		return -ENODEV;
-	}
-
-	return 0;
-}
-
-static s32 vl805_init(void)
-{
-	s32 ret = bcm2711_reload_vl805_firmware();
-	if (ret != 0)
-	{
-		Kprintf("[vl805] %s: Failed to load VL805 firmware: %ld\n", __func__, ret);
-		return -ENODEV;
-	}
-	/* It seems to take a while for the VL805 to start responding */
-	delay_us(1000);
-	return 0;
-}
-
-static BOOL pcie_xhci_is_supported(struct pci_device *dev)
-{
-	// Check some basic PCI device info
-	ULONG vendor_device;
-	UBYTE revision, prog_if, subclass, baseclass;
-	ULONG mcu_firmware;
-
-	pci_read_config32(dev, PCI_VENDOR_ID, &vendor_device);
-	pci_read_config8(dev, PCI_REVISION_ID, &revision);
-	pci_read_config8(dev, PCI_CLASS_PROG, &prog_if);
-	pci_read_config8(dev, PCI_CLASS_DEVICE, &subclass);
-	pci_read_config8(dev, PCI_CLASS_DEVICE + 1, &baseclass);
-	pci_read_config32(dev, 0x50, &mcu_firmware);
-
 	Kprintf("[pcie] %s: Device Info:\n", __func__);
-	Kprintf("[pcie] %s:   Vendor:Device = 0x%08lx\n", __func__, vendor_device);
-	Kprintf("[pcie] %s:   Class = %02lx:%02lx:%02lx (revision %02lx)\n", __func__, baseclass, subclass, prog_if, revision);
-	Kprintf("[pcie] %s:   MCU Firmware Version: 0x%08lx\n", __func__, mcu_firmware);
+	Kprintf("[pcie] %s:   Vendor:Device = 0x%04lx:%04lx\n", __func__,
+			(ULONG)pd->vendor, (ULONG)pd->device);
 
-	// Check if device is responding to config space
-	if (vendor_device == 0xFFFFFFFF)
+	/* Check if device is responding */
+	if (pd->vendor == 0xFFFFU && pd->device == 0xFFFFU)
 	{
 		Kprintf("[pcie] %s: Device not responding to config space reads!\n", __func__);
 		return FALSE;
 	}
+
+	UBYTE revision = pci_read_config_byte(PCI_REVISION_ID, pd);
+	UBYTE prog_if = pci_read_config_byte(PCI_CLASS_PROG, pd);
+	UBYTE subclass = pci_read_config_byte((UBYTE)PCI_CLASS_DEVICE, pd);
+	UBYTE baseclass = pci_read_config_byte((UBYTE)(PCI_CLASS_DEVICE + 1), pd);
+	ULONG mcu_firmware = pci_read_config_long((UBYTE)0x50, pd);
+
+	Kprintf("[pcie] %s:   Class = %02lx:%02lx:%02lx (revision %02lx)\n",
+			__func__, (ULONG)baseclass, (ULONG)subclass, (ULONG)prog_if, (ULONG)revision);
+	Kprintf("[pcie] %s:   MCU Firmware Version: 0x%08lx\n", __func__, mcu_firmware);
 
 	return TRUE;
 }
@@ -189,12 +115,10 @@ static BOOL pcie_xhci_is_supported(struct pci_device *dev)
 /*
  * Map BAR, get register pointers and enable bus mastering
  */
-static s32 pcie_xhci_init(struct pci_device *dev, struct xhci_hccr **hccr,
-						  struct xhci_hcor **hcor)
+static s32 pcie_xhci_init(struct Library *pcielibBase, struct pci_dev *pd,
+						  struct xhci_hccr **hccr, struct xhci_hcor **hcor)
 {
-	*hccr = (struct xhci_hccr *)pci_map_bar(dev,
-											   PCI_BASE_ADDRESS_0, 0, 0, PCI_REGION_TYPE,
-											   PCI_REGION_MEM);
+	*hccr = (struct xhci_hccr *)MapBAR(pd, 0, 0, 0, PCI_REGION_MEM);
 	if (!*hccr)
 	{
 		Kprintf("[xhci] %s: init cannot map PCI mem bar\n", __func__);
@@ -203,82 +127,62 @@ static s32 pcie_xhci_init(struct pci_device *dev, struct xhci_hccr **hccr,
 	Kprintf("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
 
 	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr +
-							 HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
+								 HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	Kprintf("[xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
 			__func__, *hccr, *hcor, (ULONG)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
-	/* enable busmaster */
-	u32 cmd;
-	pci_read_config32(dev, PCI_COMMAND, &cmd);
-	cmd |= PCI_COMMAND_MASTER;
-	pci_write_config32(dev, PCI_COMMAND, cmd);
+	pci_set_master(pd);
 	return 0;
 }
 
-static s32 unit_init_pcie_xhci(LONG unitNumber, struct pci_device **ret_xhci_dev,
+static s32 unit_init_pcie_xhci(LONG unitNumber, struct pci_dev **ret_pci_dev,
 							   struct xhci_hccr **ret_hccr,
 							   struct xhci_hcor **ret_hcor,
 							   struct XHCIDevice *device)
 {
-	struct pci_device *xhci_dev = NULL;
-	s32 result = pcie_init(device);
-	if (result != 0)
+	/* Lazily open the PCI library on first PCIe unit access */
+	if (xhci_open_pcie_library(device) != 0)
 	{
-		Kprintf("[xhci] %s: Failed to initialize PCIe: %ld\n", __func__, result);
-		return result;
-	}
-
-	/* -1 because unit 0 is always the OTG port and pci_find_class indexes from 0 */
-	pci_find_class(device->pcie, 0x0C0330, unitNumber - 1, &xhci_dev);
-	if (xhci_dev == NULL)
-	{
-		Kprintf("[xhci] %s: Failed to find XHCI PCI device\n", __func__);
+		Kprintf("[xhci] %s: No PCI library available for unit %ld\n", __func__, unitNumber);
 		return ERR_BAD_PARAMETERS;
 	}
 
-	if (xhci_dev->vendor == 0x1106 && xhci_dev->device == 0x3483)
+	struct Library *pcielibBase = device->pcieBase;
+
+	/* Find the (unitNumber)th PCIe xHCI controller (unit 0 is always onboard;
+	 * pcie.library handles bus init + VL805 firmware reload on first open). */
+	struct pci_dev *pd = NULL;
+	for (LONG i = 0; i < unitNumber; i++)
 	{
-		Kprintf("[xhci] %s: Found VL805 XHCI controller, loading firmware\n", __func__);
-		result = vl805_init();
-		if (result != 0)
-		{
-			Kprintf("[xhci] %s: Failed to load VL805 firmware: %ld\n", __func__, result);
-			/* continue, this may be other XHCI controller */
-		}
+		pd = pci_find_class(0x0C0330, pd);
+		if (!pd)
+			break;
+	}
+	if (!pd)
+	{
+		Kprintf("[xhci] %s: Failed to find XHCI PCI device (unit %ld)\n", __func__, unitNumber);
+		return ERR_BAD_PARAMETERS;
 	}
 
-	if (!pcie_xhci_is_supported(xhci_dev))
+	if (!pcie_xhci_is_supported(pcielibBase, pd))
 	{
 		Kprintf("[xhci] %s: Unsupported XHCI controller\n", __func__);
 		return ERR_BAD_PARAMETERS;
 	}
 
-	result = pcie_xhci_init(xhci_dev, ret_hccr, ret_hcor);
+	s32 result = pcie_xhci_init(pcielibBase, pd, ret_hccr, ret_hcor);
 	if (result != 0)
 	{
 		Kprintf("[xhci] %s: Failed to initialize XHCI PCI device: %ld\n", __func__, result);
 		return result;
 	}
 
-	*ret_xhci_dev = xhci_dev;
+	*ret_pci_dev = pd;
 	return 0;
 }
 
-static s32 unit_init_xhci_hw(struct XHCIUnit *unit, LONG unitNumber,
-							 struct pci_device **ret_xhci_dev,
-							 struct xhci_hccr **ret_hccr,
-							 struct xhci_hcor **ret_hcor)
-{
-	*ret_xhci_dev = NULL;
-
-	if (unitNumber == 0)
-		return unit_init_onboard_xhci(unit, ret_hccr, ret_hcor);
-
-	return unit_init_pcie_xhci(unitNumber, ret_xhci_dev, ret_hccr, ret_hcor, unit->device);
-}
-
-static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_device *xhci_dev,
+static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_dev *pci_dev,
 							struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
 	struct xhci_ctrl *xhci_ctrl = AllocMem(sizeof(struct xhci_ctrl), MEMF_CLEAR | MEMF_PUBLIC);
@@ -289,7 +193,7 @@ static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_device *xhci_dev,
 	}
 
 	xhci_ctrl->utilityBase = unit->device->utilityBase;
-	xhci_ctrl->pci_dev = xhci_dev;
+	xhci_ctrl->pci_dev = pci_dev;
 
 	s32 result = xhci_register(xhci_ctrl, hccr, hcor);
 	if (result)
@@ -349,12 +253,14 @@ s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 
 	struct xhci_hccr *hccr;
 	struct xhci_hcor *hcor;
-	struct pci_device *xhci_dev = NULL;
-	s32 result = unit_init_xhci_hw(unit, unitNumber, &xhci_dev, &hccr, &hcor);
+	struct pci_dev *pci_dev = NULL;
+	s32 result = (unitNumber == 0)
+		? unit_init_onboard_xhci(unit, &hccr, &hcor)
+		: unit_init_pcie_xhci(unitNumber, &pci_dev, &hccr, &hcor, unit->device);
 	if (result != ERR_NO_ERROR)
 		goto err_del_pool;
 
-	result = unit_attach_xhci(unit, xhci_dev, hccr, hcor);
+	result = unit_attach_xhci(unit, pci_dev, hccr, hcor);
 	if (result != ERR_NO_ERROR)
 		goto err_del_pool;
 

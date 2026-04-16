@@ -26,9 +26,10 @@
 
 #include <bits.h>
 #include <iomem.h>
-#include <pci_types.h>
 #include <devices/hcd_api.h>
 #include <xhci/xhci-udev.h>
+
+struct pci_dev;
 
 #define XHCI_ALIGNMENT 64
 /* Generic timeout for XHCI events */
@@ -637,11 +638,11 @@ struct xhci_protocol_caps
 	u8 protocol_slot_type;
 
 	u8 max_hub_depth;
-	BOOL usb3_lsecc; /* Link Soft Error Count Capability */
+	BOOL usb3_lsecc;		  /* Link Soft Error Count Capability */
 	BOOL usb2_integrated_hub; /* Integrated Hub Implemented */
-	BOOL usb2_hs_only; /* High-Speed Only Capability */
-	BOOL usb2_hw_lpm; /* Hardware LPM Capability */
-	BOOL usb2_besl_lpm; /* BESL LPM Capability */
+	BOOL usb2_hs_only;		  /* High-Speed Only Capability */
+	BOOL usb2_hw_lpm;		  /* Hardware LPM Capability */
+	BOOL usb2_besl_lpm;		  /* BESL LPM Capability */
 };
 
 /* Offset +00h */
@@ -652,12 +653,12 @@ struct xhci_protocol_caps
 #define XHCI_PROTOCOL_CAP_PORT_OFFSET(p) (((p) >> 0) & 0xff)
 #define XHCI_PROTOCOL_CAP_PORT_COUNT(p) (((p) >> 8) & 0xff)
 #define XHCI_PROTOCOL_CAP_USB3_LSECC(p) (((p) >> 24) & 0x1) // Link Soft Error Count Capability
-#define XHCI_PROTOCOL_CAP_USB3_MHD(p) (((p) >> 25) & 0x7) // Maximum Hub Depth
-#define XHCI_PROTOCOL_CAP_USB2_HSO(p) (((p) >> 17) & 0x1) // High-Speed Only Capability
-#define XHCI_PROTOCOL_CAP_USB2_IHI(p) (((p) >> 18) & 0x1) // Integrated Hub Implemented
-#define XHCI_PROTOCOL_CAP_USB2_HLC(p) (((p) >> 19) & 0x1) // Hardware LPM Capability
-#define XHCI_PROTOCOL_CAP_USB2_BLC(p) (((p) >> 20) & 0x1) // BESL LPM Capability
-#define XHCI_PROTOCOL_CAP_USB2_MHD(p) (((p) >> 25) & 0x7) // Maximum Hub Depth
+#define XHCI_PROTOCOL_CAP_USB3_MHD(p) (((p) >> 25) & 0x7)	// Maximum Hub Depth
+#define XHCI_PROTOCOL_CAP_USB2_HSO(p) (((p) >> 17) & 0x1)	// High-Speed Only Capability
+#define XHCI_PROTOCOL_CAP_USB2_IHI(p) (((p) >> 18) & 0x1)	// Integrated Hub Implemented
+#define XHCI_PROTOCOL_CAP_USB2_HLC(p) (((p) >> 19) & 0x1)	// Hardware LPM Capability
+#define XHCI_PROTOCOL_CAP_USB2_BLC(p) (((p) >> 20) & 0x1)	// BESL LPM Capability
+#define XHCI_PROTOCOL_CAP_USB2_MHD(p) (((p) >> 25) & 0x7)	// Maximum Hub Depth
 #define XHCI_PROTOCOL_CAP_SPEED_ID_COUNT(p) ((u8)(((p) >> 28) & 0xf))
 
 /* Offset +0Ch */
@@ -707,7 +708,8 @@ struct xhci_ctrl
 
 	APTR memoryPool;
 	struct Library *utilityBase;
-	struct pci_device *pci_dev;
+	struct pci_dev *pci_dev;
+	BOOL msi_enabled; /* TRUE after EnableMSI + AddIntServer succeed */
 	struct usb_device *devices_by_virtual_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];
 
@@ -716,7 +718,7 @@ struct xhci_ctrl
 	enum usb_device_speed pending_parent_speed;
 
 	struct MinList pending_commands; /* list of pending commands */
-	BOOL cmd_abort_pending;          /* TRUE while CA bit is asserted; doorbell suppressed */
+	BOOL cmd_abort_pending;			 /* TRUE while CA bit is asserted; doorbell suppressed */
 };
 
 inline void xhci_flush_cache(void *addr, u32 len)

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
+#include <clib/bcmpcie_protos.h>
 #else
 #define __NOLIBBASE__
 #define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
+#define BCMPCIE_BASE_NAME pcielibBase
+#include <proto/bcmpcie.h>
 #endif
 
 #include <exec/types.h>
@@ -15,6 +18,8 @@
 #include <dos/dosextens.h>
 
 #include <devices/hcd_api.h>
+
+#include <libraries/openpci.h>
 
 #include <device.h>
 #include <config.h>
@@ -94,8 +99,58 @@ static const APTR funcTable[] = {
     (APTR)abortIO,
     (APTR)-1};
 
+/*
+ * Try to open a PCIe library that supports the BCM2711 controller.
+ *
+ * Preference order:
+ *   1. bcmpcie.library v1
+ *   2. openpci.library — may be a renamed bcmpcie.library for compatibility
+ *
+ * In both cases pci_bus() must return BCM2711PCIeBus (0x80); any other
+ * result means the library is not our BCM2711 implementation.
+ *
+ * Returns 0 on success, -1 if no suitable library / hardware found.
+ */
+s32 xhci_open_pcie_library(struct XHCIDevice *base)
+{
+    if (base->pcieBase != NULL)
+        return 0; /* already open */
+
+    static const char * const libNames[] = { "bcmpcie.library", "openpci.library" };
+    static const ULONG libVersions[] = { 1, 0 };
+
+    for (int i = 0; i < 2; i++)
+    {
+        struct Library *pcielibBase = OpenLibrary((CONST_STRPTR)libNames[i], libVersions[i]);
+        if (pcielibBase == NULL)
+            continue;
+
+        UWORD flags = pci_bus();
+        if (flags & BCM2711PCIeBus)
+        {
+            base->pcieBase = pcielibBase;
+            Kprintf("[xhci] %s: %s opened, bus flags=0x%04lx\n",
+                    __func__, libNames[i], (ULONG)flags);
+            return 0;
+        }
+
+        Kprintf("[xhci] %s: %s bus flags=0x%04lx, BCM2711PCIeBus not set\n",
+                __func__, libNames[i], (ULONG)flags);
+        CloseLibrary(pcielibBase);
+    }
+
+    Kprintf("[xhci] %s: no BCM2711 PCIe library found\n", __func__);
+    return -1;
+}
+
 static void xhci_close_libraries(struct XHCIDevice *base)
 {
+    if (base->pcieBase != NULL)
+    {
+        CloseLibrary(base->pcieBase);
+        base->pcieBase = NULL;
+    }
+
     if (base->gic400Base != NULL)
     {
         CloseLibrary(base->gic400Base);
@@ -143,6 +198,7 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
     _NewMinList(&base->units);
     base->utilityBase = NULL;
     base->gic400Base = NULL;
+    base->pcieBase = NULL;
 
     return base;
 }

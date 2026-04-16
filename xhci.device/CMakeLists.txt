@@ -30,7 +30,7 @@ target_include_directories(xhci.device PRIVATE include)
 target_link_libraries(xhci.device
     PRIVATE
         Emu68Common::common
-        Emu68PCIe::pcie
+        Emu68PCIe::pcie_headers
 )
 
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device DESTINATION DEVS/USBHardware)
