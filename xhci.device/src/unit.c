@@ -118,10 +118,10 @@ static BOOL pcie_xhci_is_supported(struct Library *pcielibBase, struct pci_dev *
 static s32 pcie_xhci_init(struct Library *pcielibBase, struct pci_dev *pd,
 						  struct xhci_hccr **hccr, struct xhci_hcor **hcor)
 {
-	*hccr = (struct xhci_hccr *)MapBAR(pd, 0, 0, 0, PCI_REGION_MEM);
+	*hccr = (struct xhci_hccr *)pd->base_address[0];
 	if (!*hccr)
 	{
-		Kprintf("[xhci] %s: init cannot map PCI mem bar\n", __func__);
+		Kprintf("[xhci] %s: BAR0 not mapped\n", __func__);
 		return -EIO;
 	}
 	Kprintf("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
