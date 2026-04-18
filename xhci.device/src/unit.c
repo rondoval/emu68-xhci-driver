@@ -28,6 +28,8 @@
 #include <devices/hcd_api.h>
 #include <libraries/pci_constants.h>
 #include <libraries/openpci.h>
+#include <libraries/pcitags.h>
+#include <utility/tagitem.h>
 #include <xhci/xhci.h>
 #include <config.h>
 
@@ -171,10 +173,17 @@ static s32 unit_init_pcie_xhci(LONG unitNumber, struct pci_dev **ret_pci_dev,
 		return ERR_BAD_PARAMETERS;
 	}
 
+	if (!SetBoardAttrs(pd, PRM_BoardOwner, (ULONG)FindTask(NULL), TAG_DONE))
+	{
+		Kprintf("[xhci] %s: PCI device already owned by another task\n", __func__);
+		return ERR_BAD_PARAMETERS;
+	}
+
 	s32 result = pcie_xhci_init(pcielibBase, pd, ret_hccr, ret_hcor);
 	if (result != 0)
 	{
 		Kprintf("[xhci] %s: Failed to initialize XHCI PCI device: %ld\n", __func__, result);
+		SetBoardAttrs(pd, PRM_BoardOwner, 0UL, TAG_DONE);
 		return result;
 	}
 
@@ -280,6 +289,9 @@ s32 UnitClose(struct XHCIUnit *unit)
 	if (unit->unit.unit_OpenCnt == 0)
 	{
 		Kprintf("[xhci] %s: Last opener closed, cleaning up unit\n", __func__);
+		struct Library *pcielibBase = unit->device->pcieBase;
+		if (pcielibBase && unit->xhci_ctrl->pci_dev)
+			SetBoardAttrs(unit->xhci_ctrl->pci_dev, PRM_BoardOwner, 0UL, TAG_DONE);
 		UnitTaskStop(unit);
 		xhci_int_shutdown(unit);
 		xhci_deregister(unit->xhci_ctrl);
