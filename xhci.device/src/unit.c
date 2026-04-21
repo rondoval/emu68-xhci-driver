@@ -73,7 +73,6 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 
 	unit->irq_line = (u32)DT_GetInterrupt(key, 0);
 	Kprintf("[bcm-xhci] %s: IRQ = %lu\n", __func__, (ULONG)unit->irq_line);
-	unit->irq_line += 32;
 
 	// We're done with the device tree
 	DT_CloseKey(key);
