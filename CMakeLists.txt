@@ -13,6 +13,3 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 endif()
 
 add_subdirectory(xhci.device)
-
-# install(FILES ${CMAKE_SOURCE_DIR}/Install DESTINATION .)
-# install(FILES ${CMAKE_SOURCE_DIR}/Install.info DESTINATION .)
