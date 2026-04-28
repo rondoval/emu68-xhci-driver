@@ -99,48 +99,26 @@ static const APTR funcTable[] = {
     (APTR)abortIO,
     (APTR)-1};
 
-/*
- * Try to open a PCIe library that supports the BCM2711 controller.
- *
- * Preference order:
- *   1. bcmpcie.library v1
- *   2. openpci.library — may be a renamed bcmpcie.library for compatibility
- *
- * In both cases pci_bus() must return BCM2711PCIeBus (0x80); any other
- * result means the library is not our BCM2711 implementation.
- *
- * Returns 0 on success, -1 if no suitable library / hardware found.
- */
 s32 xhci_open_pcie_library(struct XHCIDevice *base)
 {
-    if (base->pcieBase != NULL)
-        return 0; /* already open */
-
-    static const char * const libNames[] = { "bcmpcie.library", "openpci.library" };
-    static const ULONG libVersions[] = { 1, 0 };
-
-    for (int i = 0; i < 2; i++)
+    base->pcieBase = OpenLibrary((CONST_STRPTR) "bcmpcie.library", 1);
+    if (base->pcieBase == NULL)
     {
-        struct Library *pcielibBase = OpenLibrary((CONST_STRPTR)libNames[i], libVersions[i]);
-        if (pcielibBase == NULL)
-            continue;
-
-        UWORD flags = pci_bus();
-        if (flags & BCM2711PCIeBus)
-        {
-            base->pcieBase = pcielibBase;
-            Kprintf("[xhci] %s: %s opened, bus flags=0x%04lx\n",
-                    __func__, libNames[i], (ULONG)flags);
-            return 0;
-        }
-
-        Kprintf("[xhci] %s: %s bus flags=0x%04lx, BCM2711PCIeBus not set\n",
-                __func__, libNames[i], (ULONG)flags);
-        CloseLibrary(pcielibBase);
+        Kprintf("[xhci] %s: Failed to open %s\n", __func__, "bcmpcie.library");
+        return -1;
     }
 
-    Kprintf("[xhci] %s: no BCM2711 PCIe library found\n", __func__);
-    return -1;
+    struct Library *pcielibBase = base->pcieBase;
+    UWORD flags = pci_bus();
+    if (!(flags & BCM2711PCIeBus))
+    {
+        Kprintf("[xhci] %s: %s bus flags=0x%04lx, BCM2711PCIeBus not set\n", __func__, "bcmpcie.library", (ULONG)flags);
+        CloseLibrary(pcielibBase);
+        base->pcieBase = NULL;
+        return -1;
+    }
+
+    return 0;
 }
 
 static void xhci_close_libraries(struct XHCIDevice *base)

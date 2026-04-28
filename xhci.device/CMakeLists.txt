@@ -1,10 +1,39 @@
 cmake_minimum_required(VERSION 3.14.0)
 project(xhci.device VERSION ${CMAKE_PROJECT_VERSION})
 
-add_link_options(-ffreestanding -nostdlib -nostartfiles -s -Wl,-e,_doNotExecute)
-add_compile_options(-Os -m68040 -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow -Wmissing-prototypes -Wstrict-prototypes -DDEBUG -fomit-frame-pointer)
-add_compile_definitions(PRIVATE DEVICE_IDSTRING="${VERSTRING}" DEVICE_VERSION=${PROJECT_VERSION_MAJOR} DEVICE_REVISION=${PROJECT_VERSION_MINOR} DEVICE_NAME="${PROJECT_NAME}" DEVICE_USE_MSI=TRUE)
+# Toolchain and compile options
+add_link_options(
+    -ffreestanding
+    -nostdlib
+    -nostartfiles
+    -s
+    -Wl,-e,_doNotExecute
+)
 
+add_compile_options(
+    -Os
+    -m68040
+    -Wall
+    -Wextra
+    -Wconversion
+    -Wsign-conversion
+    -Wshadow
+    -Wmissing-prototypes
+    -Wstrict-prototypes
+    -DDEBUG
+    -fomit-frame-pointer
+)
+
+add_compile_definitions(
+    PRIVATE
+        DEVICE_IDSTRING="${VERSTRING}"
+        DEVICE_VERSION=${PROJECT_VERSION_MAJOR}
+        DEVICE_REVISION=${PROJECT_VERSION_MINOR}
+        DEVICE_NAME="${PROJECT_NAME}"
+        DEVICE_USE_MSI=TRUE
+)
+
+# Sources
 add_executable(xhci.device
     src/device.c
     src/device_beginio.c
@@ -26,11 +55,18 @@ add_executable(xhci.device
     src/device_end.c
 )
 
-target_include_directories(xhci.device PRIVATE include)
+target_include_directories(xhci.device
+    PRIVATE
+        include
+)
+
 target_link_libraries(xhci.device
     PRIVATE
         Emu68Common::common
         Emu68PCIe::pcie_headers
 )
 
-install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device DESTINATION DEVS/USBHardware)
+install(
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device
+    DESTINATION DEVS/USBHardware
+)
