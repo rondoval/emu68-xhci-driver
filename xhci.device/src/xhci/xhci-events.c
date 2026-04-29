@@ -352,13 +352,16 @@ void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, struct ep_context *
         if (act_len > 0)
             xhci_ep_rt_iso_in(ep_ctx, req, act_len);
 
-        pool_free(ctrl->memoryPool, req->data_buffer);
+        if (req->driver_private_flags & REQ_RT_IN_BUF_SLABBED)
+            slab_free(&ctrl->iso_in_staging_slab, req->data_buffer);
+        else
+            pool_free(ctrl->memoryPool, req->data_buffer);
     }
     else
         xhci_ep_rt_iso_out(ep_ctx, req, act_len);
 
     /* RT ISO TDs clone IO requests; free them after completion to avoid leaks. */
-    pool_free(ctrl->memoryPool, req);
+    slab_free(&ctrl->iso_clone_slab, req);
 
     xhci_ep_schedule_rt_iso(ep_ctx);
 }

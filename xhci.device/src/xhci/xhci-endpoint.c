@@ -634,13 +634,14 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
             break;
 
         u16 frame = ep_ctx->rt_next_frame;
-        struct USBIORequest *rt_io = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
+        struct USBIORequest *rt_io = slab_alloc(&ep_ctx->udev->controller->iso_clone_slab);
         if (!rt_io)
         {
             Kprintf("Failed to alloc RT ISO IO req\n");
             break;
         }
         CopyMem(template, rt_io, sizeof(struct USBIORequest));
+        rt_io->driver_private_flags = REQ_RT_ISO_CLONE;
 
         struct USBBufferRequest rt_buffer_req;
         rt_buffer_req.length = prefetch_bytes;
@@ -659,7 +660,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         if (!rt_buffer_req.data || rt_buffer_req.length == 0)
         {
             KprintfH("RT ISO hook provided no buffer/length\n");
-            pool_free(ep_ctx->memoryPool, rt_io);
+            slab_free(&ep_ctx->udev->controller->iso_clone_slab, rt_io);
             break;
         }
 
@@ -681,7 +682,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         s8 ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != ERR_NO_ERROR)
         {
-            pool_free(ep_ctx->memoryPool, rt_io);
+            slab_free(&ep_ctx->udev->controller->iso_clone_slab, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
@@ -711,19 +712,31 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 
         u16 frame = ep_ctx->rt_next_frame;
         const u32 packet_size = ep_ctx->max_packet_size;
-        struct USBIORequest *rt_io = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
+        struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
+
+        struct USBIORequest *rt_io = slab_alloc(&ctrl->iso_clone_slab);
         if (!rt_io)
         {
             Kprintf("Failed to alloc RT ISO IO req\n");
             break;
         }
         CopyMem(template, rt_io, sizeof(struct USBIORequest));
+        rt_io->driver_private_flags = REQ_RT_ISO_CLONE;
 
-        rt_io->data_buffer = pool_alloc(ep_ctx->memoryPool, packet_size);
+        if (packet_size <= XHCI_ISO_IN_STAGING_SIZE)
+        {
+            rt_io->data_buffer = slab_alloc(&ctrl->iso_in_staging_slab);
+            if (rt_io->data_buffer)
+                rt_io->driver_private_flags |= REQ_RT_IN_BUF_SLABBED;
+        }
+        else
+        {
+            rt_io->data_buffer = pool_alloc(ep_ctx->memoryPool, packet_size);
+        }
         if (!rt_io->data_buffer)
         {
             Kprintf("Failed to alloc RT ISO staging buffer\n");
-            pool_free(ep_ctx->memoryPool, rt_io);
+            slab_free(&ctrl->iso_clone_slab, rt_io);
             break;
         }
         rt_io->data_buffer_length = packet_size;
@@ -738,8 +751,11 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         s8 ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != ERR_NO_ERROR)
         {
-            pool_free(ep_ctx->memoryPool, rt_io->data_buffer);
-            pool_free(ep_ctx->memoryPool, rt_io);
+            if (rt_io->driver_private_flags & REQ_RT_IN_BUF_SLABBED)
+                slab_free(&ctrl->iso_in_staging_slab, rt_io->data_buffer);
+            else
+                pool_free(ep_ctx->memoryPool, rt_io->data_buffer);
+            slab_free(&ctrl->iso_clone_slab, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }

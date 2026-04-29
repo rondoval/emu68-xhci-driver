@@ -18,6 +18,9 @@ typedef struct TransferDescriptorList TransferDescriptorList;
 struct xhci_ctrl;
 struct xhci_ring;
 
+void xhci_td_slab_init(struct xhci_ctrl *ctrl);
+void xhci_td_slab_destroy(struct xhci_ctrl *ctrl);
+
 TransferDescriptorList* xhci_td_create_list(struct xhci_ctrl *ctrl);
 void xhci_td_destroy_list(TransferDescriptorList *td_list, s8 error_code);
 

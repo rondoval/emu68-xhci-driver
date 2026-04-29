@@ -28,6 +28,7 @@
 #include <minlist.h>
 
 #include <xhci/xhci.h>
+#include <xhci/xhci-td.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
@@ -523,6 +524,20 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 	}
 	Kprintf("memory pool created: %lx\n", ctrl->memoryPool);
 
+	xhci_td_slab_init(ctrl);
+	slab_cache_init(&ctrl->trb_addr_slab, ctrl->memoryPool,
+		XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t), DMA_ALIGN_MIN, 256);
+	slab_cache_init(&ctrl->bounce_small, ctrl->memoryPool,
+		XHCI_BOUNCE_SMALL_SIZE,     DMA_ALIGN_MIN, XHCI_BOUNCE_SMALL_CAP);
+	slab_cache_init(&ctrl->bounce_med, ctrl->memoryPool,
+		XHCI_BOUNCE_MED_SIZE,       DMA_ALIGN_MIN, XHCI_BOUNCE_MED_CAP);
+	slab_cache_init(&ctrl->bounce_large, ctrl->memoryPool,
+		XHCI_BOUNCE_LARGE_SIZE,     DMA_ALIGN_MIN, XHCI_BOUNCE_LARGE_CAP);
+	slab_cache_init(&ctrl->iso_clone_slab, ctrl->memoryPool,
+		sizeof(struct USBIORequest), DMA_ALIGN_MIN, XHCI_ISO_CLONE_CAP);
+	slab_cache_init(&ctrl->iso_in_staging_slab, ctrl->memoryPool,
+		XHCI_ISO_IN_STAGING_SIZE,   DMA_ALIGN_MIN, XHCI_ISO_IN_STAGING_CAP);
+
 	_NewMinList(&ctrl->pending_commands);
 
 	ctrl->hccr = hccr;
@@ -549,6 +564,13 @@ void xhci_deregister(struct xhci_ctrl *ctrl)
 
 	if (ctrl->memoryPool)
 	{
+		slab_cache_destroy(&ctrl->iso_in_staging_slab);
+		slab_cache_destroy(&ctrl->iso_clone_slab);
+		slab_cache_destroy(&ctrl->bounce_large);
+		slab_cache_destroy(&ctrl->bounce_med);
+		slab_cache_destroy(&ctrl->bounce_small);
+		slab_cache_destroy(&ctrl->trb_addr_slab);
+		xhci_td_slab_destroy(ctrl);
 		DeletePool(ctrl->memoryPool);
 		ctrl->memoryPool = NULL;
 	}

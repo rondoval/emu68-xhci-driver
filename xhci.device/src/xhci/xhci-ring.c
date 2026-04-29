@@ -732,14 +732,32 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 	}
 
 	u32 alloc_len = ALIGN_UP(size, DMA_ALIGN_MIN);
-	void *aligned = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, alloc_len);
+
+	void *aligned = NULL;
+	u32 bounce_class = REQ_BOUNCE_CLASS_NONE;
+	if (alloc_len <= XHCI_BOUNCE_SMALL_SIZE) {
+		aligned = slab_alloc(&ctrl->bounce_small);
+		bounce_class = REQ_BOUNCE_CLASS_SMALL;
+	} else if (alloc_len <= XHCI_BOUNCE_MED_SIZE) {
+		aligned = slab_alloc(&ctrl->bounce_med);
+		bounce_class = REQ_BOUNCE_CLASS_MED;
+	} else if (alloc_len <= XHCI_BOUNCE_LARGE_SIZE) {
+		aligned = slab_alloc(&ctrl->bounce_large);
+		bounce_class = REQ_BOUNCE_CLASS_LARGE;
+	}
+	if (!aligned) {
+		aligned = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, alloc_len);
+		bounce_class = REQ_BOUNCE_CLASS_NONE;
+	}
 	if (!aligned)
 	{
 		Kprintf("failed to allocate bounce buffer for %lx len=%lu\n", (ULONG)addr, (ULONG)size);
 		return (dma_addr_t)addr;
 	}
 
-	req->driver_private_flags |= REQ_DMA_MAPPED;
+	req->driver_private_flags = (req->driver_private_flags & ~REQ_BOUNCE_CLASS_MASK)
+		| (bounce_class << REQ_BOUNCE_CLASS_SHIFT)
+		| REQ_DMA_MAPPED;
 
 	if (copy)
 	{
@@ -1031,7 +1049,11 @@ s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 ti
 		return ERR_NO_ERROR;
 	}
 
-	dma_addr_t *td_trb_addrs = pool_alloc(ctrl->memoryPool, num_trbs * sizeof(dma_addr_t));
+	dma_addr_t *td_trb_addrs;
+	if (likely(num_trbs <= XHCI_TD_SMALL_TRBS))
+		td_trb_addrs = slab_alloc(&ctrl->trb_addr_slab);
+	else
+		td_trb_addrs = pool_alloc(ctrl->memoryPool, num_trbs * sizeof(dma_addr_t));
 	if (!td_trb_addrs)
 	{
 		Kprintf("Failed to alloc TD TRB list\n");

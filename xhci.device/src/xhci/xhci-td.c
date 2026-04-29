@@ -67,6 +67,16 @@ struct TransferDescriptorList
     u32 queued_tds;
 };
 
+void xhci_td_slab_init(struct xhci_ctrl *ctrl)
+{
+    slab_cache_init(&ctrl->td_slab, ctrl->memoryPool, sizeof(struct xhci_td), DMA_ALIGN_MIN, 2048);
+}
+
+void xhci_td_slab_destroy(struct xhci_ctrl *ctrl)
+{
+    slab_cache_destroy(&ctrl->td_slab);
+}
+
 TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
 {
     TransferDescriptorList *td_list = pool_zalloc(ctrl->memoryPool, sizeof(TransferDescriptorList));
@@ -153,7 +163,7 @@ static struct xhci_td *td_create(TransferDescriptorList *td_list,
     if (!td_list)
         return NULL;
 
-    struct xhci_td *td = pool_zalloc(td_list->memoryPool, sizeof(struct xhci_td));
+    struct xhci_td *td = slab_zalloc(&td_list->ctrl->td_slab);
     if (!td)
     {
         Kprintf("Failed to alloc xhci_td\n");
@@ -273,8 +283,15 @@ inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct USBIORequest *r
         xhci_copy_from_bounce_buffer(bounce, addr, size);
     }
 
-    dma_free(ctrl->memoryPool, bounce);
-    req->driver_private_flags &= (u32)~REQ_DMA_MAPPED;
+    u32 bounce_class = (req->driver_private_flags & REQ_BOUNCE_CLASS_MASK) >> REQ_BOUNCE_CLASS_SHIFT;
+    switch (bounce_class)
+    {
+    case REQ_BOUNCE_CLASS_SMALL: slab_free(&ctrl->bounce_small, bounce); break;
+    case REQ_BOUNCE_CLASS_MED:   slab_free(&ctrl->bounce_med,   bounce); break;
+    case REQ_BOUNCE_CLASS_LARGE: slab_free(&ctrl->bounce_large, bounce); break;
+    default:                     dma_free(ctrl->memoryPool,     bounce); break;
+    }
+    req->driver_private_flags &= (u32)~(REQ_DMA_MAPPED | REQ_BOUNCE_CLASS_MASK);
     req->driver_private_dma_address = NULL;
 }
 
@@ -282,11 +299,14 @@ static void xhci_td_free(TransferDescriptorList *td_list, struct xhci_td *td)
 {
     if (td->trb_addrs)
     {
-        pool_free(td_list->memoryPool, td->trb_addrs);
+        if (td->trb_count <= XHCI_TD_SMALL_TRBS)
+            slab_free(&td_list->ctrl->trb_addr_slab, td->trb_addrs);
+        else
+            pool_free(td_list->memoryPool, td->trb_addrs);
         td->trb_addrs = NULL;
     }
 
-    pool_free(td_list->memoryPool, td);
+    slab_free(&td_list->ctrl->td_slab, td);
 }
 
 BOOL xhci_td_has_request(TransferDescriptorList *td_list, struct USBIORequest *io_req)
@@ -496,17 +516,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
     while ((n = RemHeadMinList(&td_list->list)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)n;
-        if (td->req)
-        {
-            if (td->req->data_buffer)
-                xhci_dma_unmap(td_list->ctrl, td->req, FALSE);
-            if (td->is_rt_iso && td->req->direction == DIRECTION_IN && td->req->data_buffer)
-                pool_free(td_list->memoryPool, td->req->data_buffer);
-            if (td->is_rt_iso)
-                pool_free(td_list->memoryPool, td->req);
-            else
-                xhci_udev_io_reply_failed(td_list->ctrl, td->req, io_Error);
-        }
+        td_unmap_and_reply(td_list, td, io_Error);
         xhci_td_free(td_list, td);
     }
 

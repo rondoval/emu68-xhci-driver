@@ -26,6 +26,7 @@
 
 #include <bits.h>
 #include <iomem.h>
+#include <slab.h>
 #include <devices/hcd_api.h>
 #include <xhci/xhci-udev.h>
 
@@ -707,6 +708,23 @@ struct xhci_ctrl
 	u16 hci_version;
 
 	APTR memoryPool;
+#define XHCI_TD_SMALL_TRBS         8                       /* trb_addr_slab covers up to this many TRBs */
+#define XHCI_BOUNCE_SMALL_SIZE     256                     /* covers RT ISO 192 + tiny ctrl/desc */
+#define XHCI_BOUNCE_SMALL_CAP      256
+#define XHCI_BOUNCE_MED_SIZE       (32 * 1024)             /* covers ≤32KiB bulk reads */
+#define XHCI_BOUNCE_MED_CAP        8
+#define XHCI_BOUNCE_LARGE_SIZE     (2 * 1024 * 1024)       /* mass storage 2MB transfers */
+#define XHCI_BOUNCE_LARGE_CAP      2                       /* Poseidon 1 bulk/EP */
+#define XHCI_ISO_CLONE_CAP         64                      /* RT ISO clone IO requests */
+#define XHCI_ISO_IN_STAGING_SIZE   2048                    /* covers up to 24-bit/192kHz audio */
+#define XHCI_ISO_IN_STAGING_CAP    64
+	struct slab_cache td_slab;            /* one struct xhci_td per slot */
+	struct slab_cache trb_addr_slab;      /* XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t) per slot */
+	struct slab_cache bounce_small;       /* XHCI_BOUNCE_SMALL_SIZE bytes per slot */
+	struct slab_cache bounce_med;         /* XHCI_BOUNCE_MED_SIZE bytes per slot */
+	struct slab_cache bounce_large;       /* XHCI_BOUNCE_LARGE_SIZE bytes per slot */
+	struct slab_cache iso_clone_slab;     /* sizeof(struct USBIORequest) per slot */
+	struct slab_cache iso_in_staging_slab;/* XHCI_ISO_IN_STAGING_SIZE bytes per slot */
 	struct Library *utilityBase;
 	struct pci_dev *pci_dev;
 	BOOL msi_enabled; /* TRUE after EnableMSI + AddIntServer succeed */

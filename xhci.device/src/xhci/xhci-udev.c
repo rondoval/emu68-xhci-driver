@@ -418,6 +418,25 @@ void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, 
             return;
         }
 
+        /* RT ISO clones were never sent as messages — never ReplyMsg.
+         * IN clones own their staging data_buffer; free both. OUT clones
+         * point at user buffers, so leave data_buffer alone. */
+        if (io->driver_private_flags & REQ_RT_ISO_CLONE)
+        {
+            if (ctrl)
+            {
+                if (io->direction == DIRECTION_IN && io->data_buffer)
+                {
+                    if (io->driver_private_flags & REQ_RT_IN_BUF_SLABBED)
+                        slab_free(&ctrl->iso_in_staging_slab, io->data_buffer);
+                    else
+                        pool_free(ctrl->memoryPool, io->data_buffer);
+                }
+                slab_free(&ctrl->iso_clone_slab, io);
+            }
+            return;
+        }
+
         KprintfH("addr %lu EP %lu err=%ld\n", (ULONG)io->virtual_address, (ULONG)io->endpoint, (LONG)err);
         ReplyMsg((struct Message *)io);
     }

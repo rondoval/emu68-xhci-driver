@@ -120,8 +120,18 @@ struct usb_hub_descriptor {
 #define REQ_INTERNAL 0x1       /* Internal request, free instead of reply */
 #define REQ_ENQUEUED 0x2       /* Request was already enqueued to EP */
 #define REQ_ON_RING 0x4        /* Request is currently on the transfer ring */
-#define REQ_DMA_MAPPED 0x8     /* Request data buffer is DMA mapped */
+#define REQ_DMA_MAPPED 0x8      /* Request data buffer is DMA mapped */
 #define REQ_HUB_DESC_FETCH 0x10 /* Internal hub descriptor fetch before CONFIG_EP */
+#define REQ_RT_ISO_CLONE 0x40   /* Cloned IO req for RT ISO; pool_free instead of ReplyMsg */
+#define REQ_RT_IN_BUF_SLABBED 0x80 /* RT ISO IN data_buffer came from iso_in_staging_slab */
+
+/* bounce class — which bounce slab the bounce buffer came from (0 = dma_alloc fallback) */
+#define REQ_BOUNCE_CLASS_SHIFT 8
+#define REQ_BOUNCE_CLASS_MASK  (0x7U << REQ_BOUNCE_CLASS_SHIFT)
+#define REQ_BOUNCE_CLASS_NONE  0
+#define REQ_BOUNCE_CLASS_SMALL 1
+#define REQ_BOUNCE_CLASS_MED   2
+#define REQ_BOUNCE_CLASS_LARGE 3
 
 enum slot_state {
 	USB_DEV_SLOT_STATE_DISABLED = 0,
