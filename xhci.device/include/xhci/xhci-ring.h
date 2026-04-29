@@ -308,6 +308,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
 
 s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell);
+BOOL xhci_ring_has_room(struct ep_context *ep_ctx, u32 needed_trbs);
 void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
 
 void xhci_ring_acknowledge_event(struct xhci_ctrl *ctrl);

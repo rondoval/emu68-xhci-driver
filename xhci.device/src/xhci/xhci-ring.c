@@ -672,6 +672,16 @@ inline static BOOL ring_has_room(struct xhci_ring *ring, struct ep_context *ep_c
 	return xhci_ep_get_active_trb_count(ep_ctx) + needed <= capacity;
 }
 
+BOOL xhci_ring_has_room(struct ep_context *ep_ctx, u32 needed_trbs)
+{
+	if (!ep_ctx)
+		return FALSE;
+	struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
+	if (!ring)
+		return FALSE;
+	return ring_has_room(ring, ep_ctx, needed_trbs);
+}
+
 inline static void prime_first_trb(struct xhci_generic_trb *start_trb)
 {
 	start_trb->field[3] ^= le32(TRB_CYCLE);
@@ -715,7 +725,7 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 	if (!ctrl || !ctrl->memoryPool || !addr || size == 0)
 		return (dma_addr_t)addr;
 
-	if (likely(addr > (APTR)0x1FFFFF && (((uintptr_t)addr & DMA_ALIGN_MIN_MASK) == 0)))
+	if (unlikely(addr > (APTR)0x1FFFFF && (((uintptr_t)addr & DMA_ALIGN_MIN_MASK) == 0)))
 	{
 		xhci_flush_cache(addr, size);
 		return (dma_addr_t)addr;

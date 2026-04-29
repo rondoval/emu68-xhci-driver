@@ -629,6 +629,10 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
     while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
     {
+        /* Don't enqueue if the ring can't fit one more TRB+spare */
+        if (!xhci_ring_has_room(ep_ctx, 2))
+            break;
+
         u16 frame = ep_ctx->rt_next_frame;
         struct USBIORequest *rt_io = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
         if (!rt_io)
@@ -701,6 +705,10 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
     u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
     while (inflight < RT_ISO_IN_TARGET_TDS)
     {
+        /* Same backpressure rule as the OUT path: bail before alloc if no room. */
+        if (!xhci_ring_has_room(ep_ctx, 2))
+            break;
+
         u16 frame = ep_ctx->rt_next_frame;
         const u32 packet_size = ep_ctx->max_packet_size;
         struct USBIORequest *rt_io = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
