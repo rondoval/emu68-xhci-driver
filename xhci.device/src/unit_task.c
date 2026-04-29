@@ -106,9 +106,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
         if (sigset & (1UL << microHZTimerPort->mp_SigBit))
         {
             if (CheckIO(&packetTimerReq->tr_node))
-            {
                 WaitIO(&packetTimerReq->tr_node);
-            }
 
             xhci_process_command_timeouts(unit->xhci_ctrl);
             xhci_process_event_timeouts(unit->xhci_ctrl);
@@ -197,19 +195,29 @@ s32 UnitTaskStart(struct XHCIUnit *unit)
         return ERR_HCI_ERROR;
     }
 
-    Wait(SIGBREAKF_CTRL_F);
+    ULONG sig = Wait(SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C);
+    if (sig & SIGBREAKF_CTRL_C)    {
+        Kprintf("[xhci] %s: xhci task failed to start\n", __func__);
+        FreeMem(ml, sizeof(struct MemList) + sizeof(struct MemEntry));
+        FreeMem(task, sizeof(struct Task));
+        FreeMem(&stack[0], STACK_SIZE);
+        return ERR_HCI_ERROR;
+    }
     Kprintf("[xhci] %s: xhci task started\n", __func__);
     return ERR_NO_ERROR;
 }
 
 void UnitTaskStop(struct XHCIUnit *unit)
 {
+    if (!unit->task)
+        return;
+
     Kprintf("[xhci] %s: xhci task stopping\n", __func__);
 
     struct MsgPort *timerPort = CreateMsgPort();
     struct timerequest *timerReq = CreateIORequest(timerPort, sizeof(struct timerequest));
 
-    if (timerPort != NULL && timerReq != NULL)
+    if (timerPort && timerReq)
     {
         BYTE result = OpenDevice((CONST_STRPTR) "timer.device", UNIT_VBLANK, (struct IORequest *)timerReq, LIB_MIN_VERSION);
         if (result != NULL)
@@ -220,19 +228,26 @@ void UnitTaskStop(struct XHCIUnit *unit)
     }
 
     Signal(unit->task, SIGBREAKF_CTRL_C);
-    do
+    while (unit->task != NULL)
     {
-        timerReq->tr_node.io_Command = TR_ADDREQUEST;
-        timerReq->tr_time.tv_secs = 0;
-        timerReq->tr_time.tv_micro = 250000;
-        DoIO(&timerReq->tr_node);
-    } while (unit->task != NULL);
+        if (timerPort && timerReq)
+        {
+            timerReq->tr_node.io_Command = TR_ADDREQUEST;
+            timerReq->tr_time.tv_secs = 0;
+            timerReq->tr_time.tv_micro = 250000;
+            DoIO(&timerReq->tr_node);
+        }
+    }
 
-    SetSignal(0UL, SIGBREAKF_CTRL_F);
+    SetSignal(0UL, SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C);
 
-    CloseDevice(&timerReq->tr_node);
-    DeleteIORequest(&timerReq->tr_node);
-    DeleteMsgPort(timerPort);
+    if (timerReq)
+    {
+        CloseDevice(&timerReq->tr_node);
+        DeleteIORequest(&timerReq->tr_node);
+    }
+    if (timerPort)
+        DeleteMsgPort(timerPort);
 
     Kprintf("[xhci] %s: xhci task stopped\n", __func__);
 }
