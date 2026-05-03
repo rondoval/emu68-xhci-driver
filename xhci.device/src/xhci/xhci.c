@@ -425,10 +425,24 @@ static void xhci_dump_caps(struct xhci_ctrl *ctrl)
 	u32 reg = mmio_read32(&hccr->cr_hccparams1);
 	if (HCC_64BIT_ADDR(reg))
 		Kprintf("Host controller supports 64-bit addressing\n");
+	if (HCC_BANDWIDTH_NEG(reg))
+		Kprintf("Host controller supports bandwidth negotiation\n");
 	if (HCC_64BYTE_CONTEXT(reg))
 		Kprintf("Host controller supports 64-byte context structures\n");
+	if (HCC_LIGHT_RESET(reg))
+		Kprintf("Host controller supports Light HC Reset Capability\n");
 	if (HCC_LTC(reg))
 		Kprintf("Host controller supports latency tolerance messaging\n");
+	if (HCC_NSS(reg))
+		Kprintf("Host controller does not support secondary Stream ID\n");
+	if (HCC_PAE(reg))
+		Kprintf("Host controller supports Parse All Event Data\n");
+	if (HCC_SPC(reg))
+		Kprintf("Host controller supports Stopped - Short Packet Capability\n");
+	if (HCC_SEC(reg))
+		Kprintf("Host controller supports Stopped EDTLA Capability\n");
+	if (HCC_CFC(reg))
+		Kprintf("Host controller supports Configure Frame ID Capability\n");
 
 	reg = mmio_read32(&hccr->cr_hccparams2);
 	if (HCC_U3C(reg))

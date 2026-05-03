@@ -149,6 +149,14 @@ struct xhci_hccr
 #define HCC_LTC(p) ((p) & BIT(6))
 /* true: no secondary Stream ID Support */
 #define HCC_NSS(p) ((p) & BIT(7))
+/* true: HC supports Parse All Event Data */
+#define HCC_PAE(p) ((p) & BIT(8))
+/* true: HC supports Stopped - Short Packet Capability */
+#define HCC_SPC(p) ((p) & BIT(9))
+/* true: HC supports Stopped EDTLA Capability */
+#define HCC_SEC(p) ((p) & BIT(10))
+/* true: HC supports Configure Frame ID Capability */
+#define HCC_CFC(p) ((p) & BIT(11))
 /* Max size for Primary Stream Arrays - 2^(n+1), where n is bits 12:15 */
 #define HCC_MAX_PSA(p) (1 << ((((p) >> 12) & 0xf) + 1))
 /* Extended Capabilities pointer from PCI base - section 5.3.6 */
@@ -611,8 +619,8 @@ static inline void xhci_writeq(__le64 volatile *regs, const u64 val)
 #define XHCI_EXT_CAPS_PM 3
 #define XHCI_EXT_CAPS_VIRT 4
 #define XHCI_EXT_CAPS_MSI 5
-/* IDs 6-9 reserved */
-#define XHCI_EXT_CAPS_LOCAL_MEMORY 9
+#define XHCI_EXT_CAPS_LOCAL_MEMORY 6
+/* IDs 7-9 reserved */
 #define XHCI_EXT_CAPS_DEBUG 10
 #define XHCI_EXT_CAPS_MSIX 17
 

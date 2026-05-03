@@ -725,6 +725,7 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 	if (!ctrl || !ctrl->memoryPool || !addr || size == 0)
 		return (dma_addr_t)addr;
 
+	/* TODO this should also check if the memory region is on Pistorm RAM */
 	if (unlikely(addr > (APTR)0x1FFFFF && (((uintptr_t)addr & DMA_ALIGN_MIN_MASK) == 0)))
 	{
 		xhci_flush_cache(addr, size);
@@ -735,17 +736,23 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 
 	void *aligned = NULL;
 	u32 bounce_class = REQ_BOUNCE_CLASS_NONE;
-	if (alloc_len <= XHCI_BOUNCE_SMALL_SIZE) {
+	if (alloc_len <= XHCI_BOUNCE_SMALL_SIZE)
+	{
 		aligned = slab_alloc(&ctrl->bounce_small);
 		bounce_class = REQ_BOUNCE_CLASS_SMALL;
-	} else if (alloc_len <= XHCI_BOUNCE_MED_SIZE) {
+	}
+	else if (alloc_len <= XHCI_BOUNCE_MED_SIZE)
+	{
 		aligned = slab_alloc(&ctrl->bounce_med);
 		bounce_class = REQ_BOUNCE_CLASS_MED;
-	} else if (alloc_len <= XHCI_BOUNCE_LARGE_SIZE) {
+	}
+	else if (alloc_len <= XHCI_BOUNCE_LARGE_SIZE)
+	{
 		aligned = slab_alloc(&ctrl->bounce_large);
 		bounce_class = REQ_BOUNCE_CLASS_LARGE;
 	}
-	if (!aligned) {
+	if (!aligned)
+	{
 		aligned = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, alloc_len);
 		bounce_class = REQ_BOUNCE_CLASS_NONE;
 	}
@@ -755,9 +762,7 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 		return (dma_addr_t)addr;
 	}
 
-	req->driver_private_flags = (req->driver_private_flags & ~REQ_BOUNCE_CLASS_MASK)
-		| (bounce_class << REQ_BOUNCE_CLASS_SHIFT)
-		| REQ_DMA_MAPPED;
+	req->driver_private_flags = (req->driver_private_flags & ~REQ_BOUNCE_CLASS_MASK) | (bounce_class << REQ_BOUNCE_CLASS_SHIFT) | REQ_DMA_MAPPED;
 
 	if (copy)
 	{

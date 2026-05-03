@@ -34,7 +34,7 @@ struct pending_command
     struct MinNode node;
     dma_addr_t cmd_trb_dma;  /* value from queue_trb */
     struct usb_device *udev; /* for slot/endpoint checks */
-    u8 ep_index;            /* endpoint index encoded into the command */
+    u8 ep_index;             /* endpoint index encoded into the command */
     command_handler complete;
     struct USBIORequest *req; /* to continue control transfers */
     trb_type type;            /* command type */
@@ -522,16 +522,15 @@ static void handle_reset_device(struct xhci_ctrl *ctrl, struct pending_command *
  * Mapping of commands to their handlers
  */
 static const command_handler command_handlers[] = {
-    [TRB_ENABLE_SLOT] = handle_enable_slot, /* Enable Slot Command */
-    [TRB_DISABLE_SLOT] = handle_disable_slot,
-    /* Disable Slot Command */              // TODO should do DISABLE_SLOT when device is disconnected
-    [TRB_ADDR_DEV] = handle_address_device, /* Address Device Command */
-    [TRB_CONFIG_EP] = handle_config_ep,     /* Configure Endpoint Command */
-    [TRB_EVAL_CONTEXT] = handle_config_ep,  /* Evaluate Context Command */
-    [TRB_RESET_EP] = handle_reset_ep,       /* Reset Endpoint Command */
-    [TRB_STOP_RING] = handle_stop_ring,     /* Stop Transfer Ring Command */
-    [TRB_SET_DEQ] = handle_set_deq,         /* Set Transfer Ring Dequeue Pointer Command */
-    [TRB_RESET_DEV] = handle_reset_device,  /* Reset Device Command */
+    [TRB_ENABLE_SLOT] = handle_enable_slot,   /* Enable Slot Command */
+    [TRB_DISABLE_SLOT] = handle_disable_slot, /* Disable Slot Command */
+    [TRB_ADDR_DEV] = handle_address_device,   /* Address Device Command */
+    [TRB_CONFIG_EP] = handle_config_ep,       /* Configure Endpoint Command */
+    [TRB_EVAL_CONTEXT] = handle_config_ep,    /* Evaluate Context Command */
+    [TRB_RESET_EP] = handle_reset_ep,         /* Reset Endpoint Command */
+    [TRB_STOP_RING] = handle_stop_ring,       /* Stop Transfer Ring Command */
+    [TRB_SET_DEQ] = handle_set_deq,           /* Set Transfer Ring Dequeue Pointer Command */
+    [TRB_RESET_DEV] = handle_reset_device,    /* Reset Device Command */
 };
 
 /* Command ring timeout handler
@@ -710,7 +709,7 @@ void xhci_reset_device(struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
     // set slot id, cycle bit; clear other fields and issue reset device command
-    xhci_queue_command(ctrl, 0, udev->slot_id, 0, TRB_RESET_DEV, NULL, udev); // TODO handle_reset_device - wait for command completion
+    xhci_queue_command(ctrl, 0, udev->slot_id, 0, TRB_RESET_DEV, NULL, udev);
 }
 
 /**
