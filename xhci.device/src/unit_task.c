@@ -72,7 +72,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     /* Signal parent that Unit task is up and running now */
     Signal(parent, SIGBREAKF_CTRL_F);
 
-    Kprintf("[xhci] %s: Entering main unit task loop\n", __func__);
+    KprintfH("[xhci] %s: Entering main unit task loop\n", __func__);
 
     ULONG sigset;
     ULONG waitMask = (1UL << unit->unit.unit_MsgPort.mp_SigBit) |
@@ -120,7 +120,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 
         if (sigset & SIGBREAKF_CTRL_C)
         {
-            Kprintf("[xhci] %s: Received SIGBREAKF_CTRL_C, stopping xhci task\n", __func__);
+            KprintfH("[xhci] %s: Received SIGBREAKF_CTRL_C, stopping xhci task\n", __func__);
             AbortIO(&packetTimerReq->tr_node);
             WaitIO(&packetTimerReq->tr_node);
         }
@@ -140,7 +140,7 @@ free_signals:
 
 s32 UnitTaskStart(struct XHCIUnit *unit)
 {
-    Kprintf("[xhci] %s: xhci task starting\n", __func__);
+    KprintfH("[xhci] %s: xhci task starting\n", __func__);
 
     // Get all memory we need for the receiver task
     struct MemList *ml = AllocMem(sizeof(struct MemList) + sizeof(struct MemEntry), MEMF_PUBLIC | MEMF_CLEAR);
@@ -203,7 +203,7 @@ s32 UnitTaskStart(struct XHCIUnit *unit)
         FreeMem(&stack[0], STACK_SIZE);
         return ERR_HCI_ERROR;
     }
-    Kprintf("[xhci] %s: xhci task started\n", __func__);
+    KprintfH("[xhci] %s: xhci task started\n", __func__);
     return ERR_NO_ERROR;
 }
 
@@ -212,7 +212,7 @@ void UnitTaskStop(struct XHCIUnit *unit)
     if (!unit->task)
         return;
 
-    Kprintf("[xhci] %s: xhci task stopping\n", __func__);
+    KprintfH("[xhci] %s: xhci task stopping\n", __func__);
 
     struct MsgPort *timerPort = CreateMsgPort();
     struct timerequest *timerReq = CreateIORequest(timerPort, sizeof(struct timerequest));
@@ -249,5 +249,5 @@ void UnitTaskStop(struct XHCIUnit *unit)
     if (timerPort)
         DeleteMsgPort(timerPort);
 
-    Kprintf("[xhci] %s: xhci task stopped\n", __func__);
+    KprintfH("[xhci] %s: xhci task stopped\n", __func__);
 }

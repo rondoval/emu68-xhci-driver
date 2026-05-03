@@ -226,7 +226,7 @@ static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
 static inline u32 Do_CMD_DEVICE_RESET(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    Kprintf("[xhci] %s: CMD_DEVICE_RESET\n", __func__);
+    KprintfH("[xhci] %s: CMD_DEVICE_RESET\n", __func__);
 
     /* Issue SET_FEATURE(RESET) on all root hub ports */
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
@@ -254,7 +254,7 @@ static inline u32 Do_CMD_DEVICE_RESET(struct USBIORequest *io)
 static u32 Do_CMD_RESET(struct USBIORequest *io)
 {
     // struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    Kprintf("[xhci] %s: CMD_RESET\n", __func__);
+    KprintfH("[xhci] %s: CMD_RESET\n", __func__);
     // TODO should reset entire controller...
     return Do_CMD_DEVICE_RESET(io);
 }
@@ -475,11 +475,10 @@ static inline u32 Do_CMD_STARTRTISO(struct USBIORequest *io)
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
     KprintfH("[xhci] %s: CMD_STOP_REALTIME_ISOCHRONOUS\n", __func__);
 
-    KprintfH("RT ISO start addr=%lu ep=%lu dir=%s frame=%lu len=%lu\n",
+    KprintfH("RT ISO start addr=%lu ep=%lu dir=%s len=%lu\n",
              (ULONG)io->virtual_address,
              (ULONG)(io->endpoint & 0x0F),
              (io->direction == DIRECTION_IN) ? "IN" : "OUT",
-             (ULONG)io->usb_frame,
              (ULONG)io->data_buffer_length);
     struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
     if (!udev)

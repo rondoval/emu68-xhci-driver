@@ -89,14 +89,14 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 
 static BOOL pcie_xhci_is_supported(struct Library *pcielibBase, struct pci_dev *pd)
 {
-	Kprintf("[pcie] %s: Device Info:\n", __func__);
-	Kprintf("[pcie] %s:   Vendor:Device = 0x%04lx:%04lx\n", __func__,
+	Kprintf("[xhci] %s: Device Info:\n", __func__);
+	Kprintf("[xhci] %s:   Vendor:Device = 0x%04lx:%04lx\n", __func__,
 			(ULONG)pd->vendor, (ULONG)pd->device);
 
 	/* Check if device is responding */
 	if (pd->vendor == 0xFFFFU && pd->device == 0xFFFFU)
 	{
-		Kprintf("[pcie] %s: Device not responding to config space reads!\n", __func__);
+		Kprintf("[xhci] %s: Device not responding to config space reads!\n", __func__);
 		return FALSE;
 	}
 
@@ -106,9 +106,9 @@ static BOOL pcie_xhci_is_supported(struct Library *pcielibBase, struct pci_dev *
 	UBYTE baseclass = pci_read_config_byte((UBYTE)(PCI_CLASS_DEVICE + 1), pd);
 	ULONG mcu_firmware = pci_read_config_long((UBYTE)0x50, pd);
 
-	Kprintf("[pcie] %s:   Class = %02lx:%02lx:%02lx (revision %02lx)\n",
+	Kprintf("[xhci] %s:   Class = %02lx:%02lx:%02lx (revision %02lx)\n",
 			__func__, (ULONG)baseclass, (ULONG)subclass, (ULONG)prog_if, (ULONG)revision);
-	Kprintf("[pcie] %s:   MCU Firmware Version: 0x%08lx\n", __func__, mcu_firmware);
+	Kprintf("[xhci] %s:   MCU Firmware Version: 0x%08lx\n", __func__, mcu_firmware);
 
 	return TRUE;
 }
@@ -125,12 +125,12 @@ static s32 pcie_xhci_init(struct Library *pcielibBase, struct pci_dev *pd,
 		Kprintf("[xhci] %s: BAR0 not mapped\n", __func__);
 		return -EIO;
 	}
-	Kprintf("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
+	KprintfH("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
 
 	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr +
 								 HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
-	Kprintf("[xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
+	KprintfH("[xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
 			__func__, *hccr, *hcor, (ULONG)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	pci_set_master(pd);
@@ -240,7 +240,7 @@ err_free_ctrl:
 
 s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 {
-	Kprintf("[xhci] %s: Opening unit %ld with flags %lx\n", __func__, unitNumber, flags);
+	KprintfH("[xhci] %s: Opening unit %ld with flags %lx\n", __func__, unitNumber, flags);
 	if (unit->unit.unit_OpenCnt > 0)
 	{
 		unit->unit.unit_OpenCnt++;

@@ -304,7 +304,7 @@ static s32 xhci_reset(struct xhci_hcor *hcor)
 	u32 cmd;
 
 	/* Halting the Host first */
-	Kprintf("// Halt the HC: %lx\n", hcor);
+	KprintfH("// Halt the HC: %lx\n", hcor);
 	u32 state = mmio_read32(&hcor->or_usbsts) & STS_HALT;
 	if (!state)
 	{
@@ -320,7 +320,7 @@ static s32 xhci_reset(struct xhci_hcor *hcor)
 		return -EBUSY;
 	}
 
-	Kprintf("// Reset the HC\n");
+	KprintfH("// Reset the HC\n");
 	cmd = mmio_read32(&hcor->or_usbcmd);
 	cmd |= CMD_RESET_USB;
 	mmio_write32(cmd, &hcor->or_usbcmd);
@@ -512,7 +512,7 @@ static void xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 {
 	xhci_reset(ctrl->hcor);
 
-	Kprintf("// Disabling event ring interrupts\n");
+	KprintfH("// Disabling event ring interrupts\n");
 	u32 temp = mmio_read32(&ctrl->hcor->or_usbsts);
 	mmio_write32(temp & ~STS_EINT, &ctrl->hcor->or_usbsts);
 	temp = mmio_read32(&ctrl->ir_set->irq_pending);
@@ -524,7 +524,7 @@ static void xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 
 s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
-	Kprintf("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
+	KprintfH("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
 
 	s32 ret = xhci_reset(hcor);
 	if (ret)
@@ -536,7 +536,7 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 		ret = -ENOMEM;
 		goto err;
 	}
-	Kprintf("memory pool created: %lx\n", ctrl->memoryPool);
+	KprintfH("memory pool created: %lx\n", ctrl->memoryPool);
 
 	xhci_td_slab_init(ctrl);
 	slab_cache_init(&ctrl->trb_addr_slab, ctrl->memoryPool,

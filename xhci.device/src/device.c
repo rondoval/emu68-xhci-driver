@@ -170,7 +170,7 @@ static s32 xhci_open_libraries(struct XHCIDevice *base)
 APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *_SysBase asm("a6"))
 {
     (void)_SysBase;
-    Kprintf("[xhci] %s: Initializing device\n", __func__);
+    KprintfH("[xhci] %s: Initializing device\n", __func__);
     base->segList = segList;
     base->device.dd_Library.lib_Revision = DEVICE_REVISION;
     _NewMinList(&base->units);
@@ -187,7 +187,7 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
     BOOL firstOpen = FALSE;
     BOOL createdUnit = FALSE;
 
-    Kprintf("[xhci] %s: Opening device with unit number %ld and flags %lx\n", __func__, unitNumber, flags);
+    KprintfH("[xhci] %s: Opening device with unit number %ld and flags %lx\n", __func__, unitNumber, flags);
 
     if (io->req.io_Message.mn_Length < sizeof(struct IOStdReq))
     {
@@ -210,7 +210,7 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
 
     if (unit == NULL)
     {
-        Kprintf("[xhci] %s: Allocating unit structure\n", __func__);
+        KprintfH("[xhci] %s: Allocating unit structure\n", __func__);
         unit = AllocMem(sizeof(struct XHCIUnit), MEMF_FAST | MEMF_PUBLIC | MEMF_CLEAR);
         if (unit == NULL)
         {
@@ -225,7 +225,7 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
 
     if (unit->unit.unit_OpenCnt > 0)
     {
-        Kprintf("[xhci] %s: Unit is already open, we only support exclusive access\n", __func__);
+        KprintfH("[xhci] %s: Unit is already open, we only support exclusive access\n", __func__);
         io->req.io_Error = IOERR_UNITBUSY;
         return;
     }
@@ -246,7 +246,7 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
 
     if (result == ERR_NO_ERROR)
     {
-        Kprintf("[xhci] %s: Unit opened successfully\n", __func__);
+        KprintfH("[xhci] %s: Unit opened successfully\n", __func__);
         io->req.io_Unit = (struct Unit *)unit;
         base->device.dd_Library.lib_OpenCnt++;
         base->device.dd_Library.lib_Flags &= (UBYTE)~LIBF_DELEXP;
@@ -271,12 +271,12 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
 ULONG closeLib(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"))
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    Kprintf("[xhci] %s: Closing device\n", __func__);
+    KprintfH("[xhci] %s: Closing device\n", __func__);
 
     int result = UnitClose(unit);
     if (result == 0) // last user of Unit disappeared
     {
-        Kprintf("[xhci] %s: Unit closed successfully, freeing resources\n", __func__);
+        KprintfH("[xhci] %s: Unit closed successfully, freeing resources\n", __func__);
         RemoveMinNode((struct MinNode *)unit);
         FreeMem(unit, sizeof(struct XHCIUnit));
     }
@@ -297,10 +297,10 @@ ULONG closeLib(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a
 
 ULONG expungeLib(struct XHCIDevice *base asm("a6"))
 {
-    Kprintf("[xhci] %s: Expunging device\n", __func__);
+    KprintfH("[xhci] %s: Expunging device\n", __func__);
     if (base->device.dd_Library.lib_OpenCnt > 0)
     {
-        Kprintf("[xhci] %s: Device is still open, cannot expunge\n", __func__);
+        KprintfH("[xhci] %s: Device is still open, cannot expunge\n", __func__);
         base->device.dd_Library.lib_Flags |= LIBF_DELEXP;
         return 0;
     }
