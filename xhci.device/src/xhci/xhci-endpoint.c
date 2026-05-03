@@ -62,8 +62,9 @@ struct ep_context
     /* Pending STOPRTISO command to reply once the pipe is fully stopped */
     struct USBIORequest *rt_stop_pending;
 
-    /* RT ISO frame tracking (monotonic frame number modulo 2^16) */
+    /* RT ISO frame tracking (frame number [0, 2047]) */
     u16 rt_next_frame;
+    u16 rt_interval_frames; /* cached from HW EP context at add_handler time */
 
     /* Cache the last RT ISO buffer so hooks can omit repeating it */
     APTR rt_last_buffer;
@@ -71,6 +72,8 @@ struct ep_context
 
     /* RT ISO inflight accounting */
     u32 rt_inflight_bytes;
+
+    u32 rt_ist; /* IST decoded to microframes, cached at RT ISO start */
 };
 
 static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx);
@@ -492,6 +495,43 @@ void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code)
 /*
  * RT ISO functions
  */
+void xhci_ep_set_rt_interval(struct ep_context *ep_ctx, u8 interval)
+{
+    u32 ivf = ((1U << interval) + 7U) >> 3;
+    ep_ctx->rt_interval_frames = ivf ? (u16)ivf : 1U;
+}
+
+#define RT_ISO_SCHED_OFFSET_UFRAMES 32U
+
+static u16 xhci_rt_iso_min_frame(struct ep_context *ep_ctx)
+{
+    u32 mfindex = mmio_read32(&ep_ctx->udev->controller->run_regs->microframe_index);
+    u32 start_mfindex = (mfindex + ep_ctx->rt_ist + RT_ISO_SCHED_OFFSET_UFRAMES) & ~0x7U;
+
+    /* Mask to TRB FrameID width (11 bits) — that's the modulus HW uses. */
+    return (u16)((start_mfindex >> 3) & 0x7ffU);
+}
+
+static u16 xhci_rt_iso_clamp_frame(struct ep_context *ep_ctx)
+{
+    u16 frame = ep_ctx->rt_next_frame;
+    u16 min_frame = xhci_rt_iso_min_frame(ep_ctx);
+    /* Both values are in [0, 2047]; sign-extend the 11-bit difference
+     * so the comparison handles wraparound correctly. */
+    u16 raw_delta = (u16)(min_frame - frame) & 0x7ffU;
+    s16 delta = (raw_delta >= 0x400U) ? (s16)((s16)raw_delta - (s16)0x800)
+                                      : (s16)raw_delta;
+
+    if (delta > 0)
+    {
+        /* rt_interval_frames is always a power of 2 (set by xhci_ep_set_rt_interval),
+         * so ceil(delta / ivf) * ivf reduces to a bitmask round-up. */
+        u32 ivf_mask = (u32)ep_ctx->rt_interval_frames - 1U;
+        u32 advance = ((u32)delta + ivf_mask) & ~ivf_mask;
+        frame = (u16)((frame + advance) & 0x7ffU);
+    }
+    return frame;
+}
 
 inline static void xhci_ep_rt_iso_update_counters(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
@@ -583,11 +623,11 @@ s8 xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *re
     return ERR_NO_ERROR;
 }
 
-void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len)
+void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len, u16 rt_frame)
 {
     /* Pull a destination buffer from the class, copy staged DMA into it, then signal completion. */
     struct USBBufferRequest rt_buffer_req;
-    rt_buffer_req.frame = req->usb_frame;
+    rt_buffer_req.frame = rt_frame;
     rt_buffer_req.flags = 0;
     rt_buffer_req.length = act_len;
     rt_buffer_req.data = NULL;
@@ -606,14 +646,14 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, u32 
     xhci_ep_rt_iso_update_counters(ep_ctx, req);
 }
 
-void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len)
+void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len, u16 rt_frame)
 {
     if (ep_ctx->rt_req->output_done_hook)
     {
         /* OUT path: completion hook only. OutReqHook is before transfer. */
         struct USBBufferRequest rt_buffer_req;
         rt_buffer_req.data = req->data_buffer;
-        rt_buffer_req.frame = req->usb_frame;
+        rt_buffer_req.frame = rt_frame;
         rt_buffer_req.length = act_len;
         rt_buffer_req.flags = 0;
         CallHookPkt(ep_ctx->rt_req->output_done_hook, ep_ctx->rt_req, &rt_buffer_req);
@@ -633,7 +673,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         if (!xhci_ring_has_room(ep_ctx, 2))
             break;
 
-        u16 frame = ep_ctx->rt_next_frame;
+        u16 frame = xhci_rt_iso_clamp_frame(ep_ctx);
         struct USBIORequest *rt_io = slab_alloc(&ep_ctx->udev->controller->iso_clone_slab);
         if (!rt_io)
         {
@@ -677,9 +717,8 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
         rt_io->data_buffer = (APTR)((u8 *)rt_buffer_req.data + offset);
         rt_io->data_buffer_length = rt_buffer_req.length;
-        rt_io->usb_frame = frame & 0xffffU;
 
-        s8 ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
+        s8 ret = xhci_ring_enqueue_td_at_frame(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */, frame);
         if (ret != ERR_NO_ERROR)
         {
             slab_free(&ep_ctx->udev->controller->iso_clone_slab, rt_io);
@@ -687,7 +726,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
             break;
         }
 
-        ep_ctx->rt_next_frame = ((u32)frame + 1U) & 0xffffU;
+        ep_ctx->rt_next_frame = (u16)(((u32)frame + ep_ctx->rt_interval_frames) & 0x7ffU);
         ep_ctx->rt_inflight_bytes += rt_io->data_buffer_length;
         KprintfH("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -710,7 +749,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         if (!xhci_ring_has_room(ep_ctx, 2))
             break;
 
-        u16 frame = ep_ctx->rt_next_frame;
+        u16 frame = xhci_rt_iso_clamp_frame(ep_ctx);
         const u32 packet_size = ep_ctx->max_packet_size;
         struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
 
@@ -740,7 +779,6 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
             break;
         }
         rt_io->data_buffer_length = packet_size;
-        rt_io->usb_frame = frame & 0xffffU;
 
         KprintfH("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -748,7 +786,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)ep_ctx->rt_inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
-        s8 ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
+        s8 ret = xhci_ring_enqueue_td_at_frame(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */, frame);
         if (ret != ERR_NO_ERROR)
         {
             if (rt_io->driver_private_flags & REQ_RT_IN_BUF_SLABBED)
@@ -761,7 +799,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         }
         ++inflight;
 
-        ep_ctx->rt_next_frame = ((u32)frame + 1U) & 0xffffU;
+        ep_ctx->rt_next_frame = (u16)(((u32)frame + ep_ctx->rt_interval_frames) & 0x7ffU);
         ep_ctx->rt_inflight_bytes += rt_io->data_buffer_length;
         KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -826,8 +864,12 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
         return ERR_HCI_ERROR;
     }
 
-    /* microframe_index is in 125us units; for FS frames use the frame number (divide by 8). */
-    ep_ctx->rt_next_frame = (mmio_read32(&ep_ctx->udev->controller->run_regs->microframe_index) >> 3) & 0xffff;
+    /* HCSPARAMS2.IST is 4 bits (xHCI 5.3.6): bit 3 selects the unit of bits[2:0]
+     * — 0 = microframes (0..7), 1 = frames (0..7, i.e. 0..56 microframes).
+     * Normalize to microframes once so users can add to MFINDEX directly. */
+    u32 ist_raw = HCS_IST(mmio_read32(&ep_ctx->udev->controller->hccr->cr_hcsparams2));
+    ep_ctx->rt_ist = (ist_raw & 0x8U) ? ((ist_raw & 0x7U) << 3) : (ist_raw & 0x7U);
+    ep_ctx->rt_next_frame = xhci_rt_iso_min_frame(ep_ctx);
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
     xhci_ep_schedule_rt_iso(ep_ctx);
     return ERR_NO_ERROR;

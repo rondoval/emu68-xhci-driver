@@ -590,6 +590,8 @@ static s8 xhci_init_ep_contexts_if(struct usb_device *udev,
         struct xhci_ring *ring = xhci_ep_get_ring(ep_context);
         ep_ctx[ep_index]->deq = le64(xhci_ring_get_new_dequeue_ptr(ring));
 
+        xhci_ep_set_rt_interval(ep_context, interval);
+
         /*
          * xHCI spec 6.2.3:
          * 'Average TRB Length' should be 8 for control endpoints.

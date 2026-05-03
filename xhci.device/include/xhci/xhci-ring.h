@@ -173,6 +173,8 @@ typedef enum
 #define TRB_DATA_IN 3
 
 /* Isochronous TRB specific fields */
+#define TRB_FRAME_ID(p) (((u32)(p) & 0x7ffU) << 20)
+#define GET_TRB_FRAME_ID(p) ((u16)(((p) >> 20) & 0x7ffU))
 #define TRB_SIA BIT(31)
 
 struct xhci_link_trb
@@ -308,6 +310,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
 
 s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell);
+s8 xhci_ring_enqueue_td_at_frame(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u16 frame);
 BOOL xhci_ring_has_room(struct ep_context *ep_ctx, u32 needed_trbs);
 void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
 

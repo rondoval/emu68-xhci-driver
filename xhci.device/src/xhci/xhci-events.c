@@ -49,7 +49,7 @@ typedef void (*ep_state_handler)(struct usb_device *udev, struct ep_context *ep_
 
 static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
-static void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, struct ep_context *ep_ctx, struct usb_device *udev);
+static void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, u16 rt_frame, struct ep_context *ep_ctx, struct usb_device *udev);
 static void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
@@ -202,6 +202,11 @@ inline static s8 translate_status(xhci_comp_code comp)
     case COMP_SHORT_TX:
         status = ERR_NO_ERROR;
         break;
+    case COMP_UNDERRUN:
+    case COMP_OVERRUN:
+    case COMP_MISSED_INT:
+        status = ERR_NO_ERROR;
+        break;
     case COMP_STALL:
         KprintfH("Device stalled\n");
         status = ERR_DEVICE_STALL;
@@ -220,7 +225,6 @@ inline static s8 translate_status(xhci_comp_code comp)
         KprintfH("Babble detected\n");
         status = ERR_DEVICE_BABBLE;
         break;
-        // TODO more codes, e.g. underrun/overrun
     case COMP_BUFF_OVER:
         KprintfH("Isoc buffer overrun\n");
         status = ERR_ISOC_OVERRUN;
@@ -281,18 +285,20 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     xhci_dump_ep_ctx("[xhci-event] ep_handle_receiving_generic:", udev, ep_index);
 #endif
 
-    /* Isoch OUT rings signal underrun/overrun with null TRB pointers. Do not treat those as lost TDs. */
-    if ((comp == COMP_UNDERRUN || comp == COMP_OVERRUN) && trb_addr == 0)
+    /* RT ISO ring status events are controller/schedule feedback, not TD completion. */
+    if ((comp == COMP_UNDERRUN || comp == COMP_OVERRUN) &&
+        xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
-        enum ep_state state = xhci_ep_get_state(ep_ctx);
-        Kprintf("Ring %s on addr %lu EP %lu state=%lu\n",
+        Kprintf("RT ISO ring %s addr=%lu ep=%lu flags=0x%08lx xfer=0x%08lx trb=%08lx%08lx\n",
                 (comp == COMP_UNDERRUN) ? "underrun" : "overrun",
                 (ULONG)udev->virtual_address,
                 (ULONG)ep_index,
-                (ULONG)state);
+                (ULONG)flags,
+                (ULONG)transfer_len,
+                (ULONG)u64_hi32(trb_addr),
+                (ULONG)u64_lo32(trb_addr));
 
-        if (state == USB_DEV_EP_STATE_RT_ISO_RUNNING)
-            xhci_ep_schedule_rt_iso(ep_ctx);
+        xhci_ep_schedule_rt_iso(ep_ctx);
 
         return;
     }
@@ -301,19 +307,29 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     if (!req)
     {
         Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %lu\n",
-            (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
+                (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
         return;
     }
 
-        u32 act_len = req->data_buffer_length - EVENT_TRB_LEN(transfer_len);
+    u32 act_len = req->data_buffer_length - EVENT_TRB_LEN(transfer_len);
 
     BOOL is_rt_iso = req->req.io_Command == CMD_REGISTER_ISOCHRONOUS_HOOKS;
     if (is_rt_iso)
     {
-        KprintfH("RT ISO complete dir=%s act_len=%lu\n",
-                 req->direction == DIRECTION_IN ? "IN" : "OUT",
-                 (ULONG)act_len);
-        ep_handle_rt_iso(req, act_len, ep_ctx, udev);
+        /* Recover the frame number from field3 of the completing TRB; we wrote it there at submit time. */
+        const struct xhci_generic_trb *completed_trb = (const struct xhci_generic_trb *)(uintptr_t)trb_addr;
+        u16 rt_frame = GET_TRB_FRAME_ID(le32(completed_trb->field[3]));
+
+        if (comp == COMP_MISSED_INT)
+            Kprintf("RT ISO missed-service addr=%lu ep=%lu frame=%lu len=%lu trb=%08lx%08lx\n",
+                    (ULONG)udev->virtual_address,
+                    (ULONG)ep_index,
+                    (ULONG)rt_frame,
+                    (ULONG)req->data_buffer_length,
+                    (ULONG)u64_hi32(trb_addr),
+                    (ULONG)u64_lo32(trb_addr));
+
+        ep_handle_rt_iso(req, act_len, rt_frame, ep_ctx, udev);
         return;
     }
 
@@ -343,14 +359,14 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         xhci_ep_set_idle(ep_ctx);
 }
 
-void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, struct ep_context *ep_ctx, struct usb_device *udev)
+void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, u16 rt_frame, struct ep_context *ep_ctx, struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
     if (req->direction == DIRECTION_IN)
     {
         if (act_len > 0)
-            xhci_ep_rt_iso_in(ep_ctx, req, act_len);
+            xhci_ep_rt_iso_in(ep_ctx, req, act_len, rt_frame);
 
         if (req->driver_private_flags & REQ_RT_IN_BUF_SLABBED)
             slab_free(&ctrl->iso_in_staging_slab, req->data_buffer);
@@ -358,7 +374,7 @@ void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, struct ep_context *
             pool_free(ctrl->memoryPool, req->data_buffer);
     }
     else
-        xhci_ep_rt_iso_out(ep_ctx, req, act_len);
+        xhci_ep_rt_iso_out(ep_ctx, req, act_len, rt_frame);
 
     /* RT ISO TDs clone IO requests; free them after completion to avoid leaks. */
     slab_free(&ctrl->iso_clone_slab, req);

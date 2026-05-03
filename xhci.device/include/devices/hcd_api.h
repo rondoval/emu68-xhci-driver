@@ -52,8 +52,7 @@ struct USBIORequest
     u32 timeout;
     struct USBSetupPacket setup;
     u32 reserved3;
-    u16 reserved4;
-    u16 usb_frame;
+    u32 reserved4;
     u32 reserved5;
     u32 driver_private_flags;
     void *driver_private_dma_address;

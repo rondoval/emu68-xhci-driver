@@ -865,7 +865,7 @@ inline static void xhci_ring_enqueue_control_trbs(struct xhci_ctrl *ctrl, struct
 	td_trb_addrs[td_trb_index++] = status_trb;
 }
 
-inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring, struct USBIORequest *io, u64 addr, u32 num_trbs, u32 trb_buff_len, dma_addr_t *td_trb_addrs)
+inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring, struct USBIORequest *io, u64 addr, u32 num_trbs, u32 trb_buff_len, dma_addr_t *td_trb_addrs, u32 iso_extra_bits)
 {
 	// KprintfH("num_trbs = %lu, trb_buff_len = %lu\n", (ULONG)num_trbs, (ULONG)trb_buff_len);
 	const BOOL is_iso = io->req.io_Command == CMD_REGISTER_ISOCHRONOUS_HOOKS ||
@@ -873,7 +873,8 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 
 	const u32 length = io->data_buffer_length;
 	const u32 enable_short_packet = (!is_iso && (io->direction == DIRECTION_IN)) ? TRB_ISP : 0;
-	const u32 trb_type_bits = is_iso ? (TRB_TYPE(TRB_ISOC) | TRB_SIA) : (TRB_TYPE(TRB_NORMAL) | enable_short_packet);
+	const u32 trb_type_bits = is_iso ? (TRB_TYPE(TRB_ISOC) | iso_extra_bits)
+									 : (TRB_TYPE(TRB_NORMAL) | enable_short_packet);
 
 	u32 running_total = 0;
 	u32 td_trb_index = 0;
@@ -1005,7 +1006,7 @@ static void __attribute__((unused)) xhci_dump_request(const char *tag, const str
 				(ULONG)le16(req->setup.wLength));
 }
 
-s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell)
+inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u32 iso_extra_bits)
 {
 	// #ifdef DEBUG_HIGH
 	// 	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
@@ -1076,10 +1077,21 @@ s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 ti
 	if (io->req.io_Command == CMD_REQUEST_CONTROL)
 		xhci_ring_enqueue_control_trbs(ctrl, ep_ring, io, td_trb_addrs);
 	else
-		xhci_ring_enqueue_non_control_trbs(ep_ring, io, addr, num_trbs, trb_buff_len, td_trb_addrs);
+		xhci_ring_enqueue_non_control_trbs(ep_ring, io, addr, num_trbs, trb_buff_len, td_trb_addrs, iso_extra_bits);
 
 	xhci_ep_set_receiving(udev_ep_ctx, io, td_trb_addrs, timeout_ms, num_trbs);
 	xhci_ring_finalize_first_trb(udev, ep_index, ep_ring, (struct xhci_generic_trb *)td_trb_addrs[0], defer_doorbell);
 
 	return ERR_NO_ERROR;
+}
+
+s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell)
+{
+	/* ISO transfers scheduled here use SIA; RT ISO callers go through xhci_ring_enqueue_td_at_frame. */
+	return enqueue_td_internal(udev, io, timeout_ms, defer_doorbell, TRB_SIA);
+}
+
+s8 xhci_ring_enqueue_td_at_frame(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u16 frame)
+{
+	return enqueue_td_internal(udev, io, timeout_ms, defer_doorbell, TRB_FRAME_ID(frame));
 }

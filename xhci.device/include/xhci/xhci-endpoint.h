@@ -22,6 +22,7 @@ struct usb_device;
 struct ep_context;
 
 BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, APTR memoryPool);
+void xhci_ep_set_rt_interval(struct ep_context *ep_ctx, u8 interval);
 void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code);
 struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, u8 ep_index);
 
@@ -57,8 +58,8 @@ s8 xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *re
 s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx);
 s8 xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIORequest *req);
 
-void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len);
-void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len);
+void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len, u16 rt_frame);
+void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len, u16 rt_frame);
 
 void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx);
 
