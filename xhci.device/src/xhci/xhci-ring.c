@@ -872,9 +872,14 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 						io->req.io_Command == CMD_REQUEST_ISOCHRONOUS;
 
 	const u32 length = io->data_buffer_length;
-	const u32 enable_short_packet = (!is_iso && (io->direction == DIRECTION_IN)) ? TRB_ISP : 0;
-	const u32 trb_type_bits = is_iso ? (TRB_TYPE(TRB_ISOC) | iso_extra_bits)
-									 : (TRB_TYPE(TRB_NORMAL) | enable_short_packet);
+	const u32 isp_for_in = (io->direction == DIRECTION_IN) ? TRB_ISP : 0;
+	/* xHCI 4.11.2.3: only the first TRB in an ISO TD carries the ISOC type and
+	 * iso-specific bits (Frame ID/SIA, TBC, TLBPC). Chain TRBs are NORMAL.
+	 * ISP applies to both ISOC and NORMAL TRBs for IN endpoints. */
+	const u32 first_trb_type_bits = (is_iso ? (TRB_TYPE(TRB_ISOC) | iso_extra_bits)
+											: TRB_TYPE(TRB_NORMAL)) |
+									isp_for_in;
+	const u32 chain_trb_type_bits = TRB_TYPE(TRB_NORMAL) | isp_for_in;
 
 	u32 running_total = 0;
 	u32 td_trb_index = 0;
@@ -894,17 +899,18 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 	/* Queue the first TRB, even if it's zero-length. */
 	do
 	{
-		u32 field3 = trb_type_bits;
+		u32 field3;
 		/* Don't change the cycle bit of the first TRB until later */
 		if (first_trb)
 		{
+			field3 = first_trb_type_bits;
 			first_trb = FALSE;
 			if (ep_ring->cycle_state == 0)
 				field3 |= TRB_CYCLE;
 		}
 		else
 		{
-			field3 |= ep_ring->cycle_state;
+			field3 = chain_trb_type_bits | ep_ring->cycle_state;
 		}
 
 		/*

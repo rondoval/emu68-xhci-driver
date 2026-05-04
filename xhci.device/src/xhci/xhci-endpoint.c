@@ -63,9 +63,13 @@ struct ep_context
     /* Pending STOPRTISO command to reply once the pipe is fully stopped */
     struct USBIORequest *rt_stop_pending;
 
-    /* RT ISO frame tracking (frame number [0, 2047]) */
-    u16 rt_next_frame;
-    u16 rt_interval_frames; /* cached from HW EP context at add_handler time */
+    /* RT ISO frame tracking. Microframe-resolution to satisfy ESIT rules:
+     *  - ESIT >= 1ms: Frame ID begins on ESIT boundary (xHCI 4.11.2.5).
+     *  - ESIT  < 1ms: all TDs in the same frame share a Frame ID.
+     * rt_next_uframe is the microframe offset for the next TD, mod 16384
+     * (Frame ID is bits 13:3, an 11-bit field). Advance by rt_uframes_per_esit. */
+    u16 rt_uframes_per_esit;
+    u16 rt_next_uframe;
 
     /* Cache the last RT ISO buffer so hooks can omit repeating it */
     APTR rt_last_buffer;
@@ -509,40 +513,44 @@ void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code)
  */
 void xhci_ep_set_rt_interval(struct ep_context *ep_ctx, u8 interval)
 {
-    u32 ivf = ((1U << interval) + 7U) >> 3;
-    ep_ctx->rt_interval_frames = ivf ? (u16)ivf : 1U;
+    /* xHCI EP Context Interval is log2 of microframes-per-ESIT. */
+    ep_ctx->rt_uframes_per_esit = (u16)(1U << interval);
 }
 
 #define RT_ISO_SCHED_OFFSET_UFRAMES 32U
+#define RT_ISO_FRAME_MASK 0x7ffU /* Frame ID modulus: 2048 frames */
+#define RT_ISO_UF_MASK 0x3fffU /* microframe modulus: 2048 frames * 8 = 16384 */
+#define RT_UFRAME_TO_FRAME(uf) (((uf) >> 3) & RT_ISO_FRAME_MASK)
 
-static u16 xhci_rt_iso_min_frame(struct ep_context *ep_ctx)
+/* Earliest microframe HW can accept, rounded UP to the next ESIT boundary. */
+static u16 xhci_rt_iso_min_uf(struct ep_context *ep_ctx)
 {
     u32 mfindex = mmio_read32(&ep_ctx->udev->controller->run_regs->microframe_index);
-    u32 start_mfindex = (mfindex + ep_ctx->rt_ist + RT_ISO_SCHED_OFFSET_UFRAMES) & ~0x7U;
-
-    /* Mask to TRB FrameID width (11 bits) — that's the modulus HW uses. */
-    return (u16)((start_mfindex >> 3) & 0x7ffU);
+    u32 raw = mfindex + ep_ctx->rt_ist + RT_ISO_SCHED_OFFSET_UFRAMES;
+    u32 ivf_mask = (u32)ep_ctx->rt_uframes_per_esit - 1U;
+    return (u16)(((raw + ivf_mask) & ~ivf_mask) & RT_ISO_UF_MASK);
 }
 
+/* If rt_next_uframe has fallen behind the HW window, advance it by whole
+ * ESITs to the next valid slot >= min. Updates rt_next_uframe in place
+ * so the caller's post-submit advance keeps the stream contiguous.
+ * Returns the 11-bit Frame ID for the resulting microframe. */
 static u16 xhci_rt_iso_clamp_frame(struct ep_context *ep_ctx)
 {
-    u16 frame = ep_ctx->rt_next_frame;
-    u16 min_frame = xhci_rt_iso_min_frame(ep_ctx);
-    /* Both values are in [0, 2047]; sign-extend the 11-bit difference
-     * so the comparison handles wraparound correctly. */
-    u16 raw_delta = (u16)(min_frame - frame) & 0x7ffU;
-    s16 delta = (raw_delta >= 0x400U) ? (s16)((s16)raw_delta - (s16)0x800)
-                                      : (s16)raw_delta;
+    u16 uf = ep_ctx->rt_next_uframe;
+    u16 min_uf = xhci_rt_iso_min_uf(ep_ctx);
+    /* 14-bit signed delta to handle wraparound. */
+    u16 raw_delta = (u16)(min_uf - uf) & RT_ISO_UF_MASK;
+    s32 delta = (raw_delta >= 0x2000U) ? ((s32)raw_delta - 0x4000) : (s32)raw_delta;
 
     if (delta > 0)
     {
-        /* rt_interval_frames is always a power of 2 (set by xhci_ep_set_rt_interval),
-         * so ceil(delta / ivf) * ivf reduces to a bitmask round-up. */
-        u32 ivf_mask = (u32)ep_ctx->rt_interval_frames - 1U;
+        u32 ivf_mask = (u32)ep_ctx->rt_uframes_per_esit - 1U;
         u32 advance = ((u32)delta + ivf_mask) & ~ivf_mask;
-        frame = (u16)((frame + advance) & 0x7ffU);
+        uf = (u16)((uf + advance) & RT_ISO_UF_MASK);
+        ep_ctx->rt_next_uframe = uf;
     }
-    return frame;
+    return RT_UFRAME_TO_FRAME(uf);
 }
 
 inline static void xhci_ep_rt_iso_update_counters(struct ep_context *ep_ctx, struct USBIORequest *req)
@@ -688,8 +696,9 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
         /* CFC controllers pin Frame ID to a slot; without CFC the HW chooses
          * via SIA, but we still hand the user hook a monotonic frame counter. */
-        u16 frame = ctrl->cfc_supported ? xhci_rt_iso_clamp_frame(ep_ctx)
-                                        : ep_ctx->rt_next_frame;
+        u16 frame = ctrl->cfc_supported
+                        ? xhci_rt_iso_clamp_frame(ep_ctx)
+                        : RT_UFRAME_TO_FRAME(ep_ctx->rt_next_uframe);
         struct USBIORequest *rt_io = slab_alloc(&ctrl->iso_clone_slab);
         if (!rt_io)
         {
@@ -744,7 +753,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
             break;
         }
 
-        ep_ctx->rt_next_frame = (u16)(((u32)frame + ep_ctx->rt_interval_frames) & 0x7ffU);
+        ep_ctx->rt_next_uframe = (u16)(((u32)ep_ctx->rt_next_uframe + ep_ctx->rt_uframes_per_esit) & RT_ISO_UF_MASK);
         ep_ctx->rt_inflight_bytes += rt_io->data_buffer_length;
         KprintfH("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -768,8 +777,9 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
             break;
 
         struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
-        u16 frame = ctrl->cfc_supported ? xhci_rt_iso_clamp_frame(ep_ctx)
-                                        : ep_ctx->rt_next_frame;
+        u16 frame = ctrl->cfc_supported
+                        ? xhci_rt_iso_clamp_frame(ep_ctx)
+                        : RT_UFRAME_TO_FRAME(ep_ctx->rt_next_uframe);
         const u32 packet_size = ep_ctx->max_packet_size;
 
         struct USBIORequest *rt_io = slab_alloc(&ctrl->iso_clone_slab);
@@ -820,7 +830,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         }
         ++inflight;
 
-        ep_ctx->rt_next_frame = (u16)(((u32)frame + ep_ctx->rt_interval_frames) & 0x7ffU);
+        ep_ctx->rt_next_uframe = (u16)(((u32)ep_ctx->rt_next_uframe + ep_ctx->rt_uframes_per_esit) & RT_ISO_UF_MASK);
         ep_ctx->rt_inflight_bytes += rt_io->data_buffer_length;
         KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -890,7 +900,7 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
      * Normalize to microframes once so users can add to MFINDEX directly. */
     u32 ist_raw = HCS_IST(mmio_read32(&ep_ctx->udev->controller->hccr->cr_hcsparams2));
     ep_ctx->rt_ist = (ist_raw & 0x8U) ? ((ist_raw & 0x7U) << 3) : (ist_raw & 0x7U);
-    ep_ctx->rt_next_frame = xhci_rt_iso_min_frame(ep_ctx);
+    ep_ctx->rt_next_uframe = xhci_rt_iso_min_uf(ep_ctx);
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
     xhci_ep_schedule_rt_iso(ep_ctx);
     return ERR_NO_ERROR;
