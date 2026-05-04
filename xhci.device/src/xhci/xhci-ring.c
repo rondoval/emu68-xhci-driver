@@ -203,10 +203,6 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
 
 /**
  * Create a new ring with zero or more segments.
- * TODO: current code only uses one-time-allocated single-segment rings
- * of 1KB anyway, so we might as well get rid of all the segment and
- * linking code (and maybe increase the size a bit, e.g. 4KB).
- *
  *
  * Link each segment together into a ring.
  * Set the end flag and the cycle toggle bit on the last segment.

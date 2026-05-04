@@ -64,7 +64,7 @@ struct xhci_slot_ctx
 #define EP0_FLAG BIT(1)
 
 /* dev_info2 bitmasks */
-/* Max Exit Latency (ms) - worst case time to wake up all links in dev path */
+/* Max Exit Latency (µs) - worst case time to wake up all links in dev path */
 #define MAX_EXIT (0xffffU)
 /* Root hub port number that is needed to access the USB device */
 #define ROOT_HUB_PORT(p) (((u32)(p) & 0xffU) << 16)

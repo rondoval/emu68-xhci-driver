@@ -407,9 +407,21 @@ static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ct
         Kprintf("Expected a TRB for slot %lu, got %lu\n", (ULONG)udev->slot_id, (ULONG)TRB_TO_SLOT_ID(flags));
         return;
     }
-    if (GET_COMP_CODE(le32(event->trans_event.transfer_len)) != COMP_STOP)
+
+    const xhci_comp_code comp = GET_COMP_CODE(le32(event->trans_event.transfer_len));
+    switch(comp)
     {
-        Kprintf("Expected a TRB with STOP, got %lu\n", (ULONG)GET_COMP_CODE(le32(event->trans_event.transfer_len)));
+        case COMP_STOP:
+            KprintfH("Transfer stopped successfully\n");
+            break;
+        case COMP_STOP_INVAL:
+            KprintfH("Transfer stopped with invalid length\n");
+            break;
+        case COMP_STOP_SHORT:
+            KprintfH("Transfer stopped after short packet\n");
+            break;
+        default:
+            Kprintf("Expected a TRB with STOP, got %lu\n", (ULONG)comp);
     }
 
     /* no state change - that is done by handle_abort_stop_ring */

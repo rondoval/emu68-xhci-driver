@@ -82,11 +82,10 @@ typedef enum
 	COMP_CMD_ABORT, /* 25 */
 	/* Stopped - transfer was terminated by a stop endpoint command */
 	COMP_STOP, /* 26 */
-	/* Same as COMP_EP_STOPPED, but the transferred length in the event
-	 * is invalid */
+	/* Same as COMP_STOP, but the transferred length in the event is invalid */
 	COMP_STOP_INVAL, /* 27*/
-	/* Control Abort Error - Debug Capability - control pipe aborted */
-	COMP_DBG_ABORT, /* 28 */
+	/* Same as COMP_STOP, but the transfer was stopped after Short Packet condition */
+	COMP_STOP_SHORT, /* 28 */
 	/* Max Exit Latency Too Large Error */
 	COMP_MEL_ERR, /* 29 */
 	/* TRB type 30 reserved */
