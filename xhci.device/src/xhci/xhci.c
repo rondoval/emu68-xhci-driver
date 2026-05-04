@@ -442,7 +442,7 @@ static void xhci_dump_caps(struct xhci_ctrl *ctrl)
 	if (HCC_SEC(reg))
 		Kprintf("Host controller supports Stopped EDTLA Capability\n");
 	if (HCC_CFC(reg))
-		Kprintf("Host controller supports Configure Frame ID Capability\n");
+		Kprintf("Host controller supports Contiguous Frame ID Capability\n");
 
 	reg = mmio_read32(&hccr->cr_hccparams2);
 	if (HCC_U3C(reg))
@@ -503,6 +503,9 @@ static s32 xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	Kprintf("USB XHCI %lx.%02lx\n", reg >> 8, reg & 0xff);
 	ctrl->hci_version = reg & 0xffffU;
 
+	u32 hccp1 = mmio_read32(&hccr->cr_hccparams1);
+	ctrl->cfc_supported = HCC_CFC(hccp1) ? TRUE : FALSE;
+	
 	xhci_dump_caps(ctrl);
 
 	return 0;

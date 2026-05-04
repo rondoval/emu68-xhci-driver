@@ -389,7 +389,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     /* EP 0 can handle "burst" sizes of 1, so Max Burst Size field is 0 */
     ep0_ctx->ep_info2 |= le32(MAX_BURST(0) | ERROR_COUNT(3));
 
-    BOOL result = xhci_ep_create_context(udev, 0, max_packet_size, ctrl->memoryPool);
+    BOOL result = xhci_ep_create_context(udev, 0, max_packet_size, /*max_burst*/ 0, ctrl->memoryPool);
     if (!result)
         Kprintf("Failed to create EP0 context\n");
 
@@ -568,7 +568,7 @@ static s8 xhci_init_ep_contexts_if(struct usb_device *udev,
 
         u16 max_packet_size = usb_endpoint_maxp(endpt_desc);
         /* Allocate the ep rings */
-        BOOL result = xhci_ep_create_context(udev, ep_index, max_packet_size, ctrl->memoryPool);
+        BOOL result = xhci_ep_create_context(udev, ep_index, max_packet_size, max_burst, ctrl->memoryPool);
         if (!result)
             return ERR_ALLOC_ERROR;
 

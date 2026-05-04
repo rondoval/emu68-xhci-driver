@@ -21,12 +21,14 @@ enum ep_state
 struct usb_device;
 struct ep_context;
 
-BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, APTR memoryPool);
+BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst, APTR memoryPool);
 void xhci_ep_set_rt_interval(struct ep_context *ep_ctx, u8 interval);
 void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code);
 struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, u8 ep_index);
 
 void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, u32 max_packet_size);
+u32 xhci_ep_get_max_packet_size(struct ep_context *ep_ctx);
+u8 xhci_ep_get_max_burst(struct ep_context *ep_ctx);
 
 void xhci_ep_set_failed(struct ep_context *ep_ctx);
 void xhci_ep_set_idle(struct ep_context *ep_ctx);

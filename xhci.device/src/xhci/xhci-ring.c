@@ -917,8 +917,6 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 		u32 remainder = xhci_td_remainder(running_total, trb_buff_len,
 										  length, ep_ring->max_packet_size,
 										  num_trbs > 1);
-		// TODO TBC in isoch - length_field. set ETE=1. 4.11.2.3
-		// TODO TLBPC in isoch - field3
 
 		u32 length_field = TRB_LEN(trb_buff_len) | TRB_TD_SIZE(remainder) | TRB_INTR_TARGET(0);
 
@@ -1006,6 +1004,36 @@ static void __attribute__((unused)) xhci_dump_request(const char *tag, const str
 				(ULONG)le16(req->setup.wLength));
 }
 
+/*
+ * xHCI 4.11.2.3: compute TBC and TLBPC for an ISO TD.
+ * Pre-1.0 controllers leave both fields RsvdZ; older controllers can't burst anyway.
+ */
+static inline u32 iso_burst_bits(struct xhci_ctrl *ctrl, struct usb_device *udev,
+								 struct ep_context *ep_ctx, u32 td_length)
+{
+	if (ctrl->hci_version < 0x100)
+		return 0;
+
+	u32 max_packet = xhci_ep_get_max_packet_size(ep_ctx);
+	if (max_packet == 0)
+		max_packet = 1;
+	u32 total_pkts = (td_length + max_packet - 1) / max_packet;
+	if (total_pkts == 0)
+		total_pkts = 1;
+
+	if (udev->speed >= USB_SPEED_SUPER)
+	{
+		const u32 max_burst = xhci_ep_get_max_burst(ep_ctx);
+		const u32 burst = max_burst + 1U;
+		const u32 tbc = ((total_pkts + burst - 1) / burst) - 1;
+		const u32 residue = total_pkts % burst;
+		const u32 tlbpc = (residue == 0) ? max_burst : (residue - 1);
+		return TRB_TBC(tbc) | TRB_TLBPC(tlbpc);
+	}
+	/* USB 2.0 / 1.1: one burst per service interval; TLBPC = total_pkts - 1. */
+	return TRB_TBC(total_pkts - 1);
+}
+
 inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u32 iso_extra_bits)
 {
 	// #ifdef DEBUG_HIGH
@@ -1077,7 +1105,12 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 	if (io->req.io_Command == CMD_REQUEST_CONTROL)
 		xhci_ring_enqueue_control_trbs(ctrl, ep_ring, io, td_trb_addrs);
 	else
+	{
+		if (io->req.io_Command == CMD_REQUEST_ISOCHRONOUS ||
+			io->req.io_Command == CMD_REGISTER_ISOCHRONOUS_HOOKS)
+			iso_extra_bits |= iso_burst_bits(ctrl, udev, udev_ep_ctx, io->data_buffer_length);
 		xhci_ring_enqueue_non_control_trbs(ep_ring, io, addr, num_trbs, trb_buff_len, td_trb_addrs, iso_extra_bits);
+	}
 
 	xhci_ep_set_receiving(udev_ep_ctx, io, td_trb_addrs, timeout_ms, num_trbs);
 	xhci_ring_finalize_first_trb(udev, ep_index, ep_ring, (struct xhci_generic_trb *)td_trb_addrs[0], defer_doorbell);

@@ -40,6 +40,7 @@ struct ep_context
     u8 ep_index;             /* Endpoint context index (0-30) */
     enum ep_state state;     /* Current endpoint state */
     u32 max_packet_size;     /* Cached max packet size for this endpoint */
+    u8 max_burst;            /* bMaxBurst (zero-based: 0 = 1 packet/burst) */
     APTR memoryPool;         /* Memory pool for this endpoint */
 
     IOReqList pending_reqs;             /* list of pending requests */
@@ -78,7 +79,7 @@ struct ep_context
 
 static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx);
 
-BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, APTR memoryPool)
+BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst, APTR memoryPool)
 {
     struct ep_context *ep_ctx = pool_zalloc(memoryPool, sizeof(struct ep_context));
     if (!ep_ctx)
@@ -91,6 +92,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
     ep_ctx->memoryPool = memoryPool;
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
     ep_ctx->max_packet_size = max_packet_size;
+    ep_ctx->max_burst = max_burst;
     _NewMinList(&ep_ctx->pending_reqs);
     _NewMinList(&ep_ctx->stop_abort_reqs);
     ep_ctx->active_tds = xhci_td_create_list(udev->controller);
@@ -171,6 +173,16 @@ void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, u32 max_packet_size)
 
     xhci_ring_set_max_packet_size(ep_ctx->ring, max_packet_size);
     ep_ctx->max_packet_size = max_packet_size;
+}
+
+u32 xhci_ep_get_max_packet_size(struct ep_context *ep_ctx)
+{
+    return ep_ctx->max_packet_size;
+}
+
+u8 xhci_ep_get_max_burst(struct ep_context *ep_ctx)
+{
+    return ep_ctx->max_burst;
 }
 
 /*
@@ -666,6 +678,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 {
     struct USBIORequest *template = ep_ctx->rt_template_req;
     u32 prefetch_bytes = ep_ctx->rt_req->max_output_prefetch;
+    struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
 
     while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
     {
@@ -673,8 +686,11 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         if (!xhci_ring_has_room(ep_ctx, 2))
             break;
 
-        u16 frame = xhci_rt_iso_clamp_frame(ep_ctx);
-        struct USBIORequest *rt_io = slab_alloc(&ep_ctx->udev->controller->iso_clone_slab);
+        /* CFC controllers pin Frame ID to a slot; without CFC the HW chooses
+         * via SIA, but we still hand the user hook a monotonic frame counter. */
+        u16 frame = ctrl->cfc_supported ? xhci_rt_iso_clamp_frame(ep_ctx)
+                                        : ep_ctx->rt_next_frame;
+        struct USBIORequest *rt_io = slab_alloc(&ctrl->iso_clone_slab);
         if (!rt_io)
         {
             Kprintf("Failed to alloc RT ISO IO req\n");
@@ -700,7 +716,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         if (!rt_buffer_req.data || rt_buffer_req.length == 0)
         {
             KprintfH("RT ISO hook provided no buffer/length\n");
-            slab_free(&ep_ctx->udev->controller->iso_clone_slab, rt_io);
+            slab_free(&ctrl->iso_clone_slab, rt_io);
             break;
         }
 
@@ -718,10 +734,12 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         rt_io->data_buffer = (APTR)((u8 *)rt_buffer_req.data + offset);
         rt_io->data_buffer_length = rt_buffer_req.length;
 
-        s8 ret = xhci_ring_enqueue_td_at_frame(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */, frame);
+        s8 ret = ctrl->cfc_supported
+                     ? xhci_ring_enqueue_td_at_frame(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */, frame)
+                     : xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE);
         if (ret != ERR_NO_ERROR)
         {
-            slab_free(&ep_ctx->udev->controller->iso_clone_slab, rt_io);
+            slab_free(&ctrl->iso_clone_slab, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
@@ -749,9 +767,10 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         if (!xhci_ring_has_room(ep_ctx, 2))
             break;
 
-        u16 frame = xhci_rt_iso_clamp_frame(ep_ctx);
-        const u32 packet_size = ep_ctx->max_packet_size;
         struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
+        u16 frame = ctrl->cfc_supported ? xhci_rt_iso_clamp_frame(ep_ctx)
+                                        : ep_ctx->rt_next_frame;
+        const u32 packet_size = ep_ctx->max_packet_size;
 
         struct USBIORequest *rt_io = slab_alloc(&ctrl->iso_clone_slab);
         if (!rt_io)
@@ -786,7 +805,9 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)ep_ctx->rt_inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
-        s8 ret = xhci_ring_enqueue_td_at_frame(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */, frame);
+        s8 ret = ctrl->cfc_supported
+                     ? xhci_ring_enqueue_td_at_frame(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */, frame)
+                     : xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE);
         if (ret != ERR_NO_ERROR)
         {
             if (rt_io->driver_private_flags & REQ_RT_IN_BUF_SLABBED)

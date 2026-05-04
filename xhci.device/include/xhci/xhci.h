@@ -714,6 +714,7 @@ struct xhci_ctrl
 	struct xhci_scratchpad *scratchpad;
 	struct xhci_root_hub *root_hub;
 	u16 hci_version;
+	BOOL cfc_supported; /* HCC_CFC: per-TRB Frame ID is reliable */
 
 	APTR memoryPool;
 #define XHCI_TD_SMALL_TRBS         8                       /* trb_addr_slab covers up to this many TRBs */
