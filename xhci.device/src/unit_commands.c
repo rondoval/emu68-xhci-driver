@@ -473,7 +473,7 @@ badparams:
 static inline u32 Do_CMD_STARTRTISO(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_STOP_REALTIME_ISOCHRONOUS\n", __func__);
+    KprintfH("[xhci] %s: CMD_START_REALTIME_ISOCHRONOUS\n", __func__);
 
     KprintfH("RT ISO start addr=%lu ep=%lu dir=%s len=%lu\n",
              (ULONG)io->virtual_address,

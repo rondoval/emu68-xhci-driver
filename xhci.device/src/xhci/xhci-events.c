@@ -100,7 +100,6 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
     {
         activity = TRUE;
         trb_type type = TRB_FIELD_TO_TYPE(le32(event->event_cmd.flags));
-        xhci_ring_acknowledge_event(ctrl);
 
         switch (type)
         {
@@ -167,6 +166,9 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
                     (ULONG)le32(event->generic.field[3]));
             break;
         }
+
+        /* Acknowledge only after the handler finishes reading this TRB. */
+        xhci_ring_acknowledge_event(ctrl);
     }
     return activity;
 }
@@ -258,7 +260,7 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
     enum ep_state state = xhci_ep_get_state(ep_ctx);
     const u8 ep_index = xhci_ep_get_ep_index(ep_ctx);
 
-    Kprintf("No handler for endpoint %lu state %lu addr %lu\n", (ULONG)ep_index, (ULONG)state, (ULONG)udev->virtual_address);
+    Kprintf("No handler for addr %lu endpoint %lu state %lu\n", (ULONG)udev->virtual_address, (ULONG)ep_index, (ULONG)state);
     KprintfH("Event TRB: (%08lx %08lx %08lx %08lx)\n",
              (ULONG)le32(event->generic.field[0]),
              (ULONG)le32(event->generic.field[1]),
@@ -354,6 +356,9 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
 
     xhci_udev_io_reply_data(udev, req, status, act_len);
     if (req->req.io_Command == CMD_REQUEST_CONTROL && comp == COMP_SHORT_TX)
+        //TODO rework this, we should just keep the TD around until the status stage completes 
+        //instead of special-casing short control transfers here and in the event handler
+        // just remove the request as replied
         xhci_ep_set_receiving_control_short(ep_ctx);
     else
         xhci_ep_set_idle(ep_ctx);

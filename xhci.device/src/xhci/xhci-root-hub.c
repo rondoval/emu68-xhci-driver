@@ -767,7 +767,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 	const u16 wIndex = le16(req->setup.wIndex); // selector | port
 	const u8 portNo = wIndex & 0xffU;
 #ifdef DEBUG_HIGH
-	xhci_roothub_debug_port(rh, portNo - 1);
+	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
@@ -916,7 +916,7 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 	}
 
 #ifdef DEBUG_HIGH
-	xhci_roothub_debug_port(rh, portNo - 1);
+	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
@@ -1031,7 +1031,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	const u8 portNo = wIndex & 0xffU;
 
 #ifdef DEBUG_HIGH
-	xhci_roothub_debug_port(rh, portNo - 1);
+	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
@@ -1098,10 +1098,6 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 					Kprintf("SS port %lu warm reset completed in %ld0ms "
 							"(portsc=%08lx)\n",
 							(ULONG)portNo, (LONG)attempts, (ULONG)temp);
-
-					/* Allow the link partner to stabilise before
-					 * the stack tries ADDRESS_DEVICE. */
-					xhci_roothub_delay_ms(50);
 				}
 			}
 		}
@@ -1111,6 +1107,10 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 			reg |= PORT_RESET;
 			mmio_write32(reg, &port->or_portsc);
 		}
+
+		/* Allow the link partner to stabilise before
+		 * the stack tries ADDRESS_DEVICE. */
+		xhci_roothub_delay_ms(50);
 		break;
 	}
 	case USB_PORT_FEAT_POWER:
