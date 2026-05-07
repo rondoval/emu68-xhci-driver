@@ -27,6 +27,7 @@
 #include <timing.h>
 #include <minlist.h>
 
+#include <config.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-td.h>
 #include <xhci/xhci-root-hub.h>
@@ -496,7 +497,7 @@ static s32 xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	}
 
 	/* Zero'ing IRQ control register and IRQ pending register */
-	mmio_write32(0x0, &ctrl->ir_set->irq_control);
+	mmio_write32(IRQ_INTERVAL & ER_IRQ_INTERVAL_MASK, &ctrl->ir_set->irq_control);
 	mmio_write32(0x0, &ctrl->ir_set->irq_pending);
 
 	u32 reg = HC_VERSION(mmio_read32(&hccr->cr_capbase));

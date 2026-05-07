@@ -29,7 +29,10 @@
 /* Command ring timeout: 5 seconds */
 #define CMD_TIMEOUT_MS 5000
 
-#define RT_ISO_IN_TARGET_TDS 16
-#define XHCI_SEGMENTS_PER_RING 1
+
+/* Minimum interval between interrupts (in 250ns intervals).  The interval
+ * between interrupts will be longer if there are no events on the event ring.
+ * Default is 4000 (1 ms). */
+#define IRQ_INTERVAL 4000
 
 #endif
