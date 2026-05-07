@@ -76,12 +76,27 @@ struct ep_context
     u32 rt_last_filled;
 
     /* RT ISO inflight accounting */
+    u32 rt_inflight_tds_target; /* target number of inflight TDs based on scheduling horizon */
     u32 rt_inflight_bytes;
 
     u32 rt_ist; /* IST decoded to microframes, cached at RT ISO start */
+
+    /* Per-endpoint RT ISO IN staging slab: created in xhci_ep_rt_iso_start for IN
+     * endpoints, object size = max_packet_size, capacity = rt_inflight_tds_target.
+     * Destroyed in xhci_ep_set_rt_stopped and as a safety net in xhci_ep_destroy_contexts. */
+    struct slab_cache iso_in_staging_slab;
+    BOOL iso_in_staging_active;
 };
 
 static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx);
+
+static void xhci_ep_destroy_rt_staging_slab(struct ep_context *ep_ctx)
+{
+    if (!ep_ctx->iso_in_staging_active)
+        return;
+    slab_cache_destroy(&ep_ctx->iso_in_staging_slab);
+    ep_ctx->iso_in_staging_active = FALSE;
+}
 
 BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst, APTR memoryPool)
 {
@@ -99,7 +114,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
     ep_ctx->max_burst = max_burst;
     _NewMinList(&ep_ctx->pending_reqs);
     _NewMinList(&ep_ctx->stop_abort_reqs);
-    ep_ctx->active_tds = xhci_td_create_list(udev->controller);
+    ep_ctx->active_tds = xhci_td_create_list(udev->controller, ep_ctx);
     ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
     {
@@ -147,6 +162,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code)
             }
 
             xhci_ep_clear_stop_processing(ep_ctx);
+            xhci_ep_destroy_rt_staging_slab(ep_ctx);
             ep_ctx->rt_req = NULL;
             ep_ctx->state = USB_DEV_EP_STATE_IDLE;
 
@@ -519,7 +535,7 @@ void xhci_ep_set_rt_interval(struct ep_context *ep_ctx, u8 interval)
 
 #define RT_ISO_SCHED_OFFSET_UFRAMES 32U
 #define RT_ISO_FRAME_MASK 0x7ffU /* Frame ID modulus: 2048 frames */
-#define RT_ISO_UF_MASK 0x3fffU /* microframe modulus: 2048 frames * 8 = 16384 */
+#define RT_ISO_UF_MASK 0x3fffU   /* microframe modulus: 2048 frames * 8 = 16384 */
 #define RT_UFRAME_TO_FRAME(uf) (((uf) >> 3) & RT_ISO_FRAME_MASK)
 
 /* Earliest microframe HW can accept, rounded UP to the next ESIT boundary. */
@@ -565,6 +581,16 @@ inline static void xhci_ep_rt_iso_zero_counters(struct ep_context *ep_ctx)
     ep_ctx->rt_inflight_bytes = 0;
 }
 
+/* Free a staging buffer that was allocated from this endpoint's iso_in_staging_slab.
+ * Falls back to pool_free if the slab is no longer active (edge-case teardown guard). */
+void xhci_ep_free_rt_iso_buffer(struct ep_context *ep_ctx, APTR data_buffer)
+{
+    if (!data_buffer)
+        return;
+    if (ep_ctx && ep_ctx->iso_in_staging_active)
+        slab_free(&ep_ctx->iso_in_staging_slab, data_buffer);
+}
+
 static void xhci_ep_set_rt_stopped(struct ep_context *ep_ctx)
 {
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
@@ -572,6 +598,7 @@ static void xhci_ep_set_rt_stopped(struct ep_context *ep_ctx)
     ep_ctx->rt_last_buffer = NULL;
     ep_ctx->rt_last_filled = 0;
     xhci_ep_rt_iso_zero_counters(ep_ctx);
+    xhci_ep_destroy_rt_staging_slab(ep_ctx);
 }
 
 s8 xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
@@ -770,7 +797,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
     struct USBIORequest *template = ep_ctx->rt_template_req;
 
     u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
-    while (inflight < RT_ISO_IN_TARGET_TDS)
+    while (inflight < ep_ctx->rt_inflight_tds_target)
     {
         /* Same backpressure rule as the OUT path: bail before alloc if no room. */
         if (!xhci_ring_has_room(ep_ctx, 2))
@@ -791,16 +818,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         CopyMem(template, rt_io, sizeof(struct USBIORequest));
         rt_io->driver_private_flags = REQ_RT_ISO_CLONE;
 
-        if (packet_size <= XHCI_ISO_IN_STAGING_SIZE)
-        {
-            rt_io->data_buffer = slab_alloc(&ctrl->iso_in_staging_slab);
-            if (rt_io->data_buffer)
-                rt_io->driver_private_flags |= REQ_RT_IN_BUF_SLABBED;
-        }
-        else
-        {
-            rt_io->data_buffer = pool_alloc(ep_ctx->memoryPool, packet_size);
-        }
+        rt_io->data_buffer = slab_alloc(&ep_ctx->iso_in_staging_slab);
         if (!rt_io->data_buffer)
         {
             Kprintf("Failed to alloc RT ISO staging buffer\n");
@@ -820,10 +838,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                      : xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE);
         if (ret != ERR_NO_ERROR)
         {
-            if (rt_io->driver_private_flags & REQ_RT_IN_BUF_SLABBED)
-                slab_free(&ctrl->iso_in_staging_slab, rt_io->data_buffer);
-            else
-                pool_free(ep_ctx->memoryPool, rt_io->data_buffer);
+            slab_free(&ep_ctx->iso_in_staging_slab, rt_io->data_buffer);
             slab_free(&ctrl->iso_clone_slab, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
@@ -902,6 +917,31 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
     ep_ctx->rt_ist = (ist_raw & 0x8U) ? ((ist_raw & 0x7U) << 3) : (ist_raw & 0x7U);
     ep_ctx->rt_next_uframe = xhci_rt_iso_min_uf(ep_ctx);
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
+
+    const u32 uframes_per_td = ep_ctx->rt_uframes_per_esit ? (u32)ep_ctx->rt_uframes_per_esit : 1U;
+    const u32 target_uframes = RT_ISO_IN_TARGET_FRAMES * 8U;
+    ep_ctx->rt_inflight_tds_target = (target_uframes + uframes_per_td - 1U) / uframes_per_td;
+
+    /* Build the per-endpoint IN staging slab now that we know both the packet size
+     * and the target inflight depth.  OUT endpoints have no staging buffer. */
+    if (ep_ctx->rt_template_req->direction == DIRECTION_IN && ep_ctx->max_packet_size > 0)
+    {
+        slab_cache_init(&ep_ctx->iso_in_staging_slab,
+                        ep_ctx->memoryPool,
+                        ep_ctx->max_packet_size,
+                        DMA_ALIGN_MIN,
+                        ep_ctx->rt_inflight_tds_target);
+        ep_ctx->iso_in_staging_active = TRUE;
+    }
+
+    KprintfH("Starting RT ISO stream: IST=%lu uframes rt_next_uframe=%lu target_ms=%lu target_uframes=%lu uframes_per_td=%lu target_tds=%lu\n",
+             (ULONG)ep_ctx->rt_ist,
+             (ULONG)ep_ctx->rt_next_uframe,
+             (ULONG)RT_ISO_IN_TARGET_FRAMES,
+             (ULONG)target_uframes,
+             (ULONG)uframes_per_td,
+             (ULONG)ep_ctx->rt_inflight_tds_target);
+
     xhci_ep_schedule_rt_iso(ep_ctx);
     return ERR_NO_ERROR;
 }

@@ -563,9 +563,7 @@ struct xhci_scratchpad
 /*
  * Each segment table entry is 4*32bits long.  1K seems like an ok size:
  * (1K bytes * 8bytes/bit) / (4*32 bits) = 64 segment entries in the table,
- * meaning 64 ring segments.
- * Initial allocated size of the ERST, in number of entries */
-#define ERST_NUM_SEGS 1
+ * meaning 64 ring segments. */
 /* Initial number of event segment rings allocated */
 #define ERST_ENTRIES 1
 /* Initial allocated size of the ERST, in number of entries */
@@ -724,16 +722,13 @@ struct xhci_ctrl
 #define XHCI_BOUNCE_MED_CAP        8
 #define XHCI_BOUNCE_LARGE_SIZE     (2 * 1024 * 1024)       /* mass storage 2MB transfers */
 #define XHCI_BOUNCE_LARGE_CAP      2                       /* Poseidon 1 bulk/EP */
-#define XHCI_ISO_CLONE_CAP         64                      /* RT ISO clone IO requests */
-#define XHCI_ISO_IN_STAGING_SIZE   2048                    /* covers up to 24-bit/192kHz audio */
-#define XHCI_ISO_IN_STAGING_CAP    64
+#define XHCI_ISO_CLONE_CAP         320                     /* 32 ms RT ISO target at 1 kHz ESIT plus headroom */
 	struct slab_cache td_slab;            /* one struct xhci_td per slot */
 	struct slab_cache trb_addr_slab;      /* XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t) per slot */
 	struct slab_cache bounce_small;       /* XHCI_BOUNCE_SMALL_SIZE bytes per slot */
 	struct slab_cache bounce_med;         /* XHCI_BOUNCE_MED_SIZE bytes per slot */
 	struct slab_cache bounce_large;       /* XHCI_BOUNCE_LARGE_SIZE bytes per slot */
 	struct slab_cache iso_clone_slab;     /* sizeof(struct USBIORequest) per slot */
-	struct slab_cache iso_in_staging_slab;/* XHCI_ISO_IN_STAGING_SIZE bytes per slot */
 	struct Library *utilityBase;
 	struct pci_dev *pci_dev;
 	BOOL msi_enabled; /* TRUE after EnableMSI + AddIntServer succeed */

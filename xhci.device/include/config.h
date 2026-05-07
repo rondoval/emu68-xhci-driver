@@ -29,6 +29,8 @@
 /* Command ring timeout: 5 seconds */
 #define CMD_TIMEOUT_MS 5000
 
+/* Target RT ISO IN scheduling horizon in ms */
+#define RT_ISO_IN_TARGET_FRAMES 10
 
 /* Minimum interval between interrupts (in 250ns intervals).  The interval
  * between interrupts will be longer if there are no events on the event ring.

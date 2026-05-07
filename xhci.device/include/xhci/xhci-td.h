@@ -17,11 +17,12 @@ typedef struct IOReqNode {
 typedef struct TransferDescriptorList TransferDescriptorList;
 struct xhci_ctrl;
 struct xhci_ring;
+struct ep_context;
 
 void xhci_td_slab_init(struct xhci_ctrl *ctrl);
 void xhci_td_slab_destroy(struct xhci_ctrl *ctrl);
 
-TransferDescriptorList* xhci_td_create_list(struct xhci_ctrl *ctrl);
+TransferDescriptorList* xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx);
 void xhci_td_destroy_list(TransferDescriptorList *td_list, s8 error_code);
 
 BOOL xhci_td_is_empty(TransferDescriptorList *td_list);

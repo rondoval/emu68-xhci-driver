@@ -868,14 +868,14 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 						io->req.io_Command == CMD_REQUEST_ISOCHRONOUS;
 
 	const u32 length = io->data_buffer_length;
-	const u32 isp_for_in = (io->direction == DIRECTION_IN) ? TRB_ISP : 0;
+	const u32 isp_for_in = (io->direction == DIRECTION_IN && !is_iso) ? TRB_ISP : 0;
+
 	/* xHCI 4.11.2.3: only the first TRB in an ISO TD carries the ISOC type and
 	 * iso-specific bits (Frame ID/SIA, TBC, TLBPC). Chain TRBs are NORMAL.
-	 * ISP applies to both ISOC and NORMAL TRBs for IN endpoints. */
+	 */
 	const u32 first_trb_type_bits = (is_iso ? (TRB_TYPE(TRB_ISOC) | iso_extra_bits)
-											: TRB_TYPE(TRB_NORMAL)) |
-									isp_for_in;
-	const u32 chain_trb_type_bits = TRB_TYPE(TRB_NORMAL) | isp_for_in;
+											: TRB_TYPE(TRB_NORMAL));
+	const u32 chain_trb_type_bits = TRB_TYPE(TRB_NORMAL); /* no ISP on chain TRBs */
 
 	u32 running_total = 0;
 	u32 td_trb_index = 0;
@@ -913,7 +913,10 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 		 * Chain all the TRBs together; clear the chain bit in the last
 		 * TRB to indicate it's the last TRB in the chain.
 		 */
-		field3 |= (num_trbs > 1) ? TRB_CHAIN : TRB_IOC;
+		if (num_trbs > 1)
+			field3 |= TRB_CHAIN | isp_for_in;
+		else
+			field3 |= TRB_IOC;
 
 		/* Set the TRB length, TD size, and interrupter fields. */
 		u32 remainder = xhci_td_remainder(running_total, trb_buff_len,

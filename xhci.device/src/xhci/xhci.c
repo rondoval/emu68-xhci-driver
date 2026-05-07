@@ -553,8 +553,6 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 		XHCI_BOUNCE_LARGE_SIZE,     DMA_ALIGN_MIN, XHCI_BOUNCE_LARGE_CAP);
 	slab_cache_init(&ctrl->iso_clone_slab, ctrl->memoryPool,
 		sizeof(struct USBIORequest), DMA_ALIGN_MIN, XHCI_ISO_CLONE_CAP);
-	slab_cache_init(&ctrl->iso_in_staging_slab, ctrl->memoryPool,
-		XHCI_ISO_IN_STAGING_SIZE,   DMA_ALIGN_MIN, XHCI_ISO_IN_STAGING_CAP);
 
 	_NewMinList(&ctrl->pending_commands);
 
@@ -582,7 +580,6 @@ void xhci_deregister(struct xhci_ctrl *ctrl)
 
 	if (ctrl->memoryPool)
 	{
-		slab_cache_destroy(&ctrl->iso_in_staging_slab);
 		slab_cache_destroy(&ctrl->iso_clone_slab);
 		slab_cache_destroy(&ctrl->bounce_large);
 		slab_cache_destroy(&ctrl->bounce_med);

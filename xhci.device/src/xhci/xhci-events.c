@@ -373,10 +373,7 @@ void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, u16 rt_frame, struc
         if (act_len > 0)
             xhci_ep_rt_iso_in(ep_ctx, req, act_len, rt_frame);
 
-        if (req->driver_private_flags & REQ_RT_IN_BUF_SLABBED)
-            slab_free(&ctrl->iso_in_staging_slab, req->data_buffer);
-        else
-            pool_free(ctrl->memoryPool, req->data_buffer);
+        xhci_ep_free_rt_iso_buffer(ep_ctx, req->data_buffer);
     }
     else
         xhci_ep_rt_iso_out(ep_ctx, req, act_len, rt_frame);

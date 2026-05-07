@@ -65,6 +65,7 @@ struct TransferDescriptorList
     APTR memoryPool;
     u32 queued_trbs;
     u32 queued_tds;
+    struct ep_context *ep_ctx; /* back-reference for per-endpoint resource cleanup */
 };
 
 void xhci_td_slab_init(struct xhci_ctrl *ctrl)
@@ -77,7 +78,7 @@ void xhci_td_slab_destroy(struct xhci_ctrl *ctrl)
     slab_cache_destroy(&ctrl->td_slab);
 }
 
-TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
+TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
 {
     TransferDescriptorList *td_list = pool_zalloc(ctrl->memoryPool, sizeof(TransferDescriptorList));
     if (!td_list)
@@ -91,6 +92,7 @@ TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
     td_list->memoryPool = ctrl->memoryPool;
     td_list->queued_trbs = 0;
     td_list->queued_tds = 0;
+    td_list->ep_ctx = ep_ctx;
 
     return td_list;
 }
@@ -348,6 +350,14 @@ static void td_unmap_and_reply(TransferDescriptorList *td_list, struct xhci_td *
 
     if (req && req->data_buffer_length > 0)
         xhci_dma_unmap(td_list->ctrl, req, FALSE);
+
+    /* For RT ISO IN clones, free the staging buffer back to the per-endpoint slab
+     * before handing off to io_reply_failed (which frees the clone IO request). */
+    if (req && (req->driver_private_flags & REQ_RT_ISO_CLONE))
+    {
+        xhci_ep_free_rt_iso_buffer(td_list->ep_ctx, req->data_buffer);
+        req->data_buffer = NULL;
+    }
 
     if (req)
         xhci_udev_io_reply_failed(td_list->ctrl, req, error_code);

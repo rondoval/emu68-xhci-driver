@@ -65,5 +65,7 @@ void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, u32
 
 void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx);
 
+/* Free a staging IN buffer back to the endpoint's per-endpoint slab. */
+void xhci_ep_free_rt_iso_buffer(struct ep_context *ep_ctx, APTR data_buffer);
 
 #endif /* __XHCI_ENDPOINT_H__ */

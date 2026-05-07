@@ -123,7 +123,6 @@ struct usb_hub_descriptor {
 #define REQ_DMA_MAPPED 0x8      /* Request data buffer is DMA mapped */
 #define REQ_HUB_DESC_FETCH 0x10 /* Internal hub descriptor fetch before CONFIG_EP */
 #define REQ_RT_ISO_CLONE 0x40   /* Cloned IO req for RT ISO; pool_free instead of ReplyMsg */
-#define REQ_RT_IN_BUF_SLABBED 0x80 /* RT ISO IN data_buffer came from iso_in_staging_slab */
 
 /* bounce class — which bounce slab the bounce buffer came from (0 = dma_alloc fallback) */
 #define REQ_BOUNCE_CLASS_SHIFT 8
