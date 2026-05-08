@@ -1,12 +1,17 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #include <clib/utility_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
+#define UTILITY_BASE_NAME ep_ctx->udev->controller->utilityBase
 #include <proto/utility.h>
 #endif
 
-#include <compat.h>
+#include <memory.h>
 #include <debug.h>
 #include <config.h>
 #include <minlist.h>
@@ -32,9 +37,10 @@
 struct ep_context
 {
     struct usb_device *udev; /* back reference to device */
-    int ep_index;            /* Endpoint context index (0-30) */
+    u8 ep_index;             /* Endpoint context index (0-30) */
     enum ep_state state;     /* Current endpoint state */
-    int max_packet_size;     /* Cached max packet size for this endpoint */
+    u32 max_packet_size;     /* Cached max packet size for this endpoint */
+    u8 max_burst;            /* bMaxBurst (zero-based: 0 = 1 packet/burst) */
     APTR memoryPool;         /* Memory pool for this endpoint */
 
     IOReqList pending_reqs;             /* list of pending requests */
@@ -57,22 +63,44 @@ struct ep_context
     /* Pending STOPRTISO command to reply once the pipe is fully stopped */
     struct USBIORequest *rt_stop_pending;
 
-    /* RT ISO frame tracking (monotonic frame number modulo 2^16) */
-    ULONG rt_next_frame;
+    /* RT ISO frame tracking. Microframe-resolution to satisfy ESIT rules:
+     *  - ESIT >= 1ms: Frame ID begins on ESIT boundary (xHCI 4.11.2.5).
+     *  - ESIT  < 1ms: all TDs in the same frame share a Frame ID.
+     * rt_next_uframe is the microframe offset for the next TD, mod 16384
+     * (Frame ID is bits 13:3, an 11-bit field). Advance by rt_uframes_per_esit. */
+    u16 rt_uframes_per_esit;
+    u16 rt_next_uframe;
 
     /* Cache the last RT ISO buffer so hooks can omit repeating it */
     APTR rt_last_buffer;
-    ULONG rt_last_filled;
+    u32 rt_last_filled;
 
     /* RT ISO inflight accounting */
-    ULONG rt_inflight_bytes;
+    u32 rt_inflight_tds_target; /* target number of inflight TDs based on scheduling horizon */
+    u32 rt_inflight_bytes;
+
+    u32 rt_ist; /* IST decoded to microframes, cached at RT ISO start */
+
+    /* Per-endpoint RT ISO IN staging slab: created in xhci_ep_rt_iso_start for IN
+     * endpoints, object size = max_packet_size, capacity = rt_inflight_tds_target.
+     * Destroyed in xhci_ep_set_rt_stopped and as a safety net in xhci_ep_destroy_contexts. */
+    struct slab_cache iso_in_staging_slab;
+    BOOL iso_in_staging_active;
 };
 
 static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx);
 
-BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packet_size, APTR memoryPool)
+static void xhci_ep_destroy_rt_staging_slab(struct ep_context *ep_ctx)
 {
-    struct ep_context *ep_ctx = AllocVecPooled(memoryPool, sizeof(struct ep_context));
+    if (!ep_ctx->iso_in_staging_active)
+        return;
+    slab_cache_destroy(&ep_ctx->iso_in_staging_slab);
+    ep_ctx->iso_in_staging_active = FALSE;
+}
+
+BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst, APTR memoryPool)
+{
+    struct ep_context *ep_ctx = pool_zalloc(memoryPool, sizeof(struct ep_context));
     if (!ep_ctx)
     {
         Kprintf("Failed to allocate ep_context for EP %d\n", ep_index);
@@ -83,10 +111,11 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packe
     ep_ctx->memoryPool = memoryPool;
     ep_ctx->state = USB_DEV_EP_STATE_IDLE;
     ep_ctx->max_packet_size = max_packet_size;
+    ep_ctx->max_burst = max_burst;
     _NewMinList(&ep_ctx->pending_reqs);
     _NewMinList(&ep_ctx->stop_abort_reqs);
-    ep_ctx->active_tds = xhci_td_create_list(udev->controller);
-    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
+    ep_ctx->active_tds = xhci_td_create_list(udev->controller, ep_ctx);
+    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_INITIAL_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
     {
         Kprintf("Failed to create resources for EP %d\n", ep_index);
@@ -94,7 +123,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packe
             xhci_td_destroy_list(ep_ctx->active_tds, ERR_ALLOC_ERROR);
         if (ep_ctx->ring)
             xhci_ring_free(udev->controller, ep_ctx->ring);
-        FreeVecPooled(memoryPool, ep_ctx);
+        pool_free(memoryPool, ep_ctx);
         return FALSE;
     }
 
@@ -104,14 +133,14 @@ BOOL xhci_ep_create_context(struct usb_device *udev, int ep_index, int max_packe
     return TRUE;
 }
 
-void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
+void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code)
 {
     for (int i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
     {
         struct ep_context *ep_ctx = udev->ep_context[i];
         if (ep_ctx)
         {
-            KprintfH("tearing down addr %ld EP %ld context, state %ld\n", (LONG)udev->virtual_address, (LONG)i, (LONG)ep_ctx->state);
+            KprintfH("tearing down addr %lu EP %lu context, state %lu\n", (ULONG)udev->virtual_address, (ULONG)i, (ULONG)ep_ctx->state);
             struct MinNode *node;
             while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
             {
@@ -123,7 +152,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
 
             if (ep_ctx->rt_template_req)
             {
-                FreeVecPooled(ep_ctx->memoryPool, ep_ctx->rt_template_req);
+                pool_free(ep_ctx->memoryPool, ep_ctx->rt_template_req);
                 ep_ctx->rt_template_req = NULL;
             }
             if (ep_ctx->rt_stop_pending)
@@ -133,36 +162,47 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, BYTE reply_code)
             }
 
             xhci_ep_clear_stop_processing(ep_ctx);
+            xhci_ep_destroy_rt_staging_slab(ep_ctx);
             ep_ctx->rt_req = NULL;
             ep_ctx->state = USB_DEV_EP_STATE_IDLE;
 
             if (ep_ctx->ring)
                 xhci_ring_free(udev->controller, ep_ctx->ring);
 
-            FreeVecPooled(ep_ctx->memoryPool, ep_ctx);
+            pool_free(ep_ctx->memoryPool, ep_ctx);
             udev->ep_context[i] = NULL;
         }
     }
 }
 
-struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, int ep_index)
+struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, u8 ep_index)
 {
-    if (ep_index < 0 || ep_index >= USB_MAX_ENDPOINT_CONTEXTS)
+    if (ep_index >= USB_MAX_ENDPOINT_CONTEXTS)
     {
-        Kprintf("Invalid endpoint index %ld\n", (LONG)ep_index);
+        Kprintf("Invalid endpoint index %lu\n", (ULONG)ep_index);
         return NULL;
     }
 
     return udev->ep_context[ep_index];
 }
 
-void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, int max_packet_size)
+void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, u32 max_packet_size)
 {
     if (!ep_ctx || !ep_ctx->ring)
         return;
 
     xhci_ring_set_max_packet_size(ep_ctx->ring, max_packet_size);
     ep_ctx->max_packet_size = max_packet_size;
+}
+
+u32 xhci_ep_get_max_packet_size(struct ep_context *ep_ctx)
+{
+    return ep_ctx->max_packet_size;
+}
+
+u8 xhci_ep_get_max_burst(struct ep_context *ep_ctx)
+{
+    return ep_ctx->max_burst;
 }
 
 /*
@@ -175,7 +215,7 @@ void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, int max_packet_size)
 
 void xhci_ep_set_failed(struct ep_context *ep_ctx)
 {
-    Kprintf("EP %ld state %ld -> FAILED\n", (LONG)ep_ctx->ep_index, (LONG)ep_ctx->state);
+    Kprintf("EP %lu state %lu -> FAILED\n", (ULONG)ep_ctx->ep_index, (ULONG)ep_ctx->state);
     ep_ctx->state = USB_DEV_EP_STATE_FAILED;
     xhci_ep_clear_stop_processing(ep_ctx);
     xhci_td_fail_all(ep_ctx->active_tds, ERR_HCI_ERROR);
@@ -191,9 +231,9 @@ void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io)
         AddTailMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
     }
 
-    KprintfH("Ring busy, queued request cmd=%ld ep=%ld\n",
-             (LONG)io->req.io_Command,
-             (LONG)(io->endpoint & 0x0F));
+    KprintfH("Ring busy, queued request cmd=%lu ep=%lu\n",
+             (ULONG)io->req.io_Command,
+             (ULONG)(io->endpoint & 0x0F));
 }
 
 BOOL xhci_ep_has_request(struct ep_context *ep_ctx, struct USBIORequest *io)
@@ -219,11 +259,11 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
     {
         struct USBIORequest *req = (struct USBIORequest *)node;
 
-        KprintfH("starting queued request cmd=%ld ep=%ld\n",
-                 (LONG)req->req.io_Command,
-                 (LONG)(req->endpoint & 0x0F));
+        KprintfH("starting queued request cmd=%lu ep=%lu\n",
+                 (ULONG)req->req.io_Command,
+                 (ULONG)(req->endpoint & 0x0F));
 
-        int err;
+        s8 err;
         if (req->driver_private_flags & REQ_INTERNAL)
             err = xhci_udev_send_ctrl(ep_ctx->udev, req);
         else
@@ -234,6 +274,11 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
             xhci_udev_io_reply_failed(ep_ctx->udev->controller, req, err);
             continue;
         }
+
+        /* If the request was deferred (ring full or ep busy), stop and wait for a
+         * completion to free ring space. xhci_ep_set_idle() will re-enter here. */
+        if ((struct MinNode *)req == ep_ctx->pending_reqs.mlh_Head)
+            break;
 
         /* If the endpoint went idle immediately (e.g. zero-length or error), keep draining */
         if (xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_FAILED)
@@ -252,11 +297,11 @@ void xhci_ep_set_idle(struct ep_context *ep_ctx)
         xhci_ep_schedule_next(ep_ctx);
 }
 
-void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct USBIORequest *req, dma_addr_t *trb_addrs, ULONG timeout_ms, unsigned int trb_count)
+void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct USBIORequest *req, dma_addr_t *trb_addrs, u32 timeout_ms, u32 trb_count)
 {
     if (!trb_addrs || trb_count == 0)
     {
-        Kprintf("Invalid TRB list for EP %ld\n", (LONG)ep_ctx->ep_index);
+        Kprintf("Invalid TRB list for EP %lu\n", (ULONG)ep_ctx->ep_index);
         xhci_ep_set_failed(ep_ctx);
         return;
     }
@@ -285,7 +330,7 @@ void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct USBIORequest *req, 
     if (!result)
     {
         Kprintf("Failed to add TD to active list\n");
-        FreeVecPooled(ep_ctx->memoryPool, trb_addrs);
+        pool_free(ep_ctx->memoryPool, trb_addrs);
         xhci_ep_set_failed(ep_ctx);
         return;
     }
@@ -320,7 +365,7 @@ static BOOL xhci_ep_has_stop_abort_requests(struct ep_context *ep_ctx)
 
 static BOOL xhci_ep_append_stop_abort_request(struct ep_context *ep_ctx, struct USBIORequest *abort_req)
 {
-    IOReqNode *node = AllocVecPooled(ep_ctx->memoryPool, sizeof(*node));
+    IOReqNode *node = pool_alloc(ep_ctx->memoryPool, sizeof(*node));
     if (!node)
         return FALSE;
 
@@ -333,7 +378,7 @@ static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx)
 {
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->stop_abort_reqs)) != NULL)
-        FreeVecPooled(ep_ctx->memoryPool, node);
+        pool_free(ep_ctx->memoryPool, node);
 
     ep_ctx->stop_process_timeouts = FALSE;
 }
@@ -398,7 +443,7 @@ void xhci_ep_request_stop(struct ep_context *ep_ctx)
         state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
         return;
 
-    KprintfH("EP %ld state %ld -> ABORTING (stop requested)\n", (LONG)ep_ctx->ep_index, (LONG)state);
+    KprintfH("EP %lu state %lu -> ABORTING (stop requested)\n", (ULONG)ep_ctx->ep_index, (ULONG)state);
     xhci_ep_set_aborting(ep_ctx);
     xhci_stop_ring(ep_ctx->udev, ep_ctx->ep_index);
 }
@@ -413,7 +458,7 @@ void xhci_ep_process_stop(struct ep_context *ep_ctx, dma_addr_t *deq_ptr)
     if (!xhci_ep_has_stop_abort_requests(ep_ctx) && !ep_ctx->stop_process_timeouts)
         return;
 
-    dma_addr_t stopped_deq_ptr = xhci_get_endpoint_deq_ptr(ep_ctx->udev, ep_ctx->ep_index);
+    dma_addr_t stopped_deq_ptr = (dma_addr_t)xhci_get_endpoint_deq_ptr(ep_ctx->udev, ep_ctx->ep_index);
 
     xhci_td_patch_recovery(ep_ctx->active_tds,
                            ep_ctx->ring,
@@ -429,7 +474,7 @@ enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx)
     return ep_ctx->state;
 }
 
-int xhci_ep_get_ep_index(struct ep_context *ep_ctx)
+u8 xhci_ep_get_ep_index(struct ep_context *ep_ctx)
 {
     return ep_ctx->ep_index;
 }
@@ -459,17 +504,17 @@ struct USBIORequest *xhci_ep_get_by_trb(struct ep_context *ep_ctx, dma_addr_t tr
     return xhci_td_get_by_trb(td_list, trb_addr);
 }
 
-int xhci_ep_get_active_trb_count(struct ep_context *ep_ctx)
+u32 xhci_ep_get_active_trb_count(struct ep_context *ep_ctx)
 {
     return xhci_td_get_queued_trb_count(ep_ctx->active_tds);
 }
 
-inline static int xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
+inline static u32 xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
 {
     return xhci_td_get_queued_td_count(ep_ctx->active_tds);
 }
 
-void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code)
+void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code)
 {
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
@@ -482,6 +527,47 @@ void xhci_ep_flush(struct ep_context *ep_ctx, BYTE reply_code)
 /*
  * RT ISO functions
  */
+void xhci_ep_set_rt_interval(struct ep_context *ep_ctx, u8 interval)
+{
+    /* xHCI EP Context Interval is log2 of microframes-per-ESIT. */
+    ep_ctx->rt_uframes_per_esit = (u16)(1U << interval);
+}
+
+#define RT_ISO_SCHED_OFFSET_UFRAMES 32U
+#define RT_ISO_FRAME_MASK 0x7ffU /* Frame ID modulus: 2048 frames */
+#define RT_ISO_UF_MASK 0x3fffU   /* microframe modulus: 2048 frames * 8 = 16384 */
+#define RT_UFRAME_TO_FRAME(uf) (((uf) >> 3) & RT_ISO_FRAME_MASK)
+
+/* Earliest microframe HW can accept, rounded UP to the next ESIT boundary. */
+static u16 xhci_rt_iso_min_uf(struct ep_context *ep_ctx)
+{
+    u32 mfindex = mmio_read32(&ep_ctx->udev->controller->run_regs->microframe_index);
+    u32 raw = mfindex + ep_ctx->rt_ist + RT_ISO_SCHED_OFFSET_UFRAMES;
+    u32 ivf_mask = (u32)ep_ctx->rt_uframes_per_esit - 1U;
+    return (u16)(((raw + ivf_mask) & ~ivf_mask) & RT_ISO_UF_MASK);
+}
+
+/* If rt_next_uframe has fallen behind the HW window, advance it by whole
+ * ESITs to the next valid slot >= min. Updates rt_next_uframe in place
+ * so the caller's post-submit advance keeps the stream contiguous.
+ * Returns the 11-bit Frame ID for the resulting microframe. */
+static u16 xhci_rt_iso_clamp_frame(struct ep_context *ep_ctx)
+{
+    u16 uf = ep_ctx->rt_next_uframe;
+    u16 min_uf = xhci_rt_iso_min_uf(ep_ctx);
+    /* 14-bit signed delta to handle wraparound. */
+    u16 raw_delta = (u16)(min_uf - uf) & RT_ISO_UF_MASK;
+    s32 delta = (raw_delta >= 0x2000U) ? ((s32)raw_delta - 0x4000) : (s32)raw_delta;
+
+    if (delta > 0)
+    {
+        u32 ivf_mask = (u32)ep_ctx->rt_uframes_per_esit - 1U;
+        u32 advance = ((u32)delta + ivf_mask) & ~ivf_mask;
+        uf = (u16)((uf + advance) & RT_ISO_UF_MASK);
+        ep_ctx->rt_next_uframe = uf;
+    }
+    return RT_UFRAME_TO_FRAME(uf);
+}
 
 inline static void xhci_ep_rt_iso_update_counters(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
@@ -495,6 +581,16 @@ inline static void xhci_ep_rt_iso_zero_counters(struct ep_context *ep_ctx)
     ep_ctx->rt_inflight_bytes = 0;
 }
 
+/* Free a staging buffer that was allocated from this endpoint's iso_in_staging_slab.
+ * Falls back to pool_free if the slab is no longer active (edge-case teardown guard). */
+void xhci_ep_free_rt_iso_buffer(struct ep_context *ep_ctx, APTR data_buffer)
+{
+    if (!data_buffer)
+        return;
+    if (ep_ctx && ep_ctx->iso_in_staging_active)
+        slab_free(&ep_ctx->iso_in_staging_slab, data_buffer);
+}
+
 static void xhci_ep_set_rt_stopped(struct ep_context *ep_ctx)
 {
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPED;
@@ -502,9 +598,10 @@ static void xhci_ep_set_rt_stopped(struct ep_context *ep_ctx)
     ep_ctx->rt_last_buffer = NULL;
     ep_ctx->rt_last_filled = 0;
     xhci_ep_rt_iso_zero_counters(ep_ctx);
+    xhci_ep_destroy_rt_staging_slab(ep_ctx);
 }
 
-BYTE xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
+s8 xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
     if (!req || !ep_ctx)
         return FALSE;
@@ -512,14 +609,14 @@ BYTE xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *
     if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
     {
         /* can only enable RT ISO if EP is idle */
-        Kprintf("EP not idle. Current state: %ld\n", ep_ctx->state);
+        Kprintf("EP not idle. Current state: %lu\n", (ULONG)ep_ctx->state);
         return ERR_HCI_ERROR;
     }
 
     xhci_ep_set_rt_stopped(ep_ctx);
 
     ep_ctx->rt_req = (struct USBRealtimeHooks *)req->data_buffer;
-    ep_ctx->rt_template_req = AllocVecPooled(ep_ctx->memoryPool, sizeof(struct USBIORequest));
+    ep_ctx->rt_template_req = pool_alloc(ep_ctx->memoryPool, sizeof(struct USBIORequest));
     if (!ep_ctx->rt_template_req)
     {
         Kprintf("Failed to allocate memory\n");
@@ -532,17 +629,17 @@ BYTE xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *
     struct USBRealtimeHooks *rt = (struct USBRealtimeHooks *)req->data_buffer;
     if (req->direction == DIRECTION_IN)
     {
-        KprintfH("Added ISO handler: EP %ld in req hook: %lx, in done hook: %lx, prefetch: %ld\n", ep_ctx->ep_index, rt->input_request_hook, rt->input_done_hook, rt->max_output_prefetch);
+        KprintfH("Added ISO handler: EP %lu in req hook: %lx, in done hook: %lx, prefetch: %lu\n", (ULONG)ep_ctx->ep_index, (ULONG)rt->input_request_hook, (ULONG)rt->input_done_hook, (ULONG)rt->max_output_prefetch);
     }
     else
     {
-        KprintfH("Added ISO handler: EP %ld out req hook: %lx, out done hook: %lx, prefetch: %ld\n", ep_ctx->ep_index, rt->output_request_hook, rt->output_done_hook, rt->max_output_prefetch);
+        KprintfH("Added ISO handler: EP %lu out req hook: %lx, out done hook: %lx, prefetch: %lu\n", (ULONG)ep_ctx->ep_index, (ULONG)rt->output_request_hook, (ULONG)rt->output_done_hook, (ULONG)rt->max_output_prefetch);
     }
 #endif
     return ERR_NO_ERROR;
 }
 
-BYTE xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
+s8 xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
     if (!req || !ep_ctx)
     {
@@ -552,7 +649,7 @@ BYTE xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *
 
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
     {
-        Kprintf("EP not in RT_ISO_STOPPED/IDLE state. Current state: %ld\n", ep_ctx->state);
+        Kprintf("EP not in RT_ISO_STOPPED/IDLE state. Current state: %lu\n", (ULONG)ep_ctx->state);
         return ERR_HCI_ERROR;
     }
 
@@ -565,7 +662,7 @@ BYTE xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *
     ep_ctx->rt_req = NULL;
     if (ep_ctx->rt_template_req)
     {
-        FreeVecPooled(ep_ctx->memoryPool, ep_ctx->rt_template_req);
+        pool_free(ep_ctx->memoryPool, ep_ctx->rt_template_req);
         ep_ctx->rt_template_req = NULL;
     }
     xhci_ep_set_idle(ep_ctx);
@@ -573,11 +670,11 @@ BYTE xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *
     return ERR_NO_ERROR;
 }
 
-void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, ULONG act_len)
+void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len, u16 rt_frame)
 {
     /* Pull a destination buffer from the class, copy staged DMA into it, then signal completion. */
     struct USBBufferRequest rt_buffer_req;
-    rt_buffer_req.frame = req->usb_frame;
+    rt_buffer_req.frame = rt_frame;
     rt_buffer_req.flags = 0;
     rt_buffer_req.length = act_len;
     rt_buffer_req.data = NULL;
@@ -586,7 +683,7 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, ULON
 
     if (rt_buffer_req.data)
     {
-        ULONG copy_len = min(act_len, rt_buffer_req.length);
+        u32 copy_len = act_len < rt_buffer_req.length ? act_len : rt_buffer_req.length;
         CopyMem(req->data_buffer, rt_buffer_req.data, copy_len);
         rt_buffer_req.length = copy_len;
 
@@ -596,14 +693,14 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, struct USBIORequest *req, ULON
     xhci_ep_rt_iso_update_counters(ep_ctx, req);
 }
 
-void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, ULONG act_len)
+void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, u32 act_len, u16 rt_frame)
 {
     if (ep_ctx->rt_req->output_done_hook)
     {
         /* OUT path: completion hook only. OutReqHook is before transfer. */
         struct USBBufferRequest rt_buffer_req;
         rt_buffer_req.data = req->data_buffer;
-        rt_buffer_req.frame = req->usb_frame;
+        rt_buffer_req.frame = rt_frame;
         rt_buffer_req.length = act_len;
         rt_buffer_req.flags = 0;
         CallHookPkt(ep_ctx->rt_req->output_done_hook, ep_ctx->rt_req, &rt_buffer_req);
@@ -615,18 +712,32 @@ void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, struct USBIORequest *req, ULO
 static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 {
     struct USBIORequest *template = ep_ctx->rt_template_req;
-    ULONG prefetch_bytes = ep_ctx->rt_req->max_output_prefetch;
+    u32 prefetch_bytes = ep_ctx->rt_req->max_output_prefetch;
+    struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
 
     while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
     {
-        ULONG frame = ep_ctx->rt_next_frame;
-        struct USBIORequest *rt_io = AllocVecPooled(ep_ctx->memoryPool, sizeof(struct USBIORequest));
+        /* Don't enqueue if the ring can't fit one more TRB+spare; try to grow first */
+        if (!xhci_ring_has_room(ep_ctx, 2))
+        {
+            if (!xhci_ring_grow(ctrl, xhci_ep_get_ring(ep_ctx), XHCI_SEGMENTS_PER_RING) ||
+                !xhci_ring_has_room(ep_ctx, 2))
+                break;
+        }
+
+        /* CFC controllers pin Frame ID to a slot; without CFC the HW chooses
+         * via SIA, but we still hand the user hook a monotonic frame counter. */
+        u16 frame = ctrl->cfc_supported
+                        ? xhci_rt_iso_clamp_frame(ep_ctx)
+                        : RT_UFRAME_TO_FRAME(ep_ctx->rt_next_uframe);
+        struct USBIORequest *rt_io = slab_alloc(&ctrl->iso_clone_slab);
         if (!rt_io)
         {
             Kprintf("Failed to alloc RT ISO IO req\n");
             break;
         }
         CopyMem(template, rt_io, sizeof(struct USBIORequest));
+        rt_io->driver_private_flags = REQ_RT_ISO_CLONE;
 
         struct USBBufferRequest rt_buffer_req;
         rt_buffer_req.length = prefetch_bytes;
@@ -645,11 +756,11 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         if (!rt_buffer_req.data || rt_buffer_req.length == 0)
         {
             KprintfH("RT ISO hook provided no buffer/length\n");
-            FreeVecPooled(ep_ctx->memoryPool, rt_io);
+            slab_free(&ctrl->iso_clone_slab, rt_io);
             break;
         }
 
-        ULONG offset = 0;
+        u32 offset = 0;
         if (rt_buffer_req.data == ep_ctx->rt_last_buffer)
         {
             offset = ep_ctx->rt_last_filled;
@@ -660,19 +771,20 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         }
         ep_ctx->rt_last_filled = offset + rt_buffer_req.length;
 
-        rt_io->data_buffer = (APTR)((ULONG)rt_buffer_req.data + offset);
+        rt_io->data_buffer = (APTR)((u8 *)rt_buffer_req.data + offset);
         rt_io->data_buffer_length = rt_buffer_req.length;
-        rt_io->usb_frame = (UWORD)frame;
 
-        int ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
+        s8 ret = ctrl->cfc_supported
+                     ? xhci_ring_enqueue_td_at_frame(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */, frame)
+                     : xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE);
         if (ret != ERR_NO_ERROR)
         {
-            FreeVecPooled(ep_ctx->memoryPool, rt_io);
+            slab_free(&ctrl->iso_clone_slab, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
 
-        ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
+        ep_ctx->rt_next_uframe = (u16)(((u32)ep_ctx->rt_next_uframe + ep_ctx->rt_uframes_per_esit) & RT_ISO_UF_MASK);
         ep_ctx->rt_inflight_bytes += rt_io->data_buffer_length;
         KprintfH("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -687,28 +799,41 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 {
     struct USBIORequest *template = ep_ctx->rt_template_req;
+    struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
 
-    int inflight = xhci_ep_get_active_td_count(ep_ctx);
-    while (inflight < RT_ISO_IN_TARGET_TDS)
+    u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
+    while (inflight < ep_ctx->rt_inflight_tds_target)
     {
-        ULONG frame = ep_ctx->rt_next_frame;
-        struct USBIORequest *rt_io = AllocVecPooled(ep_ctx->memoryPool, sizeof(struct USBIORequest));
+        /* Same backpressure rule as the OUT path: bail before alloc if no room. */
+        if (!xhci_ring_has_room(ep_ctx, 2))
+        {
+            if (!xhci_ring_grow(ctrl, xhci_ep_get_ring(ep_ctx), XHCI_SEGMENTS_PER_RING) ||
+                !xhci_ring_has_room(ep_ctx, 2))
+                break;
+        }
+
+        u16 frame = ctrl->cfc_supported
+                        ? xhci_rt_iso_clamp_frame(ep_ctx)
+                        : RT_UFRAME_TO_FRAME(ep_ctx->rt_next_uframe);
+        const u32 packet_size = ep_ctx->max_packet_size;
+
+        struct USBIORequest *rt_io = slab_alloc(&ctrl->iso_clone_slab);
         if (!rt_io)
         {
             Kprintf("Failed to alloc RT ISO IO req\n");
             break;
         }
         CopyMem(template, rt_io, sizeof(struct USBIORequest));
+        rt_io->driver_private_flags = REQ_RT_ISO_CLONE;
 
-        rt_io->data_buffer = AllocVecPooled(ep_ctx->memoryPool, ep_ctx->max_packet_size);
+        rt_io->data_buffer = slab_alloc(&ep_ctx->iso_in_staging_slab);
         if (!rt_io->data_buffer)
         {
             Kprintf("Failed to alloc RT ISO staging buffer\n");
-            FreeVecPooled(ep_ctx->memoryPool, rt_io);
+            slab_free(&ctrl->iso_clone_slab, rt_io);
             break;
         }
-        rt_io->data_buffer_length = ep_ctx->max_packet_size;
-        rt_io->usb_frame = (UWORD)frame;
+        rt_io->data_buffer_length = packet_size;
 
         KprintfH("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -716,17 +841,19 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
                  (ULONG)ep_ctx->rt_inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
-        int ret = xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */);
+        s8 ret = ctrl->cfc_supported
+                     ? xhci_ring_enqueue_td_at_frame(ep_ctx->udev, rt_io, 0, TRUE /* RT ISO defers doorbell to per-run giveback */, frame)
+                     : xhci_ring_enqueue_td(ep_ctx->udev, rt_io, 0, TRUE);
         if (ret != ERR_NO_ERROR)
         {
-            FreeVecPooled(ep_ctx->memoryPool, rt_io->data_buffer);
-            FreeVecPooled(ep_ctx->memoryPool, rt_io);
+            slab_free(&ep_ctx->iso_in_staging_slab, rt_io->data_buffer);
+            slab_free(&ctrl->iso_clone_slab, rt_io);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
         ++inflight;
 
-        ep_ctx->rt_next_frame = (frame + 1) & 0xffff;
+        ep_ctx->rt_next_uframe = (u16)(((u32)ep_ctx->rt_next_uframe + ep_ctx->rt_uframes_per_esit) & RT_ISO_UF_MASK);
         ep_ctx->rt_inflight_bytes += rt_io->data_buffer_length;
         KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
@@ -783,7 +910,7 @@ void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx)
         xhci_ep_schedule_rt_iso_out(ep_ctx);
 }
 
-BYTE xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
+s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
 {
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
     {
@@ -791,14 +918,43 @@ BYTE xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
         return ERR_HCI_ERROR;
     }
 
-    /* microframe_index is in 125us units; for FS frames use the frame number (divide by 8). */
-    ep_ctx->rt_next_frame = (readl(ep_ctx->udev->controller->run_regs->microframe_index) >> 3) & 0xffff;
+    /* HCSPARAMS2.IST is 4 bits (xHCI 5.3.6): bit 3 selects the unit of bits[2:0]
+     * — 0 = microframes (0..7), 1 = frames (0..7, i.e. 0..56 microframes).
+     * Normalize to microframes once so users can add to MFINDEX directly. */
+    u32 ist_raw = HCS_IST(mmio_read32(&ep_ctx->udev->controller->hccr->cr_hcsparams2));
+    ep_ctx->rt_ist = (ist_raw & 0x8U) ? ((ist_raw & 0x7U) << 3) : (ist_raw & 0x7U);
+    ep_ctx->rt_next_uframe = xhci_rt_iso_min_uf(ep_ctx);
     ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_RUNNING;
+
+    const u32 uframes_per_td = ep_ctx->rt_uframes_per_esit ? (u32)ep_ctx->rt_uframes_per_esit : 1U;
+    const u32 target_uframes = RT_ISO_IN_TARGET_FRAMES * 8U;
+    ep_ctx->rt_inflight_tds_target = (target_uframes + uframes_per_td - 1U) / uframes_per_td;
+
+    /* Build the per-endpoint IN staging slab now that we know both the packet size
+     * and the target inflight depth.  OUT endpoints have no staging buffer. */
+    if (ep_ctx->rt_template_req->direction == DIRECTION_IN && ep_ctx->max_packet_size > 0)
+    {
+        slab_cache_init(&ep_ctx->iso_in_staging_slab,
+                        ep_ctx->memoryPool,
+                        ep_ctx->max_packet_size,
+                        DMA_ALIGN_MIN,
+                        ep_ctx->rt_inflight_tds_target);
+        ep_ctx->iso_in_staging_active = TRUE;
+    }
+
+    KprintfH("Starting RT ISO stream: IST=%lu uframes rt_next_uframe=%lu target_ms=%lu target_uframes=%lu uframes_per_td=%lu target_tds=%lu\n",
+             (ULONG)ep_ctx->rt_ist,
+             (ULONG)ep_ctx->rt_next_uframe,
+             (ULONG)RT_ISO_IN_TARGET_FRAMES,
+             (ULONG)target_uframes,
+             (ULONG)uframes_per_td,
+             (ULONG)ep_ctx->rt_inflight_tds_target);
+
     xhci_ep_schedule_rt_iso(ep_ctx);
     return ERR_NO_ERROR;
 }
 
-BYTE xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIORequest *req)
+s8 xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
@@ -827,9 +983,9 @@ BYTE xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIORequest *req)
     }
     else
     {
-        KprintfH("RT ISO stopping addr=%ld ep=%ld inflight_tds=%lu inflight_bytes=%lu\n",
-                 (LONG)req->virtual_address,
-                 (LONG)ep_ctx->ep_index,
+        KprintfH("RT ISO stopping addr=%lu ep=%lu inflight_tds=%lu inflight_bytes=%lu\n",
+                 (ULONG)req->virtual_address,
+                 (ULONG)ep_ctx->ep_index,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx),
                  (ULONG)ep_ctx->rt_inflight_bytes);
         ep_ctx->state = USB_DEV_EP_STATE_RT_ISO_STOPPING;

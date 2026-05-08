@@ -1,15 +1,16 @@
-// SPDX-License-Identifier: GPL-2.0+
+// SPDX-License-Identifier: GPL-2.0-only
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #include <clib/timer_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
 #include <proto/timer.h>
 #endif
 
 #include <dos/dos.h>
 
-#include <compat.h>
 #include <device.h>
 #include <minlist.h>
 #include <debug.h>
@@ -25,7 +26,13 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     // Initialize the built in msg port, we'll receive commands here
     _NewMinList((struct MinList *)&unit->unit.unit_MsgPort.mp_MsgList);
     unit->unit.unit_MsgPort.mp_SigTask = FindTask(NULL);
-    unit->unit.unit_MsgPort.mp_SigBit = AllocSignal(-1);
+    BYTE msg_sigbit = AllocSignal(-1);
+    if (msg_sigbit == -1)
+    {
+        Kprintf("[xhci] %s: Failed to allocate message signal\n", __func__);
+        goto free_signals;
+    }
+    unit->unit.unit_MsgPort.mp_SigBit = (UBYTE)msg_sigbit;
     unit->unit.unit_MsgPort.mp_Flags = PA_SIGNAL;
     unit->unit.unit_MsgPort.mp_Node.ln_Type = NT_MSGPORT;
 
@@ -46,14 +53,14 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
         goto free_ports;
     }
 
-    UBYTE ret = OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, (struct IORequest *)packetTimerReq, LIB_MIN_VERSION);
+    LONG ret = OpenDevice((CONST_STRPTR)TIMERNAME, UNIT_MICROHZ, (struct IORequest *)packetTimerReq, LIB_MIN_VERSION);
     if (ret)
     {
         Kprintf("[xhci] %s: Failed to open timer device ret=%ld\n", __func__, ret);
         goto free_ports;
     }
 
-    const ULONG delay = UNIT_TASK_POLL_DELAY_MS * 1000;
+    const u32 delay = UNIT_TASK_POLL_DELAY_MS * 1000;
 
     // Set a timer... we need to pull on RX
     packetTimerReq->tr_node.io_Command = TR_ADDREQUEST;
@@ -65,7 +72,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
     /* Signal parent that Unit task is up and running now */
     Signal(parent, SIGBREAKF_CTRL_F);
 
-    Kprintf("[xhci] %s: Entering main unit task loop\n", __func__);
+    KprintfH("[xhci] %s: Entering main unit task loop\n", __func__);
 
     ULONG sigset;
     ULONG waitMask = (1UL << unit->unit.unit_MsgPort.mp_SigBit) |
@@ -99,9 +106,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
         if (sigset & (1UL << microHZTimerPort->mp_SigBit))
         {
             if (CheckIO(&packetTimerReq->tr_node))
-            {
                 WaitIO(&packetTimerReq->tr_node);
-            }
 
             xhci_process_command_timeouts(unit->xhci_ctrl);
             xhci_process_event_timeouts(unit->xhci_ctrl);
@@ -115,7 +120,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 
         if (sigset & SIGBREAKF_CTRL_C)
         {
-            Kprintf("[xhci] %s: Received SIGBREAKF_CTRL_C, stopping xhci task\n", __func__);
+            KprintfH("[xhci] %s: Received SIGBREAKF_CTRL_C, stopping xhci task\n", __func__);
             AbortIO(&packetTimerReq->tr_node);
             WaitIO(&packetTimerReq->tr_node);
         }
@@ -127,15 +132,15 @@ free_ports:
     DeleteMsgPort(microHZTimerPort);
 free_signals:
     FreeSignal(unit->irq_signal);
-    FreeSignal(unit->unit.unit_MsgPort.mp_SigBit);
+    FreeSignal((BYTE)unit->unit.unit_MsgPort.mp_SigBit);
 
     Signal(parent, SIGBREAKF_CTRL_C);
     unit->task = NULL;
 }
 
-int UnitTaskStart(struct XHCIUnit *unit)
+s32 UnitTaskStart(struct XHCIUnit *unit)
 {
-    Kprintf("[xhci] %s: xhci task starting\n", __func__);
+    KprintfH("[xhci] %s: xhci task starting\n", __func__);
 
     // Get all memory we need for the receiver task
     struct MemList *ml = AllocMem(sizeof(struct MemList) + sizeof(struct MemEntry), MEMF_PUBLIC | MEMF_CLEAR);
@@ -190,19 +195,29 @@ int UnitTaskStart(struct XHCIUnit *unit)
         return ERR_HCI_ERROR;
     }
 
-    Wait(SIGBREAKF_CTRL_F);
-    Kprintf("[xhci] %s: xhci task started\n", __func__);
+    ULONG sig = Wait(SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C);
+    if (sig & SIGBREAKF_CTRL_C)    {
+        Kprintf("[xhci] %s: xhci task failed to start\n", __func__);
+        FreeMem(ml, sizeof(struct MemList) + sizeof(struct MemEntry));
+        FreeMem(task, sizeof(struct Task));
+        FreeMem(&stack[0], STACK_SIZE);
+        return ERR_HCI_ERROR;
+    }
+    KprintfH("[xhci] %s: xhci task started\n", __func__);
     return ERR_NO_ERROR;
 }
 
 void UnitTaskStop(struct XHCIUnit *unit)
 {
-    Kprintf("[xhci] %s: xhci task stopping\n", __func__);
+    if (!unit->task)
+        return;
+
+    KprintfH("[xhci] %s: xhci task stopping\n", __func__);
 
     struct MsgPort *timerPort = CreateMsgPort();
     struct timerequest *timerReq = CreateIORequest(timerPort, sizeof(struct timerequest));
 
-    if (timerPort != NULL && timerReq != NULL)
+    if (timerPort && timerReq)
     {
         BYTE result = OpenDevice((CONST_STRPTR) "timer.device", UNIT_VBLANK, (struct IORequest *)timerReq, LIB_MIN_VERSION);
         if (result != NULL)
@@ -213,19 +228,26 @@ void UnitTaskStop(struct XHCIUnit *unit)
     }
 
     Signal(unit->task, SIGBREAKF_CTRL_C);
-    do
+    while (unit->task != NULL)
     {
-        timerReq->tr_node.io_Command = TR_ADDREQUEST;
-        timerReq->tr_time.tv_secs = 0;
-        timerReq->tr_time.tv_micro = 250000;
-        DoIO(&timerReq->tr_node);
-    } while (unit->task != NULL);
+        if (timerPort && timerReq)
+        {
+            timerReq->tr_node.io_Command = TR_ADDREQUEST;
+            timerReq->tr_time.tv_secs = 0;
+            timerReq->tr_time.tv_micro = 250000;
+            DoIO(&timerReq->tr_node);
+        }
+    }
 
-    SetSignal(0UL, SIGBREAKF_CTRL_F);
+    SetSignal(0UL, SIGBREAKF_CTRL_F | SIGBREAKF_CTRL_C);
 
-    CloseDevice(&timerReq->tr_node);
-    DeleteIORequest(&timerReq->tr_node);
-    DeleteMsgPort(timerPort);
+    if (timerReq)
+    {
+        CloseDevice(&timerReq->tr_node);
+        DeleteIORequest(&timerReq->tr_node);
+    }
+    if (timerPort)
+        DeleteMsgPort(timerPort);
 
-    Kprintf("[xhci] %s: xhci task stopped\n", __func__);
+    KprintfH("[xhci] %s: xhci task stopped\n", __func__);
 }

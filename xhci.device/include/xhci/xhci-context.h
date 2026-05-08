@@ -1,7 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef __XHCI_CONTEXT_H
 #define __XHCI_CONTEXT_H
 
-#include <compat.h>
+#include <types.h>
+#include <bits.h>
 
 /**
  * struct xhci_container_ctx
@@ -14,11 +17,11 @@
  */
 struct xhci_container_ctx
 {
-	unsigned type;
+	u32 type;
 #define XHCI_CTX_TYPE_DEVICE 0x1
 #define XHCI_CTX_TYPE_INPUT 0x2
 
-	int size;
+	u32 size;
 	u8 *bytes;
 };
 
@@ -45,31 +48,31 @@ struct xhci_slot_ctx
 
 /* dev_info bitmasks */
 /* Route String - 0:19 */
-#define ROUTE_STRING_MASK (0xfffff)
+#define ROUTE_STRING_MASK (0xfffffU)
 /* Device speed - values defined by PORTSC Device Speed field - 20:23 */
-#define DEV_SPEED (0xf << 20)
+#define DEV_SPEED (0xfU << 20)
 /* bit 24 reserved */
 /* Is this LS/FS device connected through a HS hub? - bit 25 */
-#define DEV_MTT (0x1 << 25)
+#define DEV_MTT (0x1U << 25)
 /* Set if the device is a hub - bit 26 */
-#define DEV_HUB (0x1 << 26)
+#define DEV_HUB (0x1U << 26)
 /* Index of the last valid endpoint context in this device context - 27:31 */
-#define LAST_CTX_MASK (0x1f << 27)
-#define LAST_CTX(p) ((p) << 27)
+#define LAST_CTX_MASK (0x1fU << 27)
+#define LAST_CTX(p) ((u32)(p) << 27)
 #define LAST_CTX_TO_EP_NUM(p) (((p) >> 27) - 1)
-#define SLOT_FLAG (1 << 0)
-#define EP0_FLAG (1 << 1)
+#define SLOT_FLAG BIT(0)
+#define EP0_FLAG BIT(1)
 
 /* dev_info2 bitmasks */
-/* Max Exit Latency (ms) - worst case time to wake up all links in dev path */
-#define MAX_EXIT (0xffff)
+/* Max Exit Latency (µs) - worst case time to wake up all links in dev path */
+#define MAX_EXIT (0xffffU)
 /* Root hub port number that is needed to access the USB device */
-#define ROOT_HUB_PORT(p) (((p) & 0xff) << 16)
-#define ROOT_HUB_PORT_MASK (0xff)
+#define ROOT_HUB_PORT(p) (((u32)(p) & 0xffU) << 16)
+#define ROOT_HUB_PORT_MASK (0xffU)
 #define ROOT_HUB_PORT_SHIFT (16)
 #define DEVINFO_TO_ROOT_HUB_PORT(p) (((p) >> 16) & 0xff)
 /* Maximum number of ports under a hub device */
-#define XHCI_MAX_PORTS(p) (((p) & 0xff) << 24)
+#define XHCI_MAX_PORTS(p) (((u32)(p) & 0xffU) << 24)
 
 /* tt_info bitmasks */
 /*
@@ -77,21 +80,21 @@ struct xhci_slot_ctx
  * The Slot ID of the hub that isolates the high speed signaling from
  * this low or full-speed device.  '0' if attached to root hub port.
  */
-#define TT_SLOT(p) (((p) & 0xff) << 0)
+#define TT_SLOT(p) (((u32)(p) & 0xffU) << 0)
 /*
  * The number of the downstream facing port of the high-speed hub
  * '0' if the device is not low or full speed.
  */
-#define TT_PORT(p) (((p) & 0xff) << 8)
-#define TT_THINK_TIME(p) (((p) & 0x3) << 16)
+#define TT_PORT(p) (((u32)(p) & 0xffU) << 8)
+#define TT_THINK_TIME(p) (((u32)(p) & 0x3U) << 16)
 
 /* dev_state bitmasks */
 /* USB device address - assigned by the HC */
-#define DEV_ADDR_MASK (0xff)
+#define DEV_ADDR_MASK (0xffU)
 /* bits 8:26 reserved */
 /* Slot state */
-#define SLOT_STATE (0x1f << 27)
-#define GET_SLOT_STATE(p) (((p) & (0x1f << 27)) >> 27)
+#define SLOT_STATE (0x1fU << 27)
+#define GET_SLOT_STATE(p) (((p) & (0x1fU << 27)) >> 27)
 
 #define SLOT_STATE_DISABLED 0
 #define SLOT_STATE_ENABLED SLOT_STATE_DISABLED
@@ -144,28 +147,28 @@ struct xhci_ep_ctx
 #define EP_STATE_STOPPED 3
 #define EP_STATE_ERROR 4
 /* Mult - Max number of burtst within an interval, in EP companion desc. */
-#define EP_MULT(p) (((p) & 0x3) << 8)
+#define EP_MULT(p) (((u32)(p) & 0x3U) << 8)
 #define CTX_TO_EP_MULT(p) (((p) >> 8) & 0x3)
 /* bits 10:14 are Max Primary Streams */
 /* bit 15 is Linear Stream Array */
 /* Interval - period between requests to an endpoint - 125u increments. */
-#define EP_INTERVAL(p) (((p) & 0xff) << 16)
+#define EP_INTERVAL(p) (((u32)(p) & 0xffU) << 16)
 #define EP_INTERVAL_TO_UFRAMES(p) (1 << (((p) >> 16) & 0xff))
 #define CTX_TO_EP_INTERVAL(p) (((p) >> 16) & 0xff)
-#define EP_MAXPSTREAMS_MASK (0x1f << 10)
-#define EP_MAXPSTREAMS(p) (((p) << 10) & EP_MAXPSTREAMS_MASK)
+#define EP_MAXPSTREAMS_MASK (0x1fU << 10)
+#define EP_MAXPSTREAMS(p) (((u32)(p) << 10) & EP_MAXPSTREAMS_MASK)
 /* Endpoint is set up with a Linear Stream Array (vs. Secondary Stream Array) */
-#define EP_HAS_LSA (1 << 15)
+#define EP_HAS_LSA BIT(15)
 
 /* ep_info2 bitmasks */
 /*
  * Force Event - generate transfer events for all TRBs for this endpoint
  * This will tell the HC to ignore the IOC and ISP flags (for debugging only).
  */
-#define FORCE_EVENT (0x1)
-#define ERROR_COUNT(p) (((p) & 0x3) << 1)
+#define FORCE_EVENT (0x1U)
+#define ERROR_COUNT(p) (((u32)(p) & 0x3U) << 1)
 #define CTX_TO_EP_TYPE(p) (((p) >> 3) & 0x7)
-#define EP_TYPE(p) ((p) << 3)
+#define EP_TYPE(p) ((u32)(p) << 3)
 #define ISOC_OUT_EP 1
 #define BULK_OUT_EP 2
 #define INT_OUT_EP 3
@@ -175,7 +178,7 @@ struct xhci_ep_ctx
 #define INT_IN_EP 7
 /* bit 6 reserved */
 /* bit 7 is Host Initiate Disable - for disabling stream selection */
-#define MAX_BURST(p) (((p) & 0xff) << 8)
+#define MAX_BURST(p) (((u32)(p) & 0xffU) << 8)
 #define CTX_TO_MAX_BURST(p) (((p) >> 8) & 0xff)
 #define MAX_PACKET(p) (((p) & 0xffff) << 16)
 #define MAX_PACKET_MASK (0xffff)
@@ -193,7 +196,7 @@ struct xhci_ep_ctx
 #define CTX_TO_MAX_ESIT_PAYLOAD(p) (((p) >> 16) & 0xffff)
 
 /* deq bitmasks */
-#define EP_CTX_CYCLE_MASK (1 << 0)
+#define EP_CTX_CYCLE_MASK BIT(0)
 
 /* reserved[0] bitmasks, MediaTek xHCI used */
 #define EP_BPKTS(p) (((p) & 0x7f) << 0)
@@ -215,19 +218,19 @@ struct xhci_input_control_ctx
 	__le32 rsvd2[6];
 };
 
-struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, int type);
+struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 type);
 void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx);
 
 u32 xhci_get_hardware_address(struct usb_device *udev);
-u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, unsigned int ep_index);
+u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, u8 ep_index);
 
 void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
 
-void xhci_update_maxpacket(struct usb_device *udev, unsigned int max_packet_size);
-int xhci_set_configuration(struct usb_device *udev, int config_value);
-int xhci_set_interface(struct usb_device *udev, unsigned int iface_number, unsigned int alt_setting);
+void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size);
+s8 xhci_set_configuration(struct usb_device *udev, u32 config_value);
+s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting);
 
-void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, UBYTE ep_index);
+void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, u8 ep_index);
 void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx);
 
 #endif /* __XHCI_CONTEXT_H */

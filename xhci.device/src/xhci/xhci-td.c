@@ -1,12 +1,18 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
 #endif
 
 #include <exec/errors.h>
 
 #include <device.h>
+#include <memory.h>
+#include <timing.h>
 #include <xhci/xhci-descriptors.h>
 #include <xhci/xhci-context.h>
 #include <xhci/xhci-endpoint.h>
@@ -28,16 +34,27 @@
 #define KprintfH(fmt, ...) PrintPistorm("[xhci-td] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
+static inline void xhci_copy_from_bounce_buffer(CONST_APTR src, APTR dst, u32 size)
+{
+    if ((((uintptr_t)src | (uintptr_t)dst | size) & (sizeof(ULONG) - 1)) == 0)
+    {
+        CopyMemQuick((ULONG *)src, (ULONG *)dst, size);
+        return;
+    }
+
+    CopyMem(src, dst, size);
+}
+
 struct xhci_td
 {
     struct MinNode node;       /* linkage in active TD list */
     struct USBIORequest *req;  /* owning request */
     dma_addr_t completion_trb; /* TRB address we expect a completion for */
-    ULONG length;              /* total length for completion accounting */
+    u32 length;                /* total length for completion accounting */
     BOOL deadline_active;      /* true if deadline_us is valid */
-    ULONG deadline_us;         /* absolute deadline in usec, 0 means no timeout */
+    u32 deadline_us;           /* absolute deadline in usec, 0 means no timeout */
     BOOL is_rt_iso;            /* true if this TD is part of RT ISO pipeline */
-    UWORD trb_count;           /* number of TRBs consumed by this TD */
+    u32 trb_count;             /* number of TRBs consumed by this TD */
     dma_addr_t *trb_addrs;     /* DMA addresses for every TRB in this TD */
 };
 
@@ -46,13 +63,24 @@ struct TransferDescriptorList
     struct MinList list;
     struct xhci_ctrl *ctrl;
     APTR memoryPool;
-    ULONG queued_trbs;
-    ULONG queued_tds;
+    u32 queued_trbs;
+    u32 queued_tds;
+    struct ep_context *ep_ctx; /* back-reference for per-endpoint resource cleanup */
 };
 
-TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
+void xhci_td_slab_init(struct xhci_ctrl *ctrl)
 {
-    TransferDescriptorList *td_list = AllocVecPooled(ctrl->memoryPool, sizeof(TransferDescriptorList));
+    slab_cache_init(&ctrl->td_slab, ctrl->memoryPool, sizeof(struct xhci_td), DMA_ALIGN_MIN, 2048);
+}
+
+void xhci_td_slab_destroy(struct xhci_ctrl *ctrl)
+{
+    slab_cache_destroy(&ctrl->td_slab);
+}
+
+TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
+{
+    TransferDescriptorList *td_list = pool_zalloc(ctrl->memoryPool, sizeof(TransferDescriptorList));
     if (!td_list)
     {
         Kprintf("Failed to alloc TransferDescriptorList\n");
@@ -64,18 +92,19 @@ TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl)
     td_list->memoryPool = ctrl->memoryPool;
     td_list->queued_trbs = 0;
     td_list->queued_tds = 0;
+    td_list->ep_ctx = ep_ctx;
 
     return td_list;
 }
 
-void xhci_td_destroy_list(TransferDescriptorList *td_list, UBYTE error_code)
+void xhci_td_destroy_list(TransferDescriptorList *td_list, s8 error_code)
 {
     if (!td_list)
         return;
 
     xhci_td_fail_all(td_list, error_code);
 
-    FreeVecPooled(td_list->memoryPool, td_list);
+    pool_free(td_list->memoryPool, td_list);
 }
 
 BOOL xhci_td_is_empty(TransferDescriptorList *td_list)
@@ -90,7 +119,7 @@ BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
     if (!td_list)
         return FALSE;
 
-    ULONG now = get_time();
+    u32 now = get_time();
 
     struct MinNode *n = td_list->list.mlh_Head;
     while (n && n->mln_Succ)
@@ -110,7 +139,7 @@ BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
     return FALSE;
 }
 
-ULONG xhci_td_get_queued_trb_count(TransferDescriptorList *td_list)
+u32 xhci_td_get_queued_trb_count(TransferDescriptorList *td_list)
 {
     if (!td_list)
         return 0;
@@ -118,7 +147,7 @@ ULONG xhci_td_get_queued_trb_count(TransferDescriptorList *td_list)
     return td_list->queued_trbs;
 }
 
-ULONG xhci_td_get_queued_td_count(TransferDescriptorList *td_list)
+u32 xhci_td_get_queued_td_count(TransferDescriptorList *td_list)
 {
     if (!td_list)
         return 0;
@@ -128,22 +157,20 @@ ULONG xhci_td_get_queued_td_count(TransferDescriptorList *td_list)
 
 static struct xhci_td *td_create(TransferDescriptorList *td_list,
                                  struct USBIORequest *io_req,
-                                 ULONG timeout_ms,
+                                 u32 timeout_ms,
                                  BOOL is_rt_iso,
                                  dma_addr_t *trb_addresses,
-                                 ULONG trb_count)
+                                 u32 trb_count)
 {
     if (!td_list)
         return NULL;
 
-    struct xhci_td *td = AllocVecPooled(td_list->memoryPool, sizeof(struct xhci_td));
+    struct xhci_td *td = slab_zalloc(&td_list->ctrl->td_slab);
     if (!td)
     {
         Kprintf("Failed to alloc xhci_td\n");
         return NULL;
     }
-
-    _memset(td, 0, sizeof(struct xhci_td));
 
     td->req = io_req;
 
@@ -164,10 +191,10 @@ static struct xhci_td *td_create(TransferDescriptorList *td_list,
 
 BOOL xhci_td_add(TransferDescriptorList *td_list,
                  struct USBIORequest *io_req,
-                 ULONG timeout_ms,
+                 u32 timeout_ms,
                  BOOL is_rt_iso,
                  dma_addr_t *trb_addresses,
-                 ULONG trb_count)
+                 u32 trb_count)
 {
     if (!td_list)
         return FALSE;
@@ -202,7 +229,7 @@ static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_
 
         if (td->trb_addrs)
         {
-            for (unsigned int i = 0; i < td->trb_count; i++)
+            for (u32 i = 0; i < td->trb_count; i++)
             {
                 if (td->trb_addrs[i] == trb_addr)
                     return td;
@@ -234,7 +261,7 @@ inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct USBIORequest *r
         return;
 
     APTR addr = req->data_buffer;
-    ULONG size = req->data_buffer_length;
+    u32 size = req->data_buffer_length;
     if (!addr || size == 0)
         return;
 
@@ -248,18 +275,25 @@ inline static void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct USBIORequest *r
     APTR bounce = (APTR)req->driver_private_dma_address;
     if (!bounce)
     {
-        Kprintf("No bounce buffer found for unmap of %lx len=%ld\n", (ULONG)addr, (LONG)size);
+        Kprintf("No bounce buffer found for unmap of %lx len=%lu\n", (ULONG)addr, (ULONG)size);
         return;
     }
 
     if (copy)
     {
         xhci_inval_cache(bounce, size);
-        CopyMem(bounce, addr, size);
+        xhci_copy_from_bounce_buffer(bounce, addr, size);
     }
 
-    memalign_free(ctrl->memoryPool, bounce);
-    req->driver_private_flags &= ~REQ_DMA_MAPPED;
+    u32 bounce_class = (req->driver_private_flags & REQ_BOUNCE_CLASS_MASK) >> REQ_BOUNCE_CLASS_SHIFT;
+    switch (bounce_class)
+    {
+    case REQ_BOUNCE_CLASS_SMALL: slab_free(&ctrl->bounce_small, bounce); break;
+    case REQ_BOUNCE_CLASS_MED:   slab_free(&ctrl->bounce_med,   bounce); break;
+    case REQ_BOUNCE_CLASS_LARGE: slab_free(&ctrl->bounce_large, bounce); break;
+    default:                     dma_free(ctrl->memoryPool,     bounce); break;
+    }
+    req->driver_private_flags &= (u32)~(REQ_DMA_MAPPED | REQ_BOUNCE_CLASS_MASK);
     req->driver_private_dma_address = NULL;
 }
 
@@ -267,11 +301,14 @@ static void xhci_td_free(TransferDescriptorList *td_list, struct xhci_td *td)
 {
     if (td->trb_addrs)
     {
-        FreeVecPooled(td_list->memoryPool, td->trb_addrs);
+        if (td->trb_count <= XHCI_TD_SMALL_TRBS)
+            slab_free(&td_list->ctrl->trb_addr_slab, td->trb_addrs);
+        else
+            pool_free(td_list->memoryPool, td->trb_addrs);
         td->trb_addrs = NULL;
     }
 
-    FreeVecPooled(td_list->memoryPool, td);
+    slab_free(&td_list->ctrl->td_slab, td);
 }
 
 BOOL xhci_td_has_request(TransferDescriptorList *td_list, struct USBIORequest *io_req)
@@ -291,17 +328,17 @@ BOOL xhci_td_has_request(TransferDescriptorList *td_list, struct USBIORequest *i
     return FALSE;
 }
 
-static inline BOOL td_is_expired_at(struct xhci_td *td, ULONG now)
+static inline BOOL td_is_expired_at(struct xhci_td *td, u32 now)
 {
     return td && td->deadline_active && (int32_t)(now - td->deadline_us) >= 0;
 }
 
-static WORD td_find_trb_index(struct xhci_td *td, dma_addr_t trb_addr)
+static s32 td_find_trb_index(struct xhci_td *td, dma_addr_t trb_addr)
 {
-    for (UWORD index = 0; index < td->trb_count; ++index)
+    for (u32 index = 0; index < td->trb_count; ++index)
     {
         if (td->trb_addrs[index] == trb_addr)
-            return (WORD)index;
+            return (s32)index;
     }
 
     return -1;
@@ -313,6 +350,14 @@ static void td_unmap_and_reply(TransferDescriptorList *td_list, struct xhci_td *
 
     if (req && req->data_buffer_length > 0)
         xhci_dma_unmap(td_list->ctrl, req, FALSE);
+
+    /* For RT ISO IN clones, free the staging buffer back to the per-endpoint slab
+     * before handing off to io_reply_failed (which frees the clone IO request). */
+    if (req && (req->driver_private_flags & REQ_RT_ISO_CLONE))
+    {
+        xhci_ep_free_rt_iso_buffer(td_list->ep_ctx, req->data_buffer);
+        req->data_buffer = NULL;
+    }
 
     if (req)
         xhci_udev_io_reply_failed(td_list->ctrl, req, error_code);
@@ -337,7 +382,7 @@ static inline BOOL td_req_is_recovery_abort(IOReqList *abort_reqs, struct USBIOR
 
 static inline BOOL td_is_recovery_abort(struct xhci_td *td,
                                         IOReqList *abort_reqs,
-                                        ULONG now_us)
+                                        u32 now_us)
 {
     if (td_is_expired_at(td, now_us))
         return TRUE;
@@ -348,7 +393,7 @@ static inline BOOL td_is_recovery_abort(struct xhci_td *td,
 static void td_resolve_recovery_deq_ptr(TransferDescriptorList *td_list,
                                         struct xhci_ring *ring,
                                         IOReqList *abort_reqs,
-                                        ULONG now_us,
+                                        u32 now_us,
                                         dma_addr_t stopped_deq_ptr,
                                         dma_addr_t *resolved_deq_ptr)
 {
@@ -396,7 +441,7 @@ static void td_resolve_recovery_deq_ptr(TransferDescriptorList *td_list,
 
 static void td_abort_recovery_requests(TransferDescriptorList *td_list,
                                        IOReqList *abort_reqs,
-                                       ULONG now_us)
+                                       u32 now_us)
 {
     struct MinNode *node = td_list->list.mlh_Head;
 
@@ -429,7 +474,7 @@ void xhci_td_patch_recovery(TransferDescriptorList *td_list,
     if (!td_list || !ring || !new_deq_ptr || !stopped_deq_ptr)
         return;
 
-    ULONG now_us = get_time();
+    u32 now_us = get_time();
 
     td_resolve_recovery_deq_ptr(td_list, ring,
                                 abort_reqs, now_us,
@@ -472,7 +517,7 @@ struct USBIORequest *xhci_td_get_by_trb(TransferDescriptorList *td_list, dma_add
     return req;
 }
 
-void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
+void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
 {
     if (!td_list)
         return;
@@ -481,17 +526,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, BYTE io_Error)
     while ((n = RemHeadMinList(&td_list->list)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)n;
-        if (td->req)
-        {
-            if (td->req->data_buffer)
-                xhci_dma_unmap(td_list->ctrl, td->req, FALSE);
-            if (td->is_rt_iso && td->req->direction == DIRECTION_IN && td->req->data_buffer)
-                FreeVecPooled(td_list->memoryPool, td->req->data_buffer);
-            if (td->is_rt_iso)
-                FreeVecPooled(td_list->memoryPool, td->req);
-            else
-                xhci_udev_io_reply_failed(td_list->ctrl, td->req, io_Error);
-        }
+        td_unmap_and_reply(td_list, td, io_Error);
         xhci_td_free(td_list, td);
     }
 
@@ -517,7 +552,7 @@ void xhci_td_abort_req(struct USBIORequest *io)
     if (!ctrl || !udev)
         return;
 
-    int ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
+    u8 ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
 
     if (io->driver_private_flags & REQ_ON_RING)

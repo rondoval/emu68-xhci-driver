@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0+ */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * (C) Copyright 2001
  * Denis Peter, MPL AG Switzerland
@@ -18,8 +18,8 @@
  * The EHCI spec says that we must align to at least 32 bytes.  However,
  * some platforms require larger alignment.
  */
-#if ARCH_DMA_MINALIGN > 32
-#define USB_DMA_MINALIGN	ARCH_DMA_MINALIGN
+#if DMA_ALIGN_MIN > 32
+#define USB_DMA_MINALIGN	DMA_ALIGN_MIN
 #else
 #define USB_DMA_MINALIGN	32
 #endif
@@ -40,7 +40,7 @@
 struct usb_interface_altsetting {
 	struct usb_interface_descriptor desc;
 
-	__u8 no_of_ep;
+	u8 no_of_ep;
 
 	struct usb_endpoint_descriptor ep_desc[USB_MAXENDPOINTS];
 	struct usb_ss_ep_comp_descriptor ss_ep_comp_desc[USB_MAXENDPOINTS];
@@ -48,8 +48,8 @@ struct usb_interface_altsetting {
 
 /* Interface */
 struct usb_interface {
-	__u8 interface_number;
-	__u8 num_altsetting;
+	u8 interface_number;
+	u8 num_altsetting;
 	struct usb_interface_altsetting *active_altsetting;
 
 	struct usb_interface_altsetting altsetting[USB_ALTSETTINGALLOC];
@@ -60,7 +60,7 @@ struct usb_config {
 	struct MinNode node;
 	struct usb_config_descriptor desc;
 
-	__u8	no_of_if;	/* number of interfaces */
+	u8	no_of_if;	/* number of interfaces */
 	struct usb_interface if_desc[USB_MAXINTERFACES];
 };
 
@@ -94,22 +94,22 @@ enum {
 
 /* Hub descriptor */
 struct usb_hub_descriptor {
-	__u8  bLength;
-	__u8  bDescriptorType;
-	__u8  bNbrPorts;
-	__u16 wHubCharacteristics;
-	__u8  bPwrOn2PwrGood;
-	__u8  bHubContrCurrent;
+	__le8  bLength;
+	__le8  bDescriptorType;
+	__le8  bNbrPorts;
+	__le16 wHubCharacteristics;
+	__le8  bPwrOn2PwrGood;
+	__le8  bHubContrCurrent;
 	/* 2.0 and 3.0 hubs differ here */
 	union {
 		struct {
 			/* add 1 bit for hub status change; round to bytes */
-			__u8 DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
-			__u8 PortPowerCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
+			__le8 DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
+			__le8 PortPowerCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
 		} __attribute__ ((packed)) hs;
 
 		struct {
-			__u8 bHubHdrDecLat;
+			__le8 bHubHdrDecLat;
 			__le16 wHubDelay;
 			__le16 DeviceRemovable;
 		} __attribute__ ((packed)) ss;
@@ -120,8 +120,17 @@ struct usb_hub_descriptor {
 #define REQ_INTERNAL 0x1       /* Internal request, free instead of reply */
 #define REQ_ENQUEUED 0x2       /* Request was already enqueued to EP */
 #define REQ_ON_RING 0x4        /* Request is currently on the transfer ring */
-#define REQ_DMA_MAPPED 0x8     /* Request data buffer is DMA mapped */
+#define REQ_DMA_MAPPED 0x8      /* Request data buffer is DMA mapped */
 #define REQ_HUB_DESC_FETCH 0x10 /* Internal hub descriptor fetch before CONFIG_EP */
+#define REQ_RT_ISO_CLONE 0x40   /* Cloned IO req for RT ISO; pool_free instead of ReplyMsg */
+
+/* bounce class — which bounce slab the bounce buffer came from (0 = dma_alloc fallback) */
+#define REQ_BOUNCE_CLASS_SHIFT 8
+#define REQ_BOUNCE_CLASS_MASK  (0x7U << REQ_BOUNCE_CLASS_SHIFT)
+#define REQ_BOUNCE_CLASS_NONE  0
+#define REQ_BOUNCE_CLASS_SMALL 1
+#define REQ_BOUNCE_CLASS_MED   2
+#define REQ_BOUNCE_CLASS_LARGE 3
 
 enum slot_state {
 	USB_DEV_SLOT_STATE_DISABLED = 0,
@@ -145,9 +154,9 @@ enum slot_state {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
-	unsigned int	virtual_address;			/* Device address as seen by the driver user */
-	unsigned int    xhci_address;				/* Device address as seen by xHCI */
-	unsigned int	slot_id;		/* Slot ID for xHCI */
+	u16	virtual_address;			/* Device address as seen by the driver user */
+	u8    xhci_address;				/* Device address as seen by xHCI */
+	u8	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */
 	enum slot_state  slot_state;	/* current slot state */
 
@@ -167,10 +176,10 @@ struct usb_device {
 
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
-	unsigned int parent_port;     /* Parent hub downstream port (all speeds) */
-	unsigned int route;           /* xHCI route string nibble-packed */
+	u8 parent_port;               /* Parent hub downstream port (all speeds) */
+	u32 route;                    /* xHCI route string nibble-packed */
 	u8 route_depth;
-	unsigned int tt_think_time;   /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
+	u8 tt_think_time;             /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
 
 	/* Requests state data */
 	struct ep_context *ep_context[USB_MAX_ENDPOINT_CONTEXTS];
@@ -194,23 +203,23 @@ struct XHCIUnit;
 struct xhci_ctrl;
 
 /* Access udev */
-struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, UWORD virtual_address);
-struct usb_device *xhci_udev_get(struct XHCIUnit *unit, UWORD virtual_address);
+struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address);
+struct usb_device *xhci_udev_get(struct XHCIUnit *unit, u16 virtual_address);
 void xhci_udev_free(struct usb_device *udev);
 
 /* Dispatch */
-int xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io);
-int xhci_udev_send(struct USBIORequest *req);
+s8 xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io);
+s8 xhci_udev_send(struct USBIORequest *req);
 
 /* Track replies */
-void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, int err);
-void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, int err, ULONG actual);
+void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, s8 err);
+void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, s8 err, u32 actual);
 
 /* Send commands to device */
-void xhci_udev_clear_feature_halt(struct usb_device *udev, ULONG ep_index);
-void xhci_udev_clear_tt_buffer(struct usb_device *udev, ULONG ep_index, int ep_type);
+void xhci_udev_clear_feature_halt(struct usb_device *udev, u8 ep_index);
+void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type);
 
 /* Descriptor access */
-int xhci_ep_type_for_index(struct usb_device *udev, u32 ep_index);
+s32 xhci_ep_type_for_index(struct usb_device *udev, u8 ep_index);
 
 #endif /* __XHCI_UDEV_H__ */

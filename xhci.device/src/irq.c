@@ -1,16 +1,22 @@
-// SPDX-License-Identifier: GPL-2.0+
+// SPDX-License-Identifier: GPL-2.0-only
 #ifdef __INTELLISENSE__
 #include <clib/exec_protos.h>
 #include <clib/gic400_protos.h>
+#include <clib/bcmpcie_protos.h>
 #else
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
+#define GIC400_BASE_NAME unit->device->gic400Base
 #include <proto/gic400.h>
+#define BCMPCIE_BASE_NAME pcielibBase
+#include <proto/bcmpcie.h>
 #endif
 
-#include <compat.h>
+#include <iomem.h>
 #include <config.h>
 #include <debug.h>
-#include <pci.h>
+#include <libraries/openpci.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-events.h>
 #include <device.h>
@@ -19,34 +25,35 @@
 
 static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 {
-	u32 iman = readl(&ctrl->ir_set->irq_pending);
-	writel(ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
+	u32 iman = mmio_read32(&ctrl->ir_set->irq_pending);
+	mmio_write32(ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
-	u32 iman = readl(&ctrl->ir_set->irq_pending);
-	writel(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
+	u32 iman = mmio_read32(&ctrl->ir_set->irq_pending);
+	mmio_write32(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
 }
 
 static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
 {
 	KprintfH("[xhci] %s: %s CMD_EIE | CMD_HSEIE\n", __func__, enable ? "enabling" : "disabling");
-	u32 cmd = readl(&ctrl->hcor->or_usbcmd);
+	u32 cmd = mmio_read32(&ctrl->hcor->or_usbcmd);
 	if (enable)
 		cmd |= (CMD_EIE | CMD_HSEIE);
 	else
 		cmd &= ~(CMD_EIE | CMD_HSEIE);
-	writel(cmd, &ctrl->hcor->or_usbcmd);
+	mmio_write32(cmd, &ctrl->hcor->or_usbcmd);
 }
 
-static ULONG xhci_int_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *unit asm("a1"), ULONG vector asm("d0"))
+static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *unit asm("a1"), ULONG vector asm("d0"))
 {
-	(void)SysBase;
+	(void)execBase;
 	(void)vector;
 
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	ULONG status = readl(&ctrl->hcor->or_usbsts) & XHCI_IRQ_ACK_MASK;
+	struct Library *pcielibBase = unit->device->pcieBase;
+	ULONG status = mmio_read32(&ctrl->hcor->or_usbsts) & XHCI_IRQ_ACK_MASK;
 
 	if (!status)
 		return 0;
@@ -56,16 +63,19 @@ static ULONG xhci_int_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *u
 		Kprintf("[xhci] %s: fatal status interrupt (USBSTS=0x%08lx)\n", __func__, status);
 	}
 
-	writel(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
+	mmio_write32(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
 	xhci_irq_disable_runtime(ctrl);
 
-	if (unit->xhci_ctrl->pci_dev->msi.enabled)
+	if (ctrl->pci_dev)
 	{
-		pci_msi_mask_irq(unit->xhci_ctrl->pci_dev, unit->xhci_ctrl->pci_dev->msi.irq);
-	}
-	else if (!pci_check_and_set_intx_mask(ctrl->pci_dev, TRUE))
-	{
-		KprintfH("[xhci] %s: failed to mask INTx line\n", __func__);
+		if (ctrl->msi_enabled)
+		{
+			MaskMSI(ctrl->pci_dev);
+		}
+		else if (!CheckSetINTxMask(ctrl->pci_dev, TRUE))
+		{
+			KprintfH("[xhci] %s: failed to mask INTx line\n", __func__);
+		}
 	}
 
 	Signal(unit->task, 1UL << unit->irq_signal);
@@ -96,12 +106,13 @@ static inline void xhci_irq_stop(struct xhci_ctrl *ctrl)
 void xhci_int_rearm(struct XHCIUnit *unit)
 {
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+	struct Library *pcielibBase = unit->device->pcieBase;
 
-	if (ctrl->pci_dev && ctrl->pci_dev->msi.enabled)
+	if (ctrl->pci_dev && ctrl->msi_enabled)
 	{
-		pci_msi_unmask_irq(ctrl->pci_dev, ctrl->pci_dev->msi.irq);
+		UnmaskMSI(ctrl->pci_dev);
 	}
-	else if (ctrl->pci_dev && !pci_check_and_set_intx_mask(ctrl->pci_dev, FALSE))
+	else if (ctrl->pci_dev && !CheckSetINTxMask(ctrl->pci_dev, FALSE))
 	{
 		Signal(unit->task, 1UL << unit->irq_signal);
 		return;
@@ -110,73 +121,39 @@ void xhci_int_rearm(struct XHCIUnit *unit)
 	xhci_irq_enable_runtime(ctrl);
 }
 
-static int xhci_intx_enable(struct XHCIUnit *unit)
+static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
 {
-	Kprintf("[xhci] %s: enabling INTx\n", __func__);
-	// UBYTE irq_line_cfg;
-	// dm_pci_read_config8(unit->xhci_ctrl->pci_dev, PCI_INTERRUPT_LINE, &irq_line_cfg);
-	// if (irq_line_cfg == 0 || irq_line_cfg == 0xff)
-	// {
-	// 	Kprintf("[xhci] %s: controller reports no legacy INTx line (value=0x%02lx)\n", __func__, (ULONG)irq_line_cfg);
-	// 	return -ENODEV;
-	// }
-
-	// unit->irq_line = irq_line_cfg + 32;
-	unit->irq_line = unit->xhci_ctrl->pci_dev->irq + 32;
-
-	int ret = AddIntServerEx((ULONG)unit->irq_line, 0, FALSE, &unit->irq_isr);
-	if (ret < 0)
-	{
-		Kprintf("[xhci] %s: AddIntServerEx failed for IRQ %ld (ret=%ld)\n", __func__, unit->irq_line, (LONG)ret);
-		return ret;
-	}
-
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+	struct Library *pcielibBase = unit->device->pcieBase;
 
-	pci_intx(ctrl->pci_dev, TRUE);
-	pci_check_and_set_intx_mask(ctrl->pci_dev, FALSE);
-
-	return 0;
-}
-
-static int xhci_msi_enable(struct XHCIUnit *unit)
-{
-	Kprintf("[xhci] %s: enabling MSI\n", __func__);
-	if (unit->xhci_ctrl->pci_dev->msi.enabled)
+	if (DEVICE_USE_MSI && EnableMSI(ctrl->pci_dev)!=0)
 	{
-		Kprintf("[xhci] %s: MSI already enabled\n", __func__);
-		return 0;
+		Kprintf("[xhci] %s: MSI not supported, falling back to INTx\n", __func__);
+	}
+	else
+	{
+		Kprintf("[xhci] %s: MSI enabled successfully\n", __func__);
+		ctrl->msi_enabled = TRUE;
 	}
 
-	if (pci_get_controller(unit->xhci_ctrl->pci_dev->bus)->msi.enabled == FALSE)
+	if (!pci_add_intserver(&unit->irq_isr, ctrl->pci_dev))
 	{
-		Kprintf("[xhci] %s: MSI not supported on this controller, falling back to INTx\n", __func__);
-		return xhci_intx_enable(unit);
-	}
-
-	unit->irq_line = unit->xhci_ctrl->pci_dev->msi.irq + 32;
-
-	int ret = add_int_server(unit->xhci_ctrl->pci_dev, &unit->irq_isr);
-	if (ret < 0)
-	{
-		Kprintf("[xhci] %s: add_int_server failed (ret=%ld)\n", __func__, (LONG)ret);
-		return ret;
+		Kprintf("[xhci] %s: pci_add_intserver failed\n", __func__);
+		return -1;
 	}
 
 	return 0;
 }
 
-int xhci_int_enable(struct XHCIUnit *unit)
+s32 xhci_int_enable(struct XHCIUnit *unit)
 {
 	xhci_setup_isr(unit);
 
-	int result = 0;
+	s32 result = 0;
 	if (!unit->xhci_ctrl->pci_dev)
 		result = AddIntServerEx((ULONG)unit->irq_line, 0, FALSE, &unit->irq_isr);
-	else if (DEVICE_USE_MSI)
-		result = xhci_msi_enable(unit);
 	else
-		result = xhci_intx_enable(unit);
+		result = xhci_pci_int_enable(unit);
 
 	xhci_irq_start(unit->xhci_ctrl);
 
@@ -188,19 +165,12 @@ void xhci_int_shutdown(struct XHCIUnit *unit)
 	if (!unit)
 		return;
 
+	struct Library *pcielibBase = unit->device->pcieBase;
+
 	xhci_irq_stop(unit->xhci_ctrl);
 
 	if (!unit->xhci_ctrl->pci_dev)
 		RemIntServerEx((ULONG)unit->irq_line, &unit->irq_isr);
-	else if (DEVICE_USE_MSI && unit->xhci_ctrl->pci_dev->msi.enabled)
-		rem_int_server(unit->xhci_ctrl->pci_dev);
 	else
-	{
-		if (!pci_check_and_set_intx_mask(unit->xhci_ctrl->pci_dev, FALSE))
-		{
-			Kprintf("[xhci] %s: failed to unmask INTx line during shutdown\n", __func__);
-		}
-
-		RemIntServerEx((ULONG)unit->irq_line, &unit->irq_isr);
-	}
+		pci_rem_intserver(&unit->irq_isr, unit->xhci_ctrl->pci_dev);
 }

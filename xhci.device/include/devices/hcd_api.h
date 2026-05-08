@@ -1,8 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef __DRIVER_IFACE_H
 #define __DRIVER_IFACE_H
 
-#include <compat.h>
+#include <types.h>
 #include <exec/io.h>
+#include <bits.h>
 
 #pragma pack(2)
 
@@ -10,9 +13,9 @@ struct USBSetupPacket
 {
     u8 bmRequestType;
     u8 bRequest;
-    u16 wValue;
-    u16 wIndex;
-    u16 wLength;
+    __le16 wValue;
+    __le16 wIndex;
+    __le16 wLength;
 };
 
 struct USBBufferRequest
@@ -49,8 +52,7 @@ struct USBIORequest
     u32 timeout;
     struct USBSetupPacket setup;
     u32 reserved3;
-    u16 reserved4;
-    u16 usb_frame;
+    u32 reserved4;
     u32 reserved5;
     u32 driver_private_flags;
     void *driver_private_dma_address;
@@ -59,14 +61,14 @@ struct USBIORequest
 #define DIRECTION_IN 2
 #define DIRECTION_OUT 1
 
-#define DRIVER_FLAG_TIMEOUT_DEFINED (1 << 3)
-#define DRIVER_FLAG_IGNORE_SHORT_TRANSFER (1 << 4)
+#define DRIVER_FLAG_TIMEOUT_DEFINED BIT(3)
+#define DRIVER_FLAG_IGNORE_SHORT_TRANSFER BIT(4)
 
 /* driver states */
-#define DRIVER_STATE_OPERATIONAL (1 << 0)
-#define DRIVER_STATE_SUSPENDED (1 << 2)
-#define DRIVER_STATE_RESUMING (1 << 1)
-#define DRIVER_STATE_RESETING (1 << 3)
+#define DRIVER_STATE_OPERATIONAL BIT(0)
+#define DRIVER_STATE_SUSPENDED BIT(2)
+#define DRIVER_STATE_RESUMING BIT(1)
+#define DRIVER_STATE_RESETING BIT(3)
 
 /* driver tags */
 #define TAG_DEVICE_VENDOR (TAG_USER + 0x4721)
@@ -81,11 +83,11 @@ struct USBIORequest
 #define TAG_DRIVER_FEATURES (TAG_USER + 0x4732)
 
 /* driver feature flags */
-#define DRIVER_FEAT_USB2 (1 << 0)
-#define DRIVER_FEAT_USB3 (1 << 31)
-#define DRIVER_FEAT_QUICK_IO (1 << 3)
-#define DRIVER_FEAT_ISOCHRONOUS (1 << 1)
-#define DRIVER_FEAT_ISOCHRONOUS_HOOKS (1 << 2)
+#define DRIVER_FEAT_USB2 BIT(0)
+#define DRIVER_FEAT_USB3 BIT(31)
+#define DRIVER_FEAT_QUICK_IO BIT(3)
+#define DRIVER_FEAT_ISOCHRONOUS BIT(1)
+#define DRIVER_FEAT_ISOCHRONOUS_HOOKS BIT(2)
 
 /* driver commands */
 #define CMD_DEVICE_QUERY (CMD_NONSTD + 0)

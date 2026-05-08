@@ -1,9 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef __XHCI_RING_H
 #define __XHCI_RING_H
 
 #include <exec/types.h>
 #include <devices/hcd_api.h>
-#include <compat.h>
+#include <bits.h>
+#include <byteorder.h>
 
 struct xhci_transfer_event
 {
@@ -16,13 +19,13 @@ struct xhci_transfer_event
 
 /* Transfer event TRB length bit mask */
 /* bits 0:23 */
-#define EVENT_TRB_LEN(p) ((p) & 0xffffff)
+#define EVENT_TRB_LEN(p) ((p) & 0xffffffU)
 
 /** Transfer Event bit fields **/
-#define TRB_TO_EP_ID(p) (((p) >> 16) & 0x1f)
+#define TRB_TO_EP_ID(p) (((p) >> 16) & 0x1fU)
 
 /* Completion Code - only applicable for some types of TRBs */
-#define COMP_CODE_MASK (0xff << 24)
+#define COMP_CODE_MASK (0xffU << 24)
 #define COMP_CODE_SHIFT (24)
 #define GET_COMP_CODE(p) (((p) & COMP_CODE_MASK) >> 24)
 
@@ -79,11 +82,10 @@ typedef enum
 	COMP_CMD_ABORT, /* 25 */
 	/* Stopped - transfer was terminated by a stop endpoint command */
 	COMP_STOP, /* 26 */
-	/* Same as COMP_EP_STOPPED, but the transferred length in the event
-	 * is invalid */
+	/* Same as COMP_STOP, but the transferred length in the event is invalid */
 	COMP_STOP_INVAL, /* 27*/
-	/* Control Abort Error - Debug Capability - control pipe aborted */
-	COMP_DBG_ABORT, /* 28 */
+	/* Same as COMP_STOP, but the transfer was stopped after Short Packet condition */
+	COMP_STOP_SHORT, /* 28 */
 	/* Max Exit Latency Too Large Error */
 	COMP_MEL_ERR, /* 29 */
 	/* TRB type 30 reserved */
@@ -105,72 +107,74 @@ typedef enum
 /* flags bitmasks */
 /* bits 16:23 are the virtual function ID */
 /* bits 24:31 are the slot ID */
-#define TRB_TO_SLOT_ID(p) (((p) & (0xff << 24)) >> 24)
+#define TRB_TO_SLOT_ID(p) (((p) & (0xffU << 24)) >> 24)
 #define TRB_TO_SLOT_ID_SHIFT (24)
-#define TRB_TO_SLOT_ID_MASK (0xff << TRB_TO_SLOT_ID_SHIFT)
-#define SLOT_ID_FOR_TRB(p) (((p) & 0xff) << 24)
-#define SLOT_ID_FOR_TRB_MASK (0xff)
+#define TRB_TO_SLOT_ID_MASK (0xffU << TRB_TO_SLOT_ID_SHIFT)
+#define SLOT_ID_FOR_TRB(p) (((u32)(p) & 0xffU) << 24)
+#define SLOT_ID_FOR_TRB_MASK (0xffU)
 #define SLOT_ID_FOR_TRB_SHIFT (24)
 
 /* Stop Endpoint TRB - ep_index to endpoint ID for this TRB */
-#define TRB_TO_EP_INDEX(p) ((((p) & (0x1f << 16)) >> 16) - 1)
-#define TRB_TO_ENDPOINT(p) ((((p) & (0x1f << 16)) >> 17))
-#define EP_ID_FOR_TRB(p) ((((p) + 1) & 0x1f) << 16)
+#define TRB_TO_EP_INDEX(p) (u8)((((p) & (0x1fU << 16)) >> 16) - 1U)
+#define TRB_TO_ENDPOINT(p) ((((p) & (0x1fU << 16)) >> 17))
+#define EP_ID_FOR_TRB(p) ((((u32)(p) + 1U) & 0x1fU) << 16)
 
-#define SUSPEND_PORT_FOR_TRB(p) (((p) & 1) << 23)
-#define TRB_TO_SUSPEND_PORT(p) (((p) & (1 << 23)) >> 23)
+#define SUSPEND_PORT_FOR_TRB(p) (((u32)(p) & 1U) << 23)
+#define TRB_TO_SUSPEND_PORT(p) (((p) & BIT(23)) >> 23)
 #define LAST_EP_INDEX 30
 
 /* Set TR Dequeue Pointer command TRB fields */
-#define TRB_TO_STREAM_ID(p) ((((p) & (0xffff << 16)) >> 16))
-#define STREAM_ID_FOR_TRB(p) ((((p)) & 0xffff) << 16)
+#define TRB_TO_STREAM_ID(p) ((((p) & (0xffffU << 16)) >> 16))
+#define STREAM_ID_FOR_TRB(p) (((u32)(p) & 0xffffU) << 16)
 
 /* Port Status Change Event TRB fields */
 /* Port ID - bits 31:24 */
-#define GET_PORT_ID(p) (((p) & (0xff << 24)) >> 24)
+#define GET_PORT_ID(p) (((p) & (0xffU << 24)) >> 24)
 #define PORT_ID_SHIFT (24)
-#define PORT_ID_MASK (0xff << PORT_ID_SHIFT)
+#define PORT_ID_MASK (0xffU << PORT_ID_SHIFT)
 
 /* Normal TRB fields */
 /* transfer_len bitmasks - bits 0:16 */
 #define TRB_LEN(p) ((p) & 0x1ffff)
 /* TD Size, packets remaining in this TD, bits 21:17 (5 bits, so max 31) */
-#define TRB_TD_SIZE(p) (min((p), (u32)31) << 17)
+#define TRB_TD_SIZE(p) (((p) > 31U ? 31U : (u32)(p)) << 17)
 /* Interrupter Target - which MSI-X vector to target the completion event at */
-#define TRB_INTR_TARGET(p) (((p) & 0x3ff) << 22)
+#define TRB_INTR_TARGET(p) (((p) & 0x3ffU) << 22)
 #define GET_INTR_TARGET(p) (((p) >> 22) & 0x3ff)
 #define TRB_TBC(p) (((p) & 0x3) << 7)
 #define TRB_TLBPC(p) (((p) & 0xf) << 16)
 
 /* Cycle bit - indicates TRB ownership by HC or HCD */
-#define TRB_CYCLE (1 << 0)
+#define TRB_CYCLE BIT(0)
 /*
  * Force next event data TRB to be evaluated before task switch.
  * Used to pass OS data back after a TD completes.
  */
-#define TRB_ENT (1 << 1)
+#define TRB_ENT BIT(1)
 /* Interrupt on short packet */
-#define TRB_ISP (1 << 2)
+#define TRB_ISP BIT(2)
 /* Set PCIe no snoop attribute */
-#define TRB_NO_SNOOP (1 << 3)
+#define TRB_NO_SNOOP BIT(3)
 /* Chain multiple TRBs into a TD */
-#define TRB_CHAIN (1 << 4)
+#define TRB_CHAIN BIT(4)
 /* Interrupt on completion */
-#define TRB_IOC (1 << 5)
+#define TRB_IOC BIT(5)
 /* The buffer pointer contains immediate data */
-#define TRB_IDT (1 << 6)
+#define TRB_IDT BIT(6)
 
 /* Block Event Interrupt */
-#define TRB_BEI (1 << 9)
+#define TRB_BEI BIT(9)
 
 /* Control transfer TRB specific fields */
-#define TRB_DIR_IN (1 << 16)
-#define TRB_TX_TYPE(p) ((p) << 16)
+#define TRB_DIR_IN BIT(16)
+#define TRB_TX_TYPE(p) ((u32)(p) << 16)
 #define TRB_DATA_OUT 2
 #define TRB_DATA_IN 3
 
 /* Isochronous TRB specific fields */
-#define TRB_SIA (1 << 31)
+#define TRB_FRAME_ID(p) (((u32)(p) & 0x7ffU) << 20)
+#define GET_TRB_FRAME_ID(p) ((u16)(((p) >> 20) & 0x7ffU))
+#define TRB_SIA BIT(31)
 
 struct xhci_link_trb
 {
@@ -181,7 +185,7 @@ struct xhci_link_trb
 };
 
 /* control bitfields */
-#define LINK_TOGGLE (0x1 << 1)
+#define LINK_TOGGLE BIT(1)
 
 /* Command completion event TRB */
 struct xhci_event_cmd
@@ -206,8 +210,8 @@ union xhci_trb
 };
 
 /* TRB bit mask */
-#define TRB_TYPE_BITMASK (0xfc00)
-#define TRB_TYPE(p) ((p) << 10)
+#define TRB_TYPE_BITMASK (0xfc00U)
+#define TRB_TYPE(p) ((u32)(p) << 10)
 #define TRB_FIELD_TO_TYPE(p) (((p) & TRB_TYPE_BITMASK) >> 10)
 
 /* TRB type IDs */
@@ -289,10 +293,10 @@ typedef enum
 
 #define TRB_TYPE_LINK(x) (((x) & TRB_TYPE_BITMASK) == TRB_TYPE(TRB_LINK))
 /* Above, but for __le32 types -- can avoid work by swapping constants: */
-#define TRB_TYPE_LINK_LE32(x) (((x) & LE32(TRB_TYPE_BITMASK)) == \
-							   LE32(TRB_TYPE(TRB_LINK)))
-#define TRB_TYPE_NOOP_LE32(x) (((x) & LE32(TRB_TYPE_BITMASK)) == \
-							   LE32(TRB_TYPE(TRB_TR_NOOP)))
+#define TRB_TYPE_LINK_LE32(x) (((x) & le32(TRB_TYPE_BITMASK)) == \
+							   le32(TRB_TYPE(TRB_LINK)))
+#define TRB_TYPE_NOOP_LE32(x) (((x) & le32(TRB_TYPE_BITMASK)) == \
+							   le32(TRB_TYPE(TRB_TR_NOOP)))
 
 struct xhci_ctrl;
 struct xhci_erst;
@@ -300,11 +304,15 @@ struct xhci_intr_reg;
 struct usb_device;
 struct ep_context;
 
-struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, unsigned int num_segs,
-								  BOOL link_trbs, BOOL is_event_ring, int ep_index, int max_packet_size);
-void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
+struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
+							BOOL link_trbs, BOOL is_event_ring, u8 ep_index, u32 max_packet_size);
+void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);
 
-int xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, unsigned int timeout_ms, BOOL defer_doorbell);
+BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_segs);
+
+s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell);
+s8 xhci_ring_enqueue_td_at_frame(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u16 frame);
+BOOL xhci_ring_has_room(struct ep_context *ep_ctx, u32 needed_trbs);
 void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
 
 void xhci_ring_acknowledge_event(struct xhci_ctrl *ctrl);
@@ -313,11 +321,11 @@ union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring);
 u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring);
 u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr);
 
-int xhci_ring_get_max_packet_size(struct xhci_ring *ring);
-void xhci_ring_set_max_packet_size(struct xhci_ring *ring, int max_packet_size);
-void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, UWORD trb_count, UWORD start_index);
+u32 xhci_ring_get_max_packet_size(struct xhci_ring *ring);
+void xhci_ring_set_max_packet_size(struct xhci_ring *ring, u32 max_packet_size);
+void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, u32 trb_count, u32 start_index);
 
-dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u32 ep_index, trb_type cmd);
+dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u8 ep_index, trb_type cmd);
 void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct xhci_intr_reg *ir_set);
 
 #endif /* __XHCI_RING_H */

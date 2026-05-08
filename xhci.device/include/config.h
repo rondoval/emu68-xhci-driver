@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
+
 #ifndef XHCI_DEVICE_CONFIG_H
 #define XHCI_DEVICE_CONFIG_H
 
@@ -27,7 +29,18 @@
 /* Command ring timeout: 5 seconds */
 #define CMD_TIMEOUT_MS 5000
 
-#define RT_ISO_IN_TARGET_TDS 16
-#define XHCI_SEGMENTS_PER_RING 1
+/* Target RT ISO IN scheduling horizon in ms */
+#define RT_ISO_IN_TARGET_FRAMES 16
+#define XHCI_INITIAL_SEGMENTS_PER_RING 1
+#define XHCI_SEGMENTS_PER_RING 4
+#define XHCI_MAX_SEGMENTS_PER_RING 64 // Hard ceiling for dynamic transfer ring growth
+
+/* Event ring sizing: fixed at startup */
+#define XHCI_INITIAL_SEGS_PER_EVENT_RING 8
+
+/* Minimum interval between interrupts (in 250ns intervals).  The interval
+ * between interrupts will be longer if there are no events on the event ring.
+ * Default is 4000 (1 ms). */
+#define IRQ_INTERVAL 4000
 
 #endif

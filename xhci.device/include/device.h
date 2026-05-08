@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0+
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef _GENET_DEVICE_H
 #define _GENET_DEVICE_H
 
@@ -28,6 +28,7 @@ struct XHCIUnit
 {
 	struct Unit unit;
 	APTR memoryPool;
+	struct XHCIDevice *device;
 
 	/* config */
 	LONG unitNumber;
@@ -38,28 +39,39 @@ struct XHCIUnit
 	struct xhci_ctrl *xhci_ctrl;
 
 	struct Interrupt irq_isr;
-	LONG irq_line;
+	u32 irq_line;
 	BYTE irq_signal;
+	char vendor_str[5];
+	char device_str[5];
 };
 
 struct XHCIDevice
 {
 	struct Device device;
 	ULONG segList;
+	struct Library *utilityBase;
+	struct Library *gic400Base;
+	struct Library *pcieBase;    /* NULL until first PCIe unit opens */
 
 	struct MinList units;
 };
 
+void beginIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+LONG abortIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+
+/* PCI library: lazy-open on first PCIe unit, tries bcmpcie.library then openpci.library */
+s32 xhci_open_pcie_library(struct XHCIDevice *base);
+
 /* Unit interface */
-int UnitTaskStart(struct XHCIUnit *unit);
+s32 UnitTaskStart(struct XHCIUnit *unit);
 void UnitTaskStop(struct XHCIUnit *unit);
 
-int UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
-int UnitClose(struct XHCIUnit *unit);
+s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
+s32 UnitClose(struct XHCIUnit *unit);
 
 void ProcessCommand(struct USBIORequest *io);
 
-int xhci_int_enable(struct XHCIUnit *unit);
+s32 xhci_int_enable(struct XHCIUnit *unit);
 void xhci_int_shutdown(struct XHCIUnit *unit);
 void xhci_int_rearm(struct XHCIUnit *unit);
 
