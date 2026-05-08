@@ -14,7 +14,7 @@ The API is not an exact match — certain fields passed by the stack are intenti
 
 > **Note for users upgrading from 3.x releases:** `bcmpcie.library` must be installed
 > in `LIBS:` for PCIe-based units (unit 1+, VL805 on Pi 4B) to work.
-> See [RELEASE-NOTES-4.0.md](RELEASE-NOTES-4.0.md) for details.
+> See release notes for the full change log from 3.7 to 4.4.
 
 ---
 
@@ -30,7 +30,7 @@ The following has been verified:
 Known gaps / issues:
 
 - Non-RT isochronous transfers not tested
-- RT isochronous audio has glitches
+- RT isochronous audio may have glitches
 - AHI 4.x not yet supported
 
 > Data corruption is possible in edge cases.  Back up before heavy use.
