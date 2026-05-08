@@ -207,9 +207,9 @@ static s32 xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	ctrl->ir_set = &ctrl->run_regs->ir_set[0];
 
 	ctrl->erst.entries = xhci_malloc(ctrl, sizeof(struct xhci_erst_entry) *
-											   ERST_NUM_SEGS);
+											   XHCI_INITIAL_SEGS_PER_EVENT_RING);
 	/* Event ring does not maintain link TRB */
-	ctrl->event_ring = xhci_ring_alloc(ctrl, ERST_NUM_SEGS, FALSE, TRUE, 0, 0);
+	ctrl->event_ring = xhci_ring_alloc(ctrl, XHCI_INITIAL_SEGS_PER_EVENT_RING, FALSE, TRUE, 0, 0);
 
 	xhci_ring_setup_erst(ctrl->event_ring, &ctrl->erst, ctrl->ir_set);
 
@@ -506,7 +506,7 @@ static s32 xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 
 	u32 hccp1 = mmio_read32(&hccr->cr_hccparams1);
 	ctrl->cfc_supported = HCC_CFC(hccp1) ? TRUE : FALSE;
-	
+
 	xhci_dump_caps(ctrl);
 
 	return 0;
@@ -544,15 +544,15 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 
 	xhci_td_slab_init(ctrl);
 	slab_cache_init(&ctrl->trb_addr_slab, ctrl->memoryPool,
-		XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t), DMA_ALIGN_MIN, 256);
+					XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t), DMA_ALIGN_MIN, 256);
 	slab_cache_init(&ctrl->bounce_small, ctrl->memoryPool,
-		XHCI_BOUNCE_SMALL_SIZE,     DMA_ALIGN_MIN, XHCI_BOUNCE_SMALL_CAP);
+					XHCI_BOUNCE_SMALL_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_SMALL_CAP);
 	slab_cache_init(&ctrl->bounce_med, ctrl->memoryPool,
-		XHCI_BOUNCE_MED_SIZE,       DMA_ALIGN_MIN, XHCI_BOUNCE_MED_CAP);
+					XHCI_BOUNCE_MED_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_MED_CAP);
 	slab_cache_init(&ctrl->bounce_large, ctrl->memoryPool,
-		XHCI_BOUNCE_LARGE_SIZE,     DMA_ALIGN_MIN, XHCI_BOUNCE_LARGE_CAP);
+					XHCI_BOUNCE_LARGE_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_LARGE_CAP);
 	slab_cache_init(&ctrl->iso_clone_slab, ctrl->memoryPool,
-		sizeof(struct USBIORequest), DMA_ALIGN_MIN, XHCI_ISO_CLONE_CAP);
+					sizeof(struct USBIORequest), DMA_ALIGN_MIN, XHCI_ISO_CLONE_CAP);
 
 	_NewMinList(&ctrl->pending_commands);
 

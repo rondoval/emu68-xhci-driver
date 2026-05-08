@@ -115,7 +115,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
     _NewMinList(&ep_ctx->pending_reqs);
     _NewMinList(&ep_ctx->stop_abort_reqs);
     ep_ctx->active_tds = xhci_td_create_list(udev->controller, ep_ctx);
-    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
+    ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_INITIAL_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
     {
         Kprintf("Failed to create resources for EP %d\n", ep_index);
@@ -717,9 +717,13 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
     while (ep_ctx->rt_inflight_bytes < prefetch_bytes)
     {
-        /* Don't enqueue if the ring can't fit one more TRB+spare */
+        /* Don't enqueue if the ring can't fit one more TRB+spare; try to grow first */
         if (!xhci_ring_has_room(ep_ctx, 2))
-            break;
+        {
+            if (!xhci_ring_grow(ctrl, xhci_ep_get_ring(ep_ctx), XHCI_SEGMENTS_PER_RING) ||
+                !xhci_ring_has_room(ep_ctx, 2))
+                break;
+        }
 
         /* CFC controllers pin Frame ID to a slot; without CFC the HW chooses
          * via SIA, but we still hand the user hook a monotonic frame counter. */
@@ -795,15 +799,19 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 {
     struct USBIORequest *template = ep_ctx->rt_template_req;
+    struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
 
     u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
     while (inflight < ep_ctx->rt_inflight_tds_target)
     {
         /* Same backpressure rule as the OUT path: bail before alloc if no room. */
         if (!xhci_ring_has_room(ep_ctx, 2))
-            break;
+        {
+            if (!xhci_ring_grow(ctrl, xhci_ep_get_ring(ep_ctx), XHCI_SEGMENTS_PER_RING) ||
+                !xhci_ring_has_room(ep_ctx, 2))
+                break;
+        }
 
-        struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
         u16 frame = ctrl->cfc_supported
                         ? xhci_rt_iso_clamp_frame(ep_ctx)
                         : RT_UFRAME_TO_FRAME(ep_ctx->rt_next_uframe);

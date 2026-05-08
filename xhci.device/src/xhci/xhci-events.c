@@ -170,6 +170,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
         /* Acknowledge only after the handler finishes reading this TRB. */
         xhci_ring_acknowledge_event(ctrl);
     }
+
     return activity;
 }
 

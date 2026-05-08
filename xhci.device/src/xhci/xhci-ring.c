@@ -13,6 +13,7 @@
  *	    Vikas Sajjan <vikas.sajjan@samsung.com>
  */
 
+#include <config.h>
 #include <debug.h>
 #include <memory.h>
 
@@ -202,6 +203,113 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
 }
 
 /**
+ * Dynamically grow a transfer ring by inserting num_new_segs new segments
+ * immediately after ring->enq_seg.
+ * the hardware will follow the updated Link TRB once it drains the current
+ * enq_seg.
+ *
+ * @param ctrl         pointer to the xhci controller
+ * @param ring         the transfer ring to grow
+ * @param num_new_segs number of segments to add
+ * Return: TRUE on success, FALSE if the ring is already at its maximum size
+ *         or allocation fails (ring is left unmodified in that case).
+ */
+BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_segs)
+{
+	if (!ring || num_new_segs == 0 ||
+	    ring->num_segs + num_new_segs > XHCI_MAX_SEGMENTS_PER_RING)
+		return FALSE;
+
+	/*
+	 * Allocate and link the new segments as a linear chain.
+	 * xhci_link_segments sets seg->next and the Link TRB for each pair.
+	 * Each Link TRB is flushed immediately so the hardware will see the
+	 * correct pointer once we splice the chain into the ring.
+	 */
+	struct xhci_segment *new_first = NULL, *new_last = NULL, *prev = NULL;
+	for (u32 i = 0; i < num_new_segs; ++i)
+	{
+		struct xhci_segment *seg = xhci_segment_alloc(ctrl);
+		if (!seg)
+		{
+			/* Free already-allocated segments via the ->next chain */
+			struct xhci_segment *s = new_first;
+			while (s)
+			{
+				struct xhci_segment *nxt = s->next;
+				xhci_segment_free(ctrl, s);
+				s = nxt;
+			}
+			return FALSE;
+		}
+		seg->next = NULL;
+		if (prev)
+		{
+			xhci_link_segments(prev, seg, TRUE);
+			xhci_flush_cache(&prev->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb));
+		}
+		else
+			new_first = seg;
+		prev = seg;
+		new_last = seg;
+	}
+
+	/*
+	 * xhci_malloc zeroes TRBs (cycle=0).  When ring->cycle_state==0 the
+	 * HC treats cycle=0 as valid — pre-set data TRBs to cycle=1 so the HC
+	 * won't process empty slots if it follows the new chain before we have
+	 * written real TRBs.  The Link TRB (last slot) is managed separately.
+	 */
+	if (ring->cycle_state == 0)
+	{
+		struct xhci_segment *seg = new_first;
+		while (seg)
+		{
+			for (u32 j = 0; j < TRBS_PER_SEGMENT - 1; ++j)
+				seg->trbs[j].generic.field[3] |= le32(TRB_CYCLE);
+			seg = seg->next;
+		}
+	}
+
+	/*
+	 * Splice the new chain between ring->enq_seg and its current successor.
+	 *
+	 *   1. Link new_last → old_next (HC cannot reach here yet)
+	 *   2. Transfer LINK_TOGGLE from enq_seg to new_last
+	 *   3. Re-point enq_seg Link TRB → new_first (HC now enters new chain)
+	 *   4. Update the software ->next pointer for enq_seg
+	 */
+	struct xhci_segment *old_next = ring->enq_seg->next;
+
+	/* Step 1 */
+	xhci_link_segments(new_last, old_next, TRUE);
+	xhci_flush_cache(&new_last->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb));
+
+	/* Step 2 */
+	u32 enq_ctrl = le32(ring->enq_seg->trbs[TRBS_PER_SEGMENT - 1].link.control);
+	if (enq_ctrl & LINK_TOGGLE)
+	{
+		enq_ctrl &= ~(u32)LINK_TOGGLE;
+		ring->enq_seg->trbs[TRBS_PER_SEGMENT - 1].link.control = le32(enq_ctrl);
+		u32 last_ctrl = le32(new_last->trbs[TRBS_PER_SEGMENT - 1].link.control);
+		last_ctrl |= LINK_TOGGLE;
+		new_last->trbs[TRBS_PER_SEGMENT - 1].link.control = le32(last_ctrl);
+		xhci_flush_cache(&new_last->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb));
+	}
+
+	/* Step 3 */
+	ring->enq_seg->trbs[TRBS_PER_SEGMENT - 1].link.segment_ptr =
+		le64((dma_addr_t)new_first->trbs);
+	xhci_flush_cache(&ring->enq_seg->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb));
+
+	/* Step 4 */
+	ring->enq_seg->next = new_first;
+
+	ring->num_segs += num_new_segs;
+	return TRUE;
+}
+
+/**
  * Create a new ring with zero or more segments.
  *
  * Link each segment together into a ring.
@@ -280,10 +388,10 @@ void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct
 {
 	u32 val;
 	struct xhci_segment *seg;
-	erst->num_entries = ERST_NUM_SEGS;
+	erst->num_entries = XHCI_INITIAL_SEGS_PER_EVENT_RING;
 
 	for (val = 0, seg = ring->first_seg;
-		 val < ERST_NUM_SEGS;
+		 val < XHCI_INITIAL_SEGS_PER_EVENT_RING;
 		 val++)
 	{
 		struct xhci_erst_entry *entry = &erst->entries[val];
@@ -292,7 +400,7 @@ void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct
 		entry->rsvd = 0;
 		seg = seg->next;
 	}
-	xhci_flush_cache(erst->entries, ERST_NUM_SEGS * sizeof(struct xhci_erst_entry));
+	xhci_flush_cache(erst->entries, XHCI_INITIAL_SEGS_PER_EVENT_RING * sizeof(struct xhci_erst_entry));
 
 	/* Update HC event ring dequeue pointer */
 	xhci_writeq(&ir_set->erst_dequeue,
@@ -301,7 +409,7 @@ void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct
 	/* set ERST count with the number of entries in the segment table */
 	val = mmio_read32(&ir_set->erst_size);
 	val &= ERST_SIZE_MASK;
-	val |= ERST_NUM_SEGS;
+	val |= XHCI_INITIAL_SEGS_PER_EVENT_RING;
 	mmio_write32(val, &ir_set->erst_size);
 
 	/* this is the event ring segment table pointer */
@@ -1083,9 +1191,18 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 
 	if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1))
 	{
-		KprintfH("Ring full ep=%lu needed %lu TRBs\n", (ULONG)ep_index, (ULONG)num_trbs);
-		xhci_ep_enqueue(udev_ep_ctx, io);
-		return ERR_NO_ERROR;
+		KprintfH("Ring full ep=%lu needed %lu TRBs, attempting grow\n", (ULONG)ep_index, (ULONG)num_trbs);
+		if (!xhci_ring_grow(ctrl, ep_ring, XHCI_SEGMENTS_PER_RING)) {
+			KprintfH("Ring grow failed, queueing request\n");
+			xhci_ep_enqueue(udev_ep_ctx, io);
+			return ERR_NO_ERROR;
+		}
+		KprintfH("Ring grew, retrying room check\n");
+		if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1)) {
+			KprintfH("Still no room after grow, queueing\n");
+			xhci_ep_enqueue(udev_ep_ctx, io);
+			return ERR_NO_ERROR;
+		}
 	}
 
 	dma_addr_t *td_trb_addrs;

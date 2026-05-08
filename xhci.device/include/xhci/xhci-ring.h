@@ -305,8 +305,10 @@ struct usb_device;
 struct ep_context;
 
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
-							  BOOL link_trbs, BOOL is_event_ring, u8 ep_index, u32 max_packet_size);
-void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);								  
+							BOOL link_trbs, BOOL is_event_ring, u8 ep_index, u32 max_packet_size);
+void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);
+
+BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_segs);
 
 s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell);
 s8 xhci_ring_enqueue_td_at_frame(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u16 frame);
