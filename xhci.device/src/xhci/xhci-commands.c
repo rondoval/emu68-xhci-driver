@@ -599,7 +599,39 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
     if (comp == COMP_CMD_STOP)
     {
         Kprintf("Command Ring Stopped; restarting\n");
+
+        struct pending_command *timed_out_cmd = NULL;
+        struct MinNode *head = ctrl->pending_commands.mlh_Head;
+        if (head->mln_Succ)
+        {
+            struct pending_command *head_cmd = (struct pending_command *)head;
+            if (!head_cmd->deadline_active)
+                timed_out_cmd = head_cmd;
+        }
+
         ctrl->cmd_abort_pending = FALSE;
+
+        if (timed_out_cmd)
+        {
+            Kprintf("Missing Command Abort completion; failing timed out %s slot=%ld trb_dma=%lx on Command Ring Stop\n",
+                    xhci_command_type_name(timed_out_cmd->type),
+                    timed_out_cmd->udev ? (LONG)timed_out_cmd->udev->slot_id : -1L,
+                    (ULONG)timed_out_cmd->cmd_trb_dma);
+            Remove((struct Node *)timed_out_cmd);
+            xhci_fail_timed_out_command(ctrl, timed_out_cmd);
+            pool_free(ctrl->memoryPool, timed_out_cmd);
+        }
+
+        /*
+         * After a Command Abort the HC has stopped on the old command ring
+         * dequeue pointer. Reprogram CRCR to the next software enqueue
+         * position so restart resumes with queued commands instead of the
+         * aborted TRB.
+         */
+        u64 trb_64 = xhci_ring_get_new_dequeue_ptr(ctrl->cmd_ring);
+        xhci_writeq(&ctrl->hcor->or_crcr,
+                    trb_64 & (u64)~CMD_RING_ADDR_MASK);
+
         /* Restart only if there are still pending commands. */
         if (ctrl->pending_commands.mlh_Head->mln_Succ)
             mmio_write32(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
