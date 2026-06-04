@@ -516,8 +516,7 @@ static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
     const u8 desc_type = (udev->speed >= USB_SPEED_SUPER) ? USB_DT_SS_HUB : USB_DT_HUB;
     const u8 desc_len = (desc_type == USB_DT_SS_HUB) ? 12 : 9;
 
-    const u32 alloc_len = ALIGN_UP((u32)desc_len, DMA_ALIGN_MIN);
-    u8 *buf = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, alloc_len);
+    u8 *buf = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, desc_len);
     struct USBIORequest *io = pool_zalloc(ctrl->memoryPool, sizeof(*io));
     if (!io || !buf)
     {

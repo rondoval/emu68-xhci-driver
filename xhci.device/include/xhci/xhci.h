@@ -735,9 +735,12 @@ struct xhci_ctrl
 	BOOL cmd_abort_pending;			 /* TRUE while CA bit is asserted; doorbell suppressed */
 };
 
-inline void xhci_flush_cache(void *addr, u32 len)
+/* Pre-DMA flush for a buffer.  @flags is passed straight to CachePreDMA: 0 for a
+ * plain clean+invalidate, or DMA_ReadFromRAM for an OUT buffer (device reads RAM)
+ * which only needs a clean. */
+inline void xhci_flush_cache(void *addr, u32 len, ULONG flags)
 {
-	CachePreDMA((APTR)addr, &len, 0);
+	CachePreDMA((APTR)addr, &len, flags);
 }
 
 inline void xhci_inval_cache(void *addr, u32 len)

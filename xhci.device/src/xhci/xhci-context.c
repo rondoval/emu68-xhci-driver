@@ -405,8 +405,8 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 
     /* Steps 7 and 8 were done in xhci_alloc_virt_device() */
 
-    xhci_flush_cache(ep0_ctx, sizeof(struct xhci_ep_ctx));
-    xhci_flush_cache(slot_ctx, sizeof(struct xhci_slot_ctx));
+    xhci_flush_cache(ep0_ctx, sizeof(struct xhci_ep_ctx), 0);
+    xhci_flush_cache(slot_ctx, sizeof(struct xhci_slot_ctx), 0);
     KprintfH("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
              (ULONG)le64(ep0_ctx->deq), (ULONG)le32(ep0_ctx->tx_info),
              (ULONG)le32(slot_ctx->dev_info), (ULONG)le32(slot_ctx->dev_info2));
@@ -415,7 +415,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     ctrl_ctx->add_flags = le32(SLOT_FLAG | EP0_FLAG);
     ctrl_ctx->drop_flags = 0;
 
-    xhci_flush_cache(ctrl_ctx, sizeof(struct xhci_input_control_ctx));
+    xhci_flush_cache(ctrl_ctx, sizeof(struct xhci_input_control_ctx), 0);
 }
 
 static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ctx *in_ctx)

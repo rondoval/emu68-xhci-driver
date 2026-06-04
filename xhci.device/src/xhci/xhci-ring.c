@@ -217,7 +217,7 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
 BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_segs)
 {
 	if (!ring || num_new_segs == 0 ||
-	    ring->num_segs + num_new_segs > XHCI_MAX_SEGMENTS_PER_RING)
+		ring->num_segs + num_new_segs > XHCI_MAX_SEGMENTS_PER_RING)
 		return FALSE;
 
 	/*
@@ -246,7 +246,7 @@ BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_
 		if (prev)
 		{
 			xhci_link_segments(prev, seg, TRUE);
-			xhci_flush_cache(&prev->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb));
+			xhci_flush_cache(&prev->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb), 0);
 		}
 		else
 			new_first = seg;
@@ -283,7 +283,7 @@ BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_
 
 	/* Step 1 */
 	xhci_link_segments(new_last, old_next, TRUE);
-	xhci_flush_cache(&new_last->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb));
+	xhci_flush_cache(&new_last->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb), 0);
 
 	/* Step 2 */
 	u32 enq_ctrl = le32(ring->enq_seg->trbs[TRBS_PER_SEGMENT - 1].link.control);
@@ -294,13 +294,13 @@ BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_
 		u32 last_ctrl = le32(new_last->trbs[TRBS_PER_SEGMENT - 1].link.control);
 		last_ctrl |= LINK_TOGGLE;
 		new_last->trbs[TRBS_PER_SEGMENT - 1].link.control = le32(last_ctrl);
-		xhci_flush_cache(&new_last->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb));
+		xhci_flush_cache(&new_last->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb), 0);
 	}
 
 	/* Step 3 */
 	ring->enq_seg->trbs[TRBS_PER_SEGMENT - 1].link.segment_ptr =
 		le64((dma_addr_t)new_first->trbs);
-	xhci_flush_cache(&ring->enq_seg->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb));
+	xhci_flush_cache(&ring->enq_seg->trbs[TRBS_PER_SEGMENT - 1], sizeof(union xhci_trb), 0);
 
 	/* Step 4 */
 	ring->enq_seg->next = new_first;
@@ -400,7 +400,7 @@ void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct
 		entry->rsvd = 0;
 		seg = seg->next;
 	}
-	xhci_flush_cache(erst->entries, XHCI_INITIAL_SEGS_PER_EVENT_RING * sizeof(struct xhci_erst_entry));
+	xhci_flush_cache(erst->entries, XHCI_INITIAL_SEGS_PER_EVENT_RING * sizeof(struct xhci_erst_entry), 0);
 
 	/* Update HC event ring dequeue pointer */
 	xhci_writeq(&ir_set->erst_dequeue,
@@ -514,8 +514,7 @@ inline static void inc_enq(struct xhci_ring *ring, BOOL more_trbs_coming)
 			next->link.control |= le32(chain);
 
 			next->link.control ^= le32(TRB_CYCLE);
-			xhci_flush_cache(next,
-							 sizeof(union xhci_trb));
+			xhci_flush_cache(next, sizeof(union xhci_trb), 0);
 		}
 		/* Toggle the cycle bit after the last ring segment. */
 		if (last_trb_on_last_seg(ring,
@@ -583,7 +582,7 @@ inline static dma_addr_t xhci_ring_enqueue_trb(struct xhci_ring *ring,
 	trb->field[2] = le32(field2);
 	trb->field[3] = le32(field3);
 
-	xhci_flush_cache(trb, sizeof(struct xhci_generic_trb));
+	xhci_flush_cache(trb, sizeof(struct xhci_generic_trb), 0);
 
 	inc_enq(ring, more_trbs_coming);
 
@@ -611,7 +610,7 @@ inline static void prepare_ring(struct xhci_ring *ep_ring)
 
 		next->link.control ^= le32(TRB_CYCLE);
 
-		xhci_flush_cache(next, sizeof(union xhci_trb));
+		xhci_flush_cache(next, sizeof(union xhci_trb), 0);
 
 		/* Toggle the cycle bit after the last ring segment. */
 		if (last_trb_on_last_seg(ep_ring, ep_ring->enq_seg, next))
@@ -690,7 +689,7 @@ void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, u32 trb_count, u32 star
 		trb->generic.field[1] = 0;
 		trb->generic.field[2] = 0;
 		trb->generic.field[3] = le32(TRB_TYPE(TRB_TR_NOOP) | cycle);
-		xhci_flush_cache(trb, sizeof(*trb));
+		xhci_flush_cache(trb, sizeof(*trb), 0);
 	}
 }
 
@@ -789,7 +788,7 @@ BOOL xhci_ring_has_room(struct ep_context *ep_ctx, u32 needed_trbs)
 inline static void prime_first_trb(struct xhci_generic_trb *start_trb)
 {
 	start_trb->field[3] ^= le32(TRB_CYCLE);
-	xhci_flush_cache(start_trb, sizeof(struct xhci_generic_trb));
+	xhci_flush_cache(start_trb, sizeof(struct xhci_generic_trb), 0);
 }
 
 inline static void giveback_first_trb(struct usb_device *udev, u8 ep_index,
@@ -836,28 +835,26 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 		return (dma_addr_t)addr;
 	}
 
-	u32 alloc_len = ALIGN_UP(size, DMA_ALIGN_MIN);
-
 	void *aligned = NULL;
 	u32 bounce_class = REQ_BOUNCE_CLASS_NONE;
-	if (alloc_len <= XHCI_BOUNCE_SMALL_SIZE)
+	if (size <= XHCI_BOUNCE_SMALL_SIZE)
 	{
 		aligned = slab_alloc(&ctrl->bounce_small);
 		bounce_class = REQ_BOUNCE_CLASS_SMALL;
 	}
-	else if (alloc_len <= XHCI_BOUNCE_MED_SIZE)
+	else if (size <= XHCI_BOUNCE_MED_SIZE)
 	{
 		aligned = slab_alloc(&ctrl->bounce_med);
 		bounce_class = REQ_BOUNCE_CLASS_MED;
 	}
-	else if (alloc_len <= XHCI_BOUNCE_LARGE_SIZE)
+	else if (size <= XHCI_BOUNCE_LARGE_SIZE)
 	{
 		aligned = slab_alloc(&ctrl->bounce_large);
 		bounce_class = REQ_BOUNCE_CLASS_LARGE;
 	}
 	if (!aligned)
 	{
-		aligned = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, alloc_len);
+		aligned = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, size);
 		bounce_class = REQ_BOUNCE_CLASS_NONE;
 	}
 	if (!aligned)
@@ -872,7 +869,7 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct USBIOReques
 	{
 		xhci_copy_to_bounce_buffer(addr, aligned, size);
 	}
-	xhci_flush_cache(aligned, alloc_len);
+	xhci_flush_cache(aligned, size, copy ? DMA_ReadFromRAM : 0); /* copy == OUT == device reads RAM */
 
 	req->driver_private_dma_address = aligned;
 	return (dma_addr_t)aligned;
@@ -1192,13 +1189,15 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 	if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1))
 	{
 		KprintfH("Ring full ep=%lu needed %lu TRBs, attempting grow\n", (ULONG)ep_index, (ULONG)num_trbs);
-		if (!xhci_ring_grow(ctrl, ep_ring, XHCI_SEGMENTS_PER_RING)) {
+		if (!xhci_ring_grow(ctrl, ep_ring, XHCI_SEGMENTS_PER_RING))
+		{
 			KprintfH("Ring grow failed, queueing request\n");
 			xhci_ep_enqueue(udev_ep_ctx, io);
 			return ERR_NO_ERROR;
 		}
 		KprintfH("Ring grew, retrying room check\n");
-		if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1)) {
+		if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1))
+		{
 			KprintfH("Still no room after grow, queueing\n");
 			xhci_ep_enqueue(udev_ep_ctx, io);
 			return ERR_NO_ERROR;

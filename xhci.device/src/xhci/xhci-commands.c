@@ -398,7 +398,7 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
     /* Point to output device context in dcbaa. */
     ctrl->dcbaa->dev_context_ptrs[slot_id] = le64((dma_addr_t)udev->out_ctx->bytes);
 
-    xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[slot_id], sizeof(__le64));
+    xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[slot_id], sizeof(__le64), 0);
     KprintfH("DCBAA[%lu]=%lx\n", (ULONG)slot_id, (ULONG)le64(ctrl->dcbaa->dev_context_ptrs[slot_id]));
 
     // Continue with Address Device command, passing cmd->req
@@ -757,7 +757,7 @@ void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct U
     struct xhci_ctrl *ctrl = udev->controller;
     struct xhci_container_ctx *in_ctx = udev->in_ctx;
 
-    xhci_flush_cache(in_ctx->bytes, in_ctx->size);
+    xhci_flush_cache(in_ctx->bytes, in_ctx->size, 0);
     // TODO support deconfigure - DC flag?
     xhci_queue_command(ctrl, (dma_addr_t)in_ctx->bytes, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
 }

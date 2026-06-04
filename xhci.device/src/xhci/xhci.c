@@ -59,14 +59,14 @@ void *xhci_malloc(struct xhci_ctrl *ctrl, u32 size)
 	void *ptr;
 	u32 cacheline_size = (XHCI_ALIGNMENT > CACHELINE_SIZE) ? XHCI_ALIGNMENT : CACHELINE_SIZE;
 
-	ptr = dma_zalloc(ctrl->memoryPool, cacheline_size, ALIGN_UP(size, cacheline_size));
+	ptr = dma_zalloc(ctrl->memoryPool, cacheline_size, size);
 	if (!ptr)
 	{
 		Kprintf("dma_zalloc failed for size %lu\n", (ULONG)size);
 		return NULL;
 	}
 
-	xhci_flush_cache(ptr, size);
+	xhci_flush_cache(ptr, size, 0);
 
 	return ptr;
 }
@@ -96,7 +96,7 @@ static s32 xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 		goto fail_sp2;
 
 	ctrl->dcbaa->dev_context_ptrs[0] = le64(scratchpad->sp_array);
-	xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[0], sizeof(ctrl->dcbaa->dev_context_ptrs[0]));
+	xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[0], sizeof(ctrl->dcbaa->dev_context_ptrs[0]), 0);
 
 	u32 page_size = mmio_read32(&hcor->or_pagesize) & 0xffff;
 	u32 i;
@@ -116,7 +116,7 @@ static s32 xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 	void *buf = dma_zalloc(ctrl->memoryPool, page_size, num_sp * page_size);
 	if (!buf)
 		goto fail_sp3;
-	xhci_flush_cache(buf, num_sp * page_size);
+	xhci_flush_cache(buf, num_sp * page_size, 0);
 
 	scratchpad->scratchpad = buf;
 	for (i = 0; i < num_sp; i++)
@@ -125,7 +125,7 @@ static s32 xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 		buf += page_size;
 	}
 
-	xhci_flush_cache(scratchpad->sp_array, sizeof(u64) * num_sp);
+	xhci_flush_cache(scratchpad->sp_array, sizeof(u64) * num_sp, 0);
 	return 0;
 
 fail_sp3:
