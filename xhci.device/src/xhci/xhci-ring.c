@@ -1160,6 +1160,16 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 	}
 
 	enum ep_state cur_state = xhci_ep_get_state(udev_ep_ctx);
+
+	/* A FAILED endpoint stays dead until recovery/reconfiguration - reject
+	 * instead of queueing into a list nothing will ever drain. */
+	if (cur_state == USB_DEV_EP_STATE_FAILED)
+	{
+		KprintfH("Rejecting transfer, ep %lu failed\n", (ULONG)ep_index);
+		io->req.io_Error = ERR_HCI_ERROR;
+		return ERR_HCI_ERROR;
+	}
+
 	if (cur_state == USB_DEV_EP_STATE_ABORTING ||
 		cur_state == USB_DEV_EP_STATE_RESETTING ||
 		cur_state == USB_DEV_EP_STATE_FAILED)

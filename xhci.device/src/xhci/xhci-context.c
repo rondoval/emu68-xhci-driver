@@ -561,6 +561,20 @@ static s8 xhci_init_ep_contexts_if(struct usb_device *udev,
         interval = xhci_get_endpoint_interval(udev, endpt_desc);
         mult = xhci_get_endpoint_mult(udev, endpt_desc, ss_ep_comp_desc);
         max_burst = xhci_get_endpoint_max_burst(udev, endpt_desc, ss_ep_comp_desc);
+
+        /* VL805 corrupts SS bulk OUT bursts for mass-storage devices behind a
+         * hub (Linux XHCI_VLI_SS_BULK_OUT_BUG, xhci-mem.c). */
+        if ((ctrl->quirks & XHCI_QUIRK_SS_BULK_OUT) && max_burst != 0 &&
+            udev->speed >= USB_SPEED_SUPER && udev->route != 0 &&
+            usb_endpoint_xfer_bulk(endpt_desc) && usb_endpoint_dir_out(endpt_desc) &&
+            ifdesc->altsetting[0].desc.bInterfaceClass == USB_CLASS_MASS_STORAGE)
+        {
+            Kprintf("VL805 quirk: max_burst %lu -> 0 for addr %lu ep 0x%02lx (SS bulk OUT, UMS behind hub)\n",
+                    (ULONG)max_burst, (ULONG)udev->virtual_address,
+                    (ULONG)endpt_desc->bEndpointAddress);
+            max_burst = 0;
+        }
+
         avg_trb_len = max_esit_payload;
 
         ep_index = xhci_get_ep_index(endpt_desc);

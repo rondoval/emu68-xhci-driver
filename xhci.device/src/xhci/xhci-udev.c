@@ -39,7 +39,17 @@
 
 static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBIORequest *io);
 static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, struct USBIORequest *io);
-static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev);
+
+/* Move udev to a new virtual address.  The sole writer of the migration, so
+ * the invariant map[addr] == udev <=> udev->virtual_address == addr lives in
+ * one place. */
+static void xhci_udev_remap(struct xhci_ctrl *ctrl, struct usb_device *udev, u16 new_addr)
+{
+    if (ctrl->devices_by_virtual_address[udev->virtual_address] == udev)
+        ctrl->devices_by_virtual_address[udev->virtual_address] = NULL;
+    ctrl->devices_by_virtual_address[new_addr] = udev;
+    udev->virtual_address = new_addr;
+}
 
 struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address)
 {
@@ -1479,11 +1489,7 @@ static void handle_set_address(struct usb_device *udev, struct USBIORequest *io)
         xhci_udev_disconnect(ctrl->devices_by_virtual_address[new_addr], TRUE);
     }
 
-    ctrl->devices_by_virtual_address[new_addr] = current;
-    if (ctrl->devices_by_virtual_address[old_addr] == current)
-        ctrl->devices_by_virtual_address[old_addr] = NULL;
-
-    current->virtual_address = new_addr;
+    xhci_udev_remap(ctrl, current, new_addr);
 
     KprintfH("migrated ctx from addr %lu to %lu\n", (ULONG)old_addr, (ULONG)new_addr);
 }

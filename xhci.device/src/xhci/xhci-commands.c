@@ -9,11 +9,11 @@
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
+#include <xhci/xhci-context.h>
 #include <xhci/xhci-descriptors.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
-#include <xhci/xhci-context.h>
 #include <devices/hcd_api.h>
 
 #ifdef DEBUG
@@ -196,7 +196,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     /* Ring the command ring doorbell — suppressed while an abort is in
      * progress; COMP_CMD_STOP will restart the ring once the HC has stopped. */
     if (!ctrl->cmd_abort_pending)
-        mmio_write32(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
+        xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
 }
 
 /*
@@ -634,7 +634,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 
         /* Restart only if there are still pending commands. */
         if (ctrl->pending_commands.mlh_Head->mln_Succ)
-            mmio_write32(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
+            xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
         return;
     }
 

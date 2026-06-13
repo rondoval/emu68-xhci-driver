@@ -12,6 +12,8 @@
 #include <exec/semaphores.h>
 #include <exec/interrupts.h>
 
+#include <reset_guard.h>
+
 #include <devices/hcd_api.h>
 
 #define LIB_MIN_VERSION 39 /* we use memory pools */
@@ -53,6 +55,7 @@ struct XHCIDevice
 	struct Library *utilityBase;
 	struct Library *gic400Base;
 	struct Library *pcieBase;    /* NULL until first PCIe unit opens */
+	struct reset_guard resetGuard; /* pre-reset DMA quiesce hooks */
 
 	struct MinList units;
 };

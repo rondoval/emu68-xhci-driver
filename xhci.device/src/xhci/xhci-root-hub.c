@@ -772,7 +772,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	u32 reg = mmio_read32(&port->or_portsc);
-	reg = xhci_roothub_port_state_to_neutral(reg);
+	reg = xhci_port_state_to_neutral(reg);
 
 	switch (wValue)
 	{
@@ -796,7 +796,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 			u32 tmp = mmio_read32(&port->or_portsc);
 			if (tmp & PORT_WRC)
 			{
-				tmp = xhci_roothub_port_state_to_neutral(tmp);
+				tmp = xhci_port_state_to_neutral(tmp);
 				mmio_write32(tmp | PORT_WRC, &port->or_portsc);
 			}
 		}
@@ -843,18 +843,11 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		/* For USB2, need to write 15 (XDEV_RESUME) first, wait 20ms, then write U0 */
 		if (rh->ports[portNo - 1].major_revision < 3)
 		{
-			reg &= ~PORT_PLS_MASK;
-			reg |= XDEV_RESUME;
-			reg |= PORT_LINK_STROBE;
-			mmio_write32(reg, &port->or_portsc);
+			xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_RESUME);
 			xhci_roothub_delay_ms(25); // wait at least 20ms for resume to take effect
-			reg = mmio_read32(&port->or_portsc);
-			reg = xhci_roothub_port_state_to_neutral(reg);
 		}
-		reg &= ~PORT_PLS_MASK;
-		reg |= XDEV_U0; // put port back to U0 (active) state
-		reg |= PORT_LINK_STROBE;
-		mmio_write32(reg, &port->or_portsc);
+		/* put port back to U0 (active) state */
+		xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_U0);
 		break;
 	case USB_PORT_FEAT_C_ENABLE:
 	case USB_PORT_FEAT_C_SUSPEND:
@@ -1036,7 +1029,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	u32 reg = mmio_read32(&port->or_portsc);
-	reg = xhci_roothub_port_state_to_neutral(reg);
+	reg = xhci_port_state_to_neutral(reg);
 
 	switch (wValue)
 	{
@@ -1057,7 +1050,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 					 (ULONG)mmio_read32(&port->or_portsc));
 
 			/* Clear all pending change bits before the warm reset.
-			 * Stale change bits (especially PLC from the Compliance
+			 * Stale change bits (especially PLC from a Compliance
 			 * transition) can cause the VL805 to botch the warm reset:
 			 * the link bounces through disconnect/reconnect and recovers
 			 * via normal link training instead, leaving WRC=0 and the
@@ -1068,7 +1061,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 
 			/* Re-read and re-neutralize after clearing change bits */
 			reg = mmio_read32(&port->or_portsc);
-			reg = xhci_roothub_port_state_to_neutral(reg);
+			reg = xhci_port_state_to_neutral(reg);
 
 			/* Initiate warm reset */
 			mmio_write32(reg | PORT_WR, &port->or_portsc);
@@ -1183,10 +1176,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	// USB2 specific features
 	case USB_PORT_FEAT_SUSPEND:
 		KprintfH("Putting port %lu link to U3 standby\n", (ULONG)portNo);
-		reg &= ~PORT_PLS_MASK;
-		reg |= XDEV_U3;
-		reg |= PORT_LINK_STROBE;
-		mmio_write32(reg, &port->or_portsc);
+		xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_U3);
 		break;
 	case USB_PORT_FEAT_TEST:
 		/* No-op */
@@ -1291,8 +1281,12 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 		break;
 	case SetHubFeature:
 		KprintfH("SET_FEATURE HUB feature=%lx\n", wValue);
-		// TODO
-		xhci_roothub_stall(io);
+		/* Same two features as ClearHubFeature; setting them is nonsensical
+		 * for a root hub but harmless - ACK (mirrors Linux). */
+		if (wValue == C_HUB_LOCAL_POWER || wValue == C_HUB_OVER_CURRENT)
+			xhci_roothub_no_error(io);
+		else
+			xhci_roothub_stall(io);
 		break;
 	case SetHubDepth:
 		KprintfH("SET_HUB_DEPTH depth=%lx\n", wValue);

@@ -215,8 +215,11 @@ inline static s8 translate_status(xhci_comp_code comp)
         status = ERR_DEVICE_STALL;
         break;
     case COMP_TX_ERR:
+        /* CRC/bit-stuffing/no-response per xHCI: report as a transaction
+         * error, not TIMEOUT - Poseidon's dead-count treats TIMEOUT three
+         * times worse than a CRC error. */
         Kprintf("USB transaction error\n");
-        status = ERR_TIMEOUT;
+        status = ERR_CRC_ERROR;
         break;
     case COMP_DB_ERR:
     case COMP_TRB_ERR:

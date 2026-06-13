@@ -214,7 +214,8 @@ static s32 xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	xhci_ring_setup_erst(ctrl->event_ring, &ctrl->erst, ctrl->ir_set);
 
 	/* set up the scratchpad buffer array and scratchpad buffers */
-	xhci_scratchpad_alloc(ctrl);
+	if (xhci_scratchpad_alloc(ctrl) < 0)
+		return -ENOMEM;
 
 	/*
 	 * Just Zero'ing this register completely,
@@ -295,6 +296,39 @@ static s32 xhci_start(struct xhci_hcor *hcor)
 }
 
 /**
+ * Halt the XHCI Controller: clear Run/Stop and wait for HCHalted.  A halted
+ * HC processes no TRBs and writes no events or MSIs — all DMA stops.
+ *
+ * @param hcor	pointer to host controller operation registers
+ * Return: 0 when halted, < 0 on handshake timeout
+ */
+static s32 xhci_halt(struct xhci_hcor *hcor)
+{
+	KprintfH("// Halt the HC: %lx\n", hcor);
+	u32 state = mmio_read32(&hcor->or_usbsts) & STS_HALT;
+	if (!state)
+	{
+		u32 cmd = mmio_read32(&hcor->or_usbcmd);
+		cmd &= ~CMD_RUN;
+		mmio_write32(cmd, &hcor->or_usbcmd);
+	}
+
+	return handshake(&hcor->or_usbsts, STS_HALT, STS_HALT, XHCI_MAX_HALT_USEC);
+}
+
+/*
+ * xhci_reset_quiesce - stop all controller DMA without touching driver state.
+ *
+ * The pre-reset quiesce (reset_guard): the machine is about to reset and the
+ * HC must stop writing into RAM the next OS session reuses.
+ */
+void xhci_reset_quiesce(struct xhci_ctrl *ctrl)
+{
+	if (xhci_halt(ctrl->hcor) != 0)
+		Kprintf("xhci: HC did not halt for reset quiesce\n");
+}
+
+/**
  * Resets the XHCI Controller
  *
  * @param hcor	pointer to host controller operation registers
@@ -304,17 +338,7 @@ static s32 xhci_reset(struct xhci_hcor *hcor)
 {
 	u32 cmd;
 
-	/* Halting the Host first */
-	KprintfH("// Halt the HC: %lx\n", hcor);
-	u32 state = mmio_read32(&hcor->or_usbsts) & STS_HALT;
-	if (!state)
-	{
-		cmd = mmio_read32(&hcor->or_usbcmd);
-		cmd &= ~CMD_RUN;
-		mmio_write32(cmd, &hcor->or_usbcmd);
-	}
-
-	s32 ret = handshake(&hcor->or_usbsts, STS_HALT, STS_HALT, XHCI_MAX_HALT_USEC);
+	s32 ret = xhci_halt(hcor);
 	if (ret)
 	{
 		Kprintf("Host not halted after %lu microseconds.\n", XHCI_MAX_HALT_USEC);

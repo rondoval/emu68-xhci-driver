@@ -25,6 +25,7 @@
 #include <config.h>
 #include <minlist.h>
 #include <debug.h>
+#include <xhci/xhci.h>
 
 /*
     Put the function at the very beginning of the file in order to avoid
@@ -167,6 +168,21 @@ static s32 xhci_open_libraries(struct XHCIDevice *base)
     return 0;
 }
 
+/* reset_guard prepare: halt every controller so ring/event/MSI DMA stops
+ * before the machine resets. */
+static void xhci_reset_prepare(APTR user)
+{
+    struct XHCIDevice *base = user;
+
+    for (struct MinNode *node = base->units.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
+    {
+        struct XHCIUnit *unit = (struct XHCIUnit *)node;
+
+        if (unit->xhci_ctrl)
+            xhci_reset_quiesce(unit->xhci_ctrl);
+    }
+}
+
 APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *_SysBase asm("a6"))
 {
     (void)_SysBase;
@@ -177,6 +193,10 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
     base->utilityBase = NULL;
     base->gic400Base = NULL;
     base->pcieBase = NULL;
+
+    if (!reset_guard_install(&base->resetGuard, xhci_reset_prepare, base,
+                             (CONST_STRPTR)"xhci.device"))
+        Kprintf("[xhci] %s: reset guard install failed\n", __func__);
 
     return base;
 }
@@ -306,6 +326,14 @@ ULONG expungeLib(struct XHCIDevice *base asm("a6"))
     }
     else
     {
+        /* The ColdReboot vector may have been re-patched on top of our
+         * stub — then the code must stay resident. */
+        if (!reset_guard_remove(&base->resetGuard))
+        {
+            KprintfH("[xhci] %s: reset guard not removable, staying resident\n", __func__);
+            return 0;
+        }
+
         ULONG segList = base->segList;
 
         /* Remove yourself from list of devices */
