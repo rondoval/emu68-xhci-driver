@@ -52,7 +52,7 @@
 
 #define STATUS_CHANGE_BITMAP_LENGTH 2 /* in bytes; supports up to 15 ports */
 
-static struct descriptor
+static const struct descriptor
 {
 	struct usb_hub_descriptor hub_30;
 	struct usb_hub_descriptor hub_20;
@@ -1043,18 +1043,18 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	// Common for USB2 and USB3 ports
 	case USB_PORT_FEAT_RESET:
 	{
-		/* USB 3.0 ports in Compliance or SS.Inactive state need a warm reset
-		 * to recover from link training failure. A hot reset alone may briefly
-		 * train the link but leave it unstable. This mirrors Linux's
-		 * hub_port_warm_reset_required() logic in hub.c. */
-		u32 pls = reg & PORT_PLS_MASK;
-		if (rh->ports[portNo - 1].major_revision >= 3 &&
-			(pls == XDEV_COMPLIANCE || pls == XDEV_INACTIVE))
+		/* Always warm-reset SuperSpeed root ports. A hot reset can leave the
+		 * SuperSpeed link trained-but-dysfunctional (the port reports enabled
+		 * /U0, yet ADDRESS_DEVICE times out), and that bad state is not
+		 * observable from PORTSC - it is not limited to Compliance/SS.Inactive.
+		 * A warm reset forces full link retraining and is the reliable path;
+		 * it is a superset of a hot reset, so anything that worked after a hot
+		 * reset still works after a warm reset. */
+		if (rh->ports[portNo - 1].major_revision >= 3)
 		{
-			Kprintf("SS port %lu PLS=%lu (%s); upgrading to warm reset (portsc=%08lx)\n",
-					(ULONG)portNo, (ULONG)(pls >> 5),
-					pls == XDEV_COMPLIANCE ? "Compliance" : "SS.Inactive",
-					(ULONG)mmio_read32(&port->or_portsc));
+			KprintfH("SS port %lu warm reset (PLS=%lu portsc=%08lx)\n",
+					 (ULONG)portNo, (ULONG)((reg & PORT_PLS_MASK) >> 5),
+					 (ULONG)mmio_read32(&port->or_portsc));
 
 			/* Clear all pending change bits before the warm reset.
 			 * Stale change bits (especially PLC from the Compliance
@@ -1095,9 +1095,9 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 				}
 				else
 				{
-					Kprintf("SS port %lu warm reset completed in %ld0ms "
-							"(portsc=%08lx)\n",
-							(ULONG)portNo, (LONG)attempts, (ULONG)temp);
+					KprintfH("SS port %lu warm reset completed in %ld0ms "
+							 "(portsc=%08lx)\n",
+							 (ULONG)portNo, (LONG)attempts, (ULONG)temp);
 				}
 			}
 		}
