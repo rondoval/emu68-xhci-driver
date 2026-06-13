@@ -251,6 +251,7 @@ s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	unit->flags = flags;
 	unit->unit.unit_OpenCnt = 1;
 	unit->unitNumber = unitNumber;
+	unit->driver_state = DRIVER_STATE_OPERATIONAL;
 
 	unit->memoryPool = CreatePool(MEMF_FAST | MEMF_PUBLIC, 16384, 8192);
 	if (unit->memoryPool == NULL)

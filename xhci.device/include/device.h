@@ -41,6 +41,7 @@ struct XHCIUnit
 	struct Interrupt irq_isr;
 	u32 irq_line;
 	BYTE irq_signal;
+	u16 driver_state; /* DRIVER_STATE_*, reported via TAG_DRIVER_STATE/io->state */
 	char vendor_str[5];
 	char device_str[5];
 };

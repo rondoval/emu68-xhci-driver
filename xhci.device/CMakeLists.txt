@@ -66,6 +66,9 @@ target_link_libraries(xhci.device
         Emu68PCIe::pcie_headers
 )
 
+# ROM-able: no writable .data/.bss may sneak in (see driver-stack TODO.md)
+emu68_rom_check(xhci.device)
+
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device
     DESTINATION DEVS/USBHardware
