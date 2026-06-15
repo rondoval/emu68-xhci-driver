@@ -122,7 +122,8 @@ struct usb_hub_descriptor {
 #define REQ_ON_RING 0x4        /* Request is currently on the transfer ring */
 #define REQ_DMA_MAPPED 0x8      /* Request data buffer is DMA mapped */
 #define REQ_HUB_DESC_FETCH 0x10 /* Internal hub descriptor fetch before CONFIG_EP */
-#define REQ_RT_ISO_CLONE 0x40   /* Cloned IO req for RT ISO; pool_free instead of ReplyMsg */
+#define REQ_BOS_FETCH      0x20 /* Internal BOS descriptor fetch (phase 1+2) before CONFIG_EP */
+#define REQ_SET_SEL      0x80   /* Internal SET_SEL OUT transfer for USB3 LPM */
 
 /* bounce class — which bounce slab the bounce buffer came from (0 = dma_alloc fallback) */
 #define REQ_BOUNCE_CLASS_SHIFT 8
@@ -138,6 +139,31 @@ enum slot_state {
 	USB_DEV_SLOT_STATE_DEFAULT,
 	USB_DEV_SLOT_STATE_ADDRESSED,
 	USB_DEV_SLOT_STATE_CONFIGURED,
+};
+
+/* Multi-step device operations - exactly one in flight per device.  Each op is
+ * a chain of async completions; the cross-module completion sites feed
+ * xhci_udev_op_advance() and the op-specific steps live in one dispatch. */
+enum udev_op {
+	UDEV_OP_NONE = 0,
+	UDEV_OP_CONFIGURE,  /* descriptor prefetch (hub/BOS) ahead of SET_CONFIGURATION */
+	UDEV_OP_LPM_ENABLE, /* MEL Evaluate Context -> port timeouts + SET_SEL -> device-initiated U1/U2 */
+	UDEV_OP_SUSPEND,    /* endpoint ring stops -> port U3 / forward SetPortFeature to hub */
+};
+
+enum udev_op_event {
+	UDEV_OP_EVENT_EP0_RECOVERED, /* EP0 stall/timeout recovery finished (Set TR Deq done) */
+	UDEV_OP_EVENT_MEL_EVAL_DONE, /* Evaluate Context (MEL) succeeded */
+	UDEV_OP_EVENT_SET_SEL_DONE,  /* SET_SEL completed on the wire */
+	UDEV_OP_EVENT_STOP_DONE,     /* one Stop Endpoint completion (suspend) */
+};
+
+struct udev_operation {
+	enum udev_op op;
+	u8 step;                    /* op-specific progress */
+	u8 waits;                   /* outstanding completions within the current step */
+	u8 arg;                     /* SUSPEND: root port to write U3 to (0 = behind a hub) */
+	struct USBIORequest *stash; /* request to resume/forward when the op completes */
 };
 
 /**
@@ -164,6 +190,9 @@ struct usb_device {
 	struct usb_config *active_config;
 	u8 product_string_index; /* iProduct from device descriptor */
 
+	u8 device_protocol;      /* bDeviceProtocol from the device descriptor
+	                          * (HS hubs: 2 = multi-TT capable) */
+
 	/* Hub translation support */
 	BOOL is_hub;
 	BOOL ss_hub_emulation;
@@ -171,8 +200,9 @@ struct usb_device {
 	u8 hub_num_ports;
 	struct usb_hub_descriptor ss_hub_desc;
 
-	/* Deferred CONFIG_EP: stash IOReq while we pre-fetch hub descriptor */
-	struct USBIORequest *pending_set_config_req;
+	/* The single in-flight multi-step operation (configure prefetch, LPM
+	 * enable, port suspend) - see enum udev_op / xhci_udev_op_advance(). */
+	struct udev_operation op;
 
 	/* Split routing data */
 	struct usb_device *parent;    /* Parent hub device, NULL for root */
@@ -180,6 +210,37 @@ struct usb_device {
 	u32 route;                    /* xHCI route string nibble-packed */
 	u8 route_depth;
 	u8 tt_think_time;             /* Hub TT think time encoding (0-3 -> 8/16/24/32 bit times) */
+
+	/* Max Exit Latency / LPM fields (populated from BOS descriptor before CONFIG_EP) */
+	u8   u1_dev_exit_lat;         /* USB3: bU1DevExitLat from BOS SS Device Cap (µs); for hubs = upstream link exit lat */
+	u16  u2_dev_exit_lat;         /* USB3: wU2DevExitLat from BOS SS Device Cap (µs) */
+	BOOL lpm_capable;             /* USB2: LPM (L1) supported per USB_20_EXTENSION_ATT_LINK_POWER_MANAGEMENT */
+	BOOL besl_supported;          /* USB2: BESL supported per USB_20_EXTENSION_ATT_BESL_SUPPORTED */
+	u8   besl_baseline;           /* USB2: baseline BESL selector (0-15), BOS USB2 Ext bmAttributes bits 11:8 */
+	u8   besl_deep;               /* USB2: deep BESL selector (0-15), bits 15:12 */
+	BOOL besl_baseline_valid;     /* USB2: baseline BESL value present (bit 3) */
+	BOOL besl_deep_valid;         /* USB2: deep BESL value present (bit 4) */
+	u32  max_exit_latency_us;     /* Calculated MEL in µs written to slot context; 0 = not yet set */
+	u8   mel_retry_count;         /* COMP_MEL_ERR ELD retry counter; capped at 3 */
+
+	/* USB3 LPM parameters, computed per USB 3.1 Appendix C (all in nanoseconds) */
+	u32  u1_sel, u1_pel, u1_mel;
+	u32  u2_sel, u2_pel, u2_mel;
+
+	/* Hub-encoded U1/U2 inactivity timeouts programmed on the parent port;
+	 * USB3_LPM_DISABLED if the state was not enabled */
+	u16  u1_timeout, u2_timeout;
+
+	/* USB2 hardware LPM (L1) */
+	BOOL usb2_hw_lpm_capable;      /* root-hub port advertises HLC and device is eligible */
+	BOOL usb2_hw_lpm_besl_capable; /* root-hub port advertises BLC */
+
+	BOOL lpm_setup_done;           /* LPM enable sequence already run after CONFIG_EP */
+	BOOL ltm_capable;              /* USB3: BOS SS Device Cap advertises LTM */
+	BOOL ltm_setup_done;           /* SET_FEATURE(LTM_ENABLE) already sent */
+
+	BOOL bos_fetched;              /* BOS pre-fetch already completed; reuse cached LPM data */
+	BOOL hub_desc_fetched;         /* Hub descriptor pre-fetch already completed; reuse cached ss_hub_desc */
 
 	/* Requests state data */
 	struct ep_context *ep_context[USB_MAX_ENDPOINT_CONTEXTS];
@@ -215,9 +276,25 @@ s8 xhci_udev_send(struct USBIORequest *req);
 void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, s8 err);
 void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, s8 err, u32 actual);
 
+/* Resume a SET_CONFIGURATION deferred behind a BOS/hub pre-fetch (EP0 must be idle) */
+void xhci_udev_run_pending_set_config(struct usb_device *udev);
+
 /* Send commands to device */
 void xhci_udev_clear_feature_halt(struct usb_device *udev, u8 ep_index);
 void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type);
+BOOL xhci_udev_send_set_sel(struct usb_device *udev);
+void xhci_udev_set_device_lpm(struct usb_device *udev, BOOL u2);
+void xhci_udev_set_device_ltm(struct usb_device *udev);
+void xhci_udev_set_port_lpm_timeout(struct usb_device *udev, BOOL u2, u16 timeout);
+
+/* Multi-step operation sequencing (see enum udev_op) */
+BOOL xhci_udev_op_begin(struct usb_device *udev, enum udev_op op, struct USBIORequest *stash);
+void xhci_udev_op_advance(struct usb_device *udev, enum udev_op_event event);
+void xhci_udev_op_cancel(struct usb_device *udev, enum udev_op which, s8 err); /* UDEV_OP_NONE = any */
+
+/* Port suspend (U3) sequencing */
+BOOL xhci_udev_suspend_port(struct usb_device *hub_udev, u8 port);
+void xhci_udev_resume_port(struct usb_device *hub_udev, u8 port);
 
 /* Descriptor access */
 s32 xhci_ep_type_for_index(struct usb_device *udev, u8 ep_index);

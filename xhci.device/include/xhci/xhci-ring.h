@@ -310,10 +310,29 @@ void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);
 
 BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_segs);
 
+/* A mapped DMA buffer: either direct (bounce == NULL, cache-maintained) or
+ * bounced through one of the controller's bounce slabs. */
+struct xhci_dma_span
+{
+	APTR cpu;        /* caller's buffer */
+	u32 length;
+	APTR bounce;     /* bounce buffer; NULL when mapped directly */
+	u8 bounce_class; /* REQ_BOUNCE_CLASS_* when bounced */
+};
+
+void xhci_dma_span_unmap(struct xhci_ctrl *ctrl, struct xhci_dma_span *span, BOOL copy_back);
+void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct USBIORequest *req, BOOL copy);
+
 s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell);
-s8 xhci_ring_enqueue_td_at_frame(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u16 frame);
+
+/* RT ISO TD: no request object - the TD itself carries the payload.
+ * staging_in marks an IN buffer owned by the endpoint's staging slab
+ * (freed on completion/teardown). */
+s8 xhci_ring_enqueue_rt_td(struct usb_device *udev, u8 ep_index, APTR buffer, u32 length,
+                           u16 frame, u16 dir, BOOL staging_in, BOOL defer_doorbell);
 BOOL xhci_ring_has_room(struct ep_context *ep_ctx, u32 needed_trbs);
 void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
+void xhci_ring_kick_ep(struct usb_device *udev, u8 ep_index);
 
 void xhci_ring_acknowledge_event(struct xhci_ctrl *ctrl);
 union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring);

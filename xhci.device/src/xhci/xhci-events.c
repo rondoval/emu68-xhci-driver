@@ -31,6 +31,7 @@
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-descriptors.h>
 #include <xhci/xhci-endpoint.h>
+#include <xhci/xhci-td.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
 #include <xhci/xhci-context.h>
@@ -49,17 +50,17 @@ typedef void (*ep_state_handler)(struct usb_device *udev, struct ep_context *ep_
 
 static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
-static void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, u16 rt_frame, struct ep_context *ep_ctx, struct usb_device *udev);
-static void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
+static void ep_handle_rt_iso(struct ep_context *ep_ctx, const struct xhci_td_completion *done);
 static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
+static void ep_handle_suspended(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
 static const ep_state_handler ep_state_dispatch[] = {
     [USB_DEV_EP_STATE_IDLE] = NULL, /* use default handler */
-    [USB_DEV_EP_STATE_RECEIVING_CONTROL_SHORT] = ep_handle_receiving_control_short,
     [USB_DEV_EP_STATE_RECEIVING] = ep_handle_receiving_generic,
     [USB_DEV_EP_STATE_ABORTING] = ep_handle_aborting,
     [USB_DEV_EP_STATE_RESETTING] = NULL,
     [USB_DEV_EP_STATE_FAILED] = NULL,
+    [USB_DEV_EP_STATE_SUSPENDED] = ep_handle_suspended,
     [USB_DEV_EP_STATE_RT_ISO_STOPPED] = NULL,
     [USB_DEV_EP_STATE_RT_ISO_RUNNING] = ep_handle_receiving_generic,
     [USB_DEV_EP_STATE_RT_ISO_STOPPING] = ep_handle_receiving_generic};
@@ -309,35 +310,38 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         return;
     }
 
-    struct USBIORequest *req = xhci_ep_get_by_trb(ep_ctx, (dma_addr_t)trb_addr);
-    if (!req)
+    /* A short packet on a non-final TRB only records the exact transferred
+     * length; the controller follows up with the final-TRB event, which
+     * completes the TD (and, for control TDs, the status stage).  All other
+     * events consume the TD with an exact act_len. */
+    struct xhci_td_completion done;
+    BOOL deferred;
+    if (!xhci_ep_complete_by_trb(ep_ctx, (dma_addr_t)trb_addr,
+                                 EVENT_TRB_LEN(transfer_len),
+                                 comp == COMP_SHORT_TX,
+                                 &done, &deferred))
     {
-        Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %lu\n",
-                (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
+        if (!deferred)
+            Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %lu\n",
+                    (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
         return;
     }
 
-    u32 act_len = req->data_buffer_length - EVENT_TRB_LEN(transfer_len);
-
-    BOOL is_rt_iso = req->req.io_Command == CMD_REGISTER_ISOCHRONOUS_HOOKS;
-    if (is_rt_iso)
+    if (done.rt)
     {
-        /* Recover the frame number from field3 of the completing TRB; we wrote it there at submit time. */
-        const struct xhci_generic_trb *completed_trb = (const struct xhci_generic_trb *)(uintptr_t)trb_addr;
-        u16 rt_frame = GET_TRB_FRAME_ID(le32(completed_trb->field[3]));
-
         if (comp == COMP_MISSED_INT)
-            Kprintf("RT ISO missed-service addr=%lu ep=%lu frame=%lu len=%lu trb=%08lx%08lx\n",
+            Kprintf("RT ISO missed-service addr=%lu ep=%lu frame=%lu len=%lu\n",
                     (ULONG)udev->virtual_address,
                     (ULONG)ep_index,
-                    (ULONG)rt_frame,
-                    (ULONG)req->data_buffer_length,
-                    (ULONG)u64_hi32(trb_addr),
-                    (ULONG)u64_lo32(trb_addr));
+                    (ULONG)done.rt_frame,
+                    (ULONG)done.rt_length);
 
-        ep_handle_rt_iso(req, act_len, rt_frame, ep_ctx, udev);
+        ep_handle_rt_iso(ep_ctx, &done);
         return;
     }
+
+    struct USBIORequest *req = done.req;
+    u32 act_len = done.act_len;
 
     s8 status = translate_status(comp);
     KprintfH("result status=%ld act_len=%lu comp=%lu\n", (LONG)status, (ULONG)act_len, (ULONG)comp);
@@ -359,48 +363,39 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     }
 
     xhci_udev_io_reply_data(udev, req, status, act_len);
-    if (req->req.io_Command == CMD_REQUEST_CONTROL && comp == COMP_SHORT_TX)
-        //TODO rework this, we should just keep the TD around until the status stage completes 
-        //instead of special-casing short control transfers here and in the event handler
-        // just remove the request as replied
-        xhci_ep_set_receiving_control_short(ep_ctx);
-    else
-        xhci_ep_set_idle(ep_ctx);
+    xhci_ep_set_idle(ep_ctx);
 }
 
-void ep_handle_rt_iso(struct USBIORequest *req, u32 act_len, u16 rt_frame, struct ep_context *ep_ctx, struct usb_device *udev)
+static void ep_handle_rt_iso(struct ep_context *ep_ctx, const struct xhci_td_completion *done)
 {
-    struct xhci_ctrl *ctrl = udev->controller;
-
-    if (req->direction == DIRECTION_IN)
+    if (done->rt_dir == DIRECTION_IN)
     {
-        if (act_len > 0)
-            xhci_ep_rt_iso_in(ep_ctx, req, act_len, rt_frame);
+        if (done->act_len > 0)
+            xhci_ep_rt_iso_in(ep_ctx, done->rt_buffer, done->rt_length, done->act_len, done->rt_frame);
 
-        xhci_ep_free_rt_iso_buffer(ep_ctx, req->data_buffer);
+        xhci_ep_free_rt_iso_buffer(ep_ctx, done->rt_buffer);
     }
     else
-        xhci_ep_rt_iso_out(ep_ctx, req, act_len, rt_frame);
-
-    /* RT ISO TDs clone IO requests; free them after completion to avoid leaks. */
-    slab_free(&ctrl->iso_clone_slab, req);
+        xhci_ep_rt_iso_out(ep_ctx, done->rt_buffer, done->rt_length, done->act_len, done->rt_frame);
 
     xhci_ep_schedule_rt_iso(ep_ctx);
 }
 
-static void ep_handle_receiving_control_short(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
+/* Stop Endpoint completions ahead of a port suspend (U3): the TD stays queued
+ * on the ring for the resume - drop the event quietly. */
+static void ep_handle_suspended(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
-    (void)udev;
-    (void)ep_ctx;
-    (void)event;
+    const xhci_comp_code comp = GET_COMP_CODE(le32(event->trans_event.transfer_len));
 
-    /* Short data stage, clear up additional status stage event */
-    KprintfH("short-tx status event flags=%08lx status=%08lx\n",
-             (ULONG)le32(event->generic.field[3]),
-             (ULONG)le32(event->generic.field[2]));
+    if (comp == COMP_STOP || comp == COMP_STOP_INVAL || comp == COMP_STOP_SHORT)
+    {
+        KprintfH("addr %lu EP %lu stopped for suspend (comp=%lu)\n",
+                 (ULONG)udev->virtual_address,
+                 (ULONG)xhci_ep_get_ep_index(ep_ctx), (ULONG)comp);
+        return;
+    }
 
-    // no need to confirm slot and ep as this is done by event handler
-    xhci_ep_set_idle(ep_ctx);
+    ep_handle_default(udev, ep_ctx, event);
 }
 
 static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)

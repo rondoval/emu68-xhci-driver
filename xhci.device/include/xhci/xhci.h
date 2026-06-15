@@ -27,6 +27,7 @@
 #include <bits.h>
 #include <iomem.h>
 #include <slab.h>
+#include <dma_mem.h>
 #include <devices/hcd_api.h>
 #include <xhci/xhci-udev.h>
 
@@ -129,22 +130,29 @@ struct xhci_ctrl
 	u16 hci_version;
 	u32 quirks;			  /* XHCI_QUIRK_* bitmask, set at probe */
 	u32 vl805_fw_version; /* VL805 MCU firmware version (PCI cfg 0x50); 0 for other controllers */
+	BOOL cfc_supported;	  /* HCC_CFC: per-TRB Frame ID is reliable */
+	BOOL cmc_supported;	  /* HCC_CMC: controller enforces MEL on ConfigEP/EvalCtx */
+	BOOL ltc_supported;	  /* HCC_LTC: controller consumes device LTM packets */
+	u8 u1_host_exit_lat;  /* HCSPARAMS3 bits 7:0: root hub U1->U0 latency (us) */
+	u16 u2_host_exit_lat; /* HCSPARAMS3 bits 31:16: root hub U2->U0 latency (us) */
+	u32 page_size;		  /* PAGESIZE register decoded to bytes; cached at init */
 
-	APTR memoryPool;
-#define XHCI_TD_SMALL_TRBS         8                       /* trb_addr_slab covers up to this many TRBs */
-#define XHCI_BOUNCE_SMALL_SIZE     256                     /* covers RT ISO 192 + tiny ctrl/desc */
-#define XHCI_BOUNCE_SMALL_CAP      256
-#define XHCI_BOUNCE_MED_SIZE       (32 * 1024)             /* covers ≤32KiB bulk reads */
-#define XHCI_BOUNCE_MED_CAP        8
-#define XHCI_BOUNCE_LARGE_SIZE     (2 * 1024 * 1024)       /* mass storage 2MB transfers */
-#define XHCI_BOUNCE_LARGE_CAP      2                       /* Poseidon 1 bulk/EP */
-#define XHCI_ISO_CLONE_CAP         320                     /* 32 ms RT ISO target at 1 kHz ESIT plus headroom */
-	struct slab_cache td_slab;            /* one struct xhci_td per slot */
-	struct slab_cache trb_addr_slab;      /* XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t) per slot */
-	struct slab_cache bounce_small;       /* XHCI_BOUNCE_SMALL_SIZE bytes per slot */
-	struct slab_cache bounce_med;         /* XHCI_BOUNCE_MED_SIZE bytes per slot */
-	struct slab_cache bounce_large;       /* XHCI_BOUNCE_LARGE_SIZE bytes per slot */
-	struct slab_cache iso_clone_slab;     /* sizeof(struct USBIORequest) per slot */
+	struct dma_mem_ctx dma_ctx; /* Emu68 (DMA-reachable) RAM regions; backs dmaPool */
+	struct dma_pool *dmaPool;	/* region-restricted DMA pool (Emu68 RAM) for DMA buffers */
+	APTR metaPool;				/* ordinary Exec pool for CPU-only metadata */
+#define XHCI_TD_SMALL_TRBS 8	   /* trb_addr_slab covers up to this many TRBs */
+#define XHCI_BOUNCE_SMALL_SIZE 256 /* covers RT ISO 192 + tiny ctrl/desc */
+#define XHCI_BOUNCE_SMALL_CAP 256
+#define XHCI_BOUNCE_MED_SIZE (32 * 1024) /* covers ≤32KiB bulk reads */
+#define XHCI_BOUNCE_MED_CAP 8
+#define XHCI_BOUNCE_LARGE_SIZE (2 * 1024 * 1024) /* mass storage 2MB transfers */
+#define XHCI_BOUNCE_LARGE_CAP 2					 /* Poseidon 1 bulk/EP */
+	struct slab_cache td_slab;					 /* one struct xhci_td per slot */
+	struct slab_cache trb_addr_slab;			 /* XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t) per slot */
+	struct slab_cache seg_slab;					 /* one ring segment (seg_size bytes, self-aligned) per slot */
+	struct slab_cache bounce_small;				 /* XHCI_BOUNCE_SMALL_SIZE bytes per slot */
+	struct slab_cache bounce_med;				 /* XHCI_BOUNCE_MED_SIZE bytes per slot */
+	struct slab_cache bounce_large;				 /* XHCI_BOUNCE_LARGE_SIZE bytes per slot */
 	struct Library *utilityBase;
 	struct pci_dev *pci_dev;
 	BOOL msi_enabled; /* TRUE after EnableMSI + AddIntServer succeed */
@@ -172,7 +180,22 @@ inline void xhci_inval_cache(void *addr, u32 len)
 	CachePostDMA((APTR)addr, &len, 0);
 }
 
-void *xhci_malloc(struct xhci_ctrl *ctrl, u32 size);
+static inline void *xhci_malloc_page_bounded(struct xhci_ctrl *ctrl, u32 size, u32 align)
+{
+	/* A block aligned to round_up_pow2(size) cannot cross any power-of-two boundary
+	 * >= size (it nests inside one self-aligned slot, and that slot divides the coarser
+	 * boundary), so rounding the alignment up to cover the size makes the buffer never
+	 * cross the controller PAGESIZE boundary.  align must be a power of two (callers pass
+	 * XHCI_ALIGNMENT); size <= page_size for every caller. */
+	u32 eff = round_up_pow2_u32(size);
+	if (eff < align)
+		eff = align;
+
+	void *ptr = dma_zalloc(ctrl->dmaPool, eff, size);
+	if (ptr)
+		xhci_flush_cache(ptr, size, 0);
+	return ptr;
+}
 
 u32 *xhci_find_next_capability(struct xhci_ctrl *ctrl, u32 cap_id, u32 *init_offset);
 struct xhci_protocol_caps xhci_get_protocol_caps(u32 *base_address);

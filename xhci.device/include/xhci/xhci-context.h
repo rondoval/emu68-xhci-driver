@@ -222,9 +222,17 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
 void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx);
 
 u32 xhci_get_hardware_address(struct usb_device *udev);
+u32 xhci_read_hw_ep_state(struct usb_device *udev, u8 ep_index);
 u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, u8 ep_index);
 
-void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev);
+void xhci_setup_addressable_virt_dev(struct usb_device *udev);
+
+void xhci_update_mel_in_input_ctx(struct usb_device *udev);
+void xhci_set_lpm_parameters(struct usb_device *udev);
+void xhci_lpm_enable(struct usb_device *udev);
+BOOL xhci_lpm_enable_stage2(struct usb_device *udev);
+void xhci_lpm_devinit_enable(struct usb_device *udev);
+void xhci_lpm_disable(struct usb_device *udev);
 
 void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size);
 s8 xhci_set_configuration(struct usb_device *udev, u32 config_value);

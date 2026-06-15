@@ -162,6 +162,22 @@
 #define USB_DEV_STAT_U2_ENABLED 3  /* transition into U2 state */
 #define USB_DEV_STAT_LTM_ENABLED 4 /* Latency tolerance messages */
 
+/* USB 3.0 LPM link-state timeout / SEL-PEL limits (USB 3.2 spec Table 9-?) */
+#define USB3_LPM_DISABLED          0x0
+#define USB3_LPM_U1_MAX_TIMEOUT    0x7F
+#define USB3_LPM_U2_MAX_TIMEOUT    0xFE
+#define USB3_LPM_MAX_U1_SEL_PEL    0xFF   /* u1 sel/pel field is 1 byte */
+#define USB3_LPM_MAX_U2_SEL_PEL    0xFFFF /* u2 sel/pel field is 2 bytes */
+
+/* SET_SEL data stage payload (USB 3.2 spec section 9.4.12), 6 bytes */
+struct usb_set_sel_req
+{
+	__le8  u1_sel;  /* us */
+	__le8  u1_pel;  /* us */
+	__le16 u2_sel;  /* us */
+	__le16 u2_pel;  /* us */
+} __attribute__((packed));
+
 /*-------------------------------------------------------------------------*/
 
 /*
@@ -613,7 +629,13 @@ struct usb_2_0_extension_capability_descriptor
 	__le32 bmAttributes;
 } __attribute__((packed));
 
-#define USB_20_EXTENSION_ATT_LINK_POWER_MANAGEMENT 0x02
+/* USB 2.0 Extension descriptor bmAttributes (USB 3.2 spec Table 9-16) */
+#define USB_20_EXTENSION_ATT_LINK_POWER_MANAGEMENT 0x02  /* bit 1: LPM */
+#define USB_20_EXTENSION_ATT_BESL_SUPPORTED         0x04  /* bit 2: BESL & Alt HIRD */
+#define USB_20_EXTENSION_ATT_BESL_BASELINE_VALID    0x08  /* bit 3 */
+#define USB_20_EXTENSION_ATT_BESL_DEEP_VALID        0x10  /* bit 4 */
+#define USB_20_EXTENSION_ATT_BESL_BASELINE(p)       (((p) >> 8) & 0xfU)   /* bits 11:8 */
+#define USB_20_EXTENSION_ATT_BESL_DEEP(p)           (((p) >> 12) & 0xfU)  /* bits 15:12 */
 
 /* SuperSpeed USB Device Capability descriptor */
 struct usb_ss_device_capability_descriptor

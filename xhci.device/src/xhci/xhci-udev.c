@@ -39,6 +39,10 @@
 
 static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBIORequest *io);
 static void xhci_udev_translate_hub_descriptor_request(struct usb_device *udev, struct USBIORequest *io);
+static struct usb_device *xhci_udev_find_child_on_port(struct usb_device *hub, u32 port);
+static BOOL xhci_udev_suspend_device(struct usb_device *udev, u8 root_port, struct USBIORequest *deferred_req);
+static void xhci_udev_do_set_config(struct usb_device *udev, struct USBIORequest *req);
+static void xhci_udev_op_clear(struct usb_device *udev);
 
 /* Move udev to a new virtual address.  The sole writer of the migration, so
  * the invariant map[addr] == udev <=> udev->virtual_address == addr lives in
@@ -59,7 +63,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address)
     if (ctrl->devices_by_virtual_address[virtual_address])
         xhci_udev_free(ctrl->devices_by_virtual_address[virtual_address]);
 
-    struct usb_device *udev = pool_zalloc(ctrl->memoryPool, sizeof(*udev));
+    struct usb_device *udev = pool_zalloc(ctrl->metaPool, sizeof(*udev));
     if (!udev)
     {
         Kprintf("Failed to allocate usb_device for addr %lu\n", (ULONG)virtual_address);
@@ -98,7 +102,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address)
 destroy_out_ctx:
     xhci_free_container_ctx(ctrl, udev->out_ctx);
 free_udev:
-    pool_free(ctrl->memoryPool, udev);
+    pool_free(ctrl->metaPool, udev);
 nothing:
     return NULL;
 }
@@ -155,7 +159,7 @@ void xhci_udev_free(struct usb_device *udev)
     while ((node = RemHeadMinList(&udev->configurations)) != NULL)
     {
         struct usb_config *conf = (struct usb_config *)node;
-        pool_free(ctrl->memoryPool, conf);
+        pool_free(ctrl->metaPool, conf);
     }
 
     if (udev->in_ctx)
@@ -166,7 +170,7 @@ void xhci_udev_free(struct usb_device *udev)
     ctrl->dcbaa->dev_context_ptrs[udev->slot_id] = 0;
     ctrl->devices_by_virtual_address[udev->virtual_address] = NULL;
     ctrl->devices_by_slot_id[udev->slot_id] = NULL;
-    pool_free(ctrl->memoryPool, udev);
+    pool_free(ctrl->metaPool, udev);
 }
 
 static u8 xhci_udev_find_epaddr_by_num(struct usb_device *udev, u8 epnum)
@@ -281,6 +285,123 @@ s8 xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io)
     return ret;
 }
 
+/**
+ * Issue an internal GET_DESCRIPTOR(hub) on EP0 before CONFIG_EP for hubs.
+ * On completion, the hub descriptor data is cached and CONFIG_EP is issued
+ * with the correct slot context fields.
+ */
+static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
+{
+    if (!udev || !udev->controller)
+        return FALSE;
+
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    /* Choose descriptor type based on device speed */
+    const u8 desc_type = (udev->speed >= USB_SPEED_SUPER) ? USB_DT_SS_HUB : USB_DT_HUB;
+    const u8 desc_len = (desc_type == USB_DT_SS_HUB) ? 12 : 9;
+
+    u8 *buf = dma_alloc(ctrl->dmaPool, DMA_ALIGN_MIN, desc_len);
+    struct USBIORequest *io = pool_zalloc(ctrl->metaPool, sizeof(*io));
+    if (!io || !buf)
+    {
+        Kprintf("xhci_udev_fetch_hub_descriptor: alloc failed, falling back to SET_CONFIGURATION without hub data\n");
+        if (buf)
+            dma_free(ctrl->dmaPool, buf);
+        if (io)
+            pool_free(ctrl->metaPool, io);
+        return FALSE;
+    }
+
+    io->req.io_Command = CMD_REQUEST_CONTROL;
+    io->req.io_Flags = IOF_QUICK;
+    io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED | REQ_HUB_DESC_FETCH;
+
+    io->setup.bmRequestType = USB_DIR_IN | USB_RT_HUB;
+    io->setup.bRequest = USB_REQ_GET_DESCRIPTOR;
+    io->setup.wValue = le16((u16)(desc_type << 8));
+    io->setup.wIndex = 0;
+    io->setup.wLength = le16(desc_len);
+
+    io->virtual_address = udev->virtual_address;
+    io->data_buffer = buf;
+    io->data_buffer_length = desc_len;
+    io->direction = DIRECTION_IN;
+
+    KprintfH("Fetching hub descriptor (type=0x%02lx len=%lu) for addr=%lu before CONFIG_EP\n",
+             (ULONG)desc_type, (ULONG)desc_len, (ULONG)udev->virtual_address);
+
+    /* Submit directly to the transfer ring — xhci_ep_enqueue only queues
+     * for later and requires a completion event to drain, but EP0 may be
+     * idle right now so nothing would ever kick the queue. */
+    s8 ring_ret = xhci_ring_enqueue_td(udev, io, 1000, FALSE);
+    if (ring_ret != ERR_NO_ERROR)
+    {
+        Kprintf("xhci_udev_fetch_hub_descriptor: ring_enqueue_td failed (%ld), falling back\n", (LONG)ring_ret);
+        dma_free(ctrl->dmaPool, buf);
+        pool_free(ctrl->metaPool, io);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/**
+ * Issue an internal GET_DESCRIPTOR(BOS, phase-1 header only) on EP0.
+ * The caller stashes the request as UDEV_OP_CONFIGURE before calling; on failure
+ * this leaves the stash intact so the caller can run the deferred config.
+ * Returns TRUE if the fetch was submitted (SET_CONFIGURATION is deferred),
+ * FALSE if the fetch could not be submitted (caller proceeds normally).
+ */
+static BOOL xhci_udev_fetch_bos(struct usb_device *udev)
+{
+    if (!udev || !udev->controller)
+        return FALSE;
+
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    u8 *buf = dma_alloc(ctrl->dmaPool, DMA_ALIGN_MIN, sizeof(struct usb_bos_descriptor));
+    struct USBIORequest *io = pool_zalloc(ctrl->metaPool, sizeof(*io));
+    if (!io || !buf)
+    {
+        Kprintf("xhci_udev_fetch_bos: alloc failed\n");
+        if (buf)
+            dma_free(ctrl->dmaPool, buf);
+        if (io)
+            pool_free(ctrl->metaPool, io);
+        return FALSE;
+    }
+
+    io->req.io_Command = CMD_REQUEST_CONTROL;
+    io->req.io_Flags = IOF_QUICK;
+    io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED | REQ_BOS_FETCH;
+
+    io->setup.bmRequestType = USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
+    io->setup.bRequest = USB_REQ_GET_DESCRIPTOR;
+    io->setup.wValue = le16((u16)(USB_DT_BOS << 8));
+    io->setup.wIndex = 0;
+    io->setup.wLength = le16((u16)sizeof(struct usb_bos_descriptor));
+
+    io->virtual_address = udev->virtual_address;
+    io->data_buffer = buf;
+    io->data_buffer_length = (u32)sizeof(struct usb_bos_descriptor);
+    io->direction = DIRECTION_IN;
+
+    KprintfH("Fetching BOS header for addr=%lu before CONFIG_EP\n",
+             (ULONG)udev->virtual_address);
+
+    s8 ring_ret = xhci_ring_enqueue_td(udev, io, 1000, FALSE);
+    if (ring_ret != ERR_NO_ERROR)
+    {
+        Kprintf("xhci_udev_fetch_bos: ring_enqueue_td failed (%ld)\n", (LONG)ring_ret);
+        dma_free(ctrl->dmaPool, buf);
+        pool_free(ctrl->metaPool, io);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static s8 xhci_udev_send_ctrl_first(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms)
 {
     /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
@@ -321,28 +442,91 @@ static s8 xhci_udev_send_ctrl_first(struct usb_device *udev, struct USBIORequest
     if (setup->bRequest == USB_REQ_SET_CONFIGURATION &&
         (setup->bmRequestType & USB_TYPE_MASK) == USB_TYPE_STANDARD)
     {
-        /* For hubs, we need the hub descriptor BEFORE configuring so that
-         * xhci_set_configuration() can program correct Number of Ports and
-         * TT Think Time into the slot context.  EP0 is live (set up during
-         * ADDRESS_DEVICE), so we fetch the hub descriptor first, then run
-         * the full SET_CONFIGURATION + CONFIG_EP from the completion handler. */
+        /* Stash the request as UDEV_OP_CONFIGURE, then optionally pre-fetch a
+         * descriptor on EP0 before configuring; the prefetch completion
+         * resumes the deferred SET_CONFIGURATION
+         * (xhci_udev_run_pending_set_config).
+         *   - Hubs: GET_DESCRIPTOR(hub) so xhci_set_configuration() can program
+         *     correct Number of Ports / TT Think Time into the slot context.
+         *   - HS/SS: GET_DESCRIPTOR(BOS) for U1/U2 exit latencies (USB3) or BESL
+         *     (USB2 LPM), needed for Max Exit Latency.  Non-fatal.
+         * EP0 is live (set up during ADDRESS_DEVICE).  A prefetch that can't be
+         * submitted leaves the stash intact, so we just run the config now. */
+        if (!xhci_udev_op_begin(udev, UDEV_OP_CONFIGURE, io))
+        {
+            /* op slot busy (unexpected): configure without the prefetch */
+            xhci_udev_do_set_config(udev, io);
+            return ERR_NO_ERROR;
+        }
+
         if (udev->is_hub)
         {
-            udev->pending_set_config_req = io;
-            if (xhci_udev_fetch_hub_descriptor(udev))
+            if (!udev->hub_desc_fetched && xhci_udev_fetch_hub_descriptor(udev))
+                return ERR_NO_ERROR;
+        }
+        else if (udev->speed >= USB_SPEED_HIGH)
+        {
+            if (!udev->bos_fetched && xhci_udev_fetch_bos(udev))
                 return ERR_NO_ERROR;
         }
 
-        s8 ret = xhci_set_configuration(udev, le16(setup->wValue) & 0xff);
-        if (ret != ERR_NO_ERROR)
-        {
-            Kprintf("Failed to configure xHCI endpoint\n");
-            return ret;
-        }
-
-        // this will trigger a chain of commands and control xfer
-        xhci_configure_endpoints(udev, FALSE, io);
+        /* LS/FS, or the prefetch wasn't submitted: configure immediately. */
+        xhci_udev_run_pending_set_config(udev);
         return ERR_NO_ERROR;
+    }
+
+    /* CLEAR_FEATURE(ENDPOINT_HALT) from the stack: keep the controller-side
+     * endpoint state in sync with the device (mirror Linux
+     * xhci_endpoint_reset).  If our own STALL recovery already reset the
+     * endpoint and sent the device-level clear-halt, answer without a
+     * duplicate wire request; if the endpoint is still halted (the stack
+     * noticed before our event handling), run our recovery - it ends with
+     * the internal clear-halt.  An unsolicited clear on a healthy endpoint
+     * (e.g. mass-storage reset recovery) is forwarded as-is: the device
+     * resets its data toggle/sequence, and a stale xHC sequence recovers
+     * through the normal STALL path on the next transfer. */
+    if (setup->bmRequestType == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
+        setup->bRequest == USB_REQ_CLEAR_FEATURE &&
+        le16(setup->wValue) == USB_ENDPOINT_HALT &&
+        udev->slot_id != 0)
+    {
+        u8 ep_addr = (u8)(le16(setup->wIndex) & 0xffU);
+        u8 halt_ep_index = xhci_ep_index_from_parts(ep_addr & 0x0fU,
+                                                    (ep_addr & USB_DIR_IN) ? DIRECTION_IN : DIRECTION_OUT);
+        struct ep_context *halt_ep_ctx = (halt_ep_index != 0)
+                                             ? xhci_ep_get_context_for_index(udev, halt_ep_index)
+                                             : NULL;
+        if (halt_ep_ctx)
+        {
+            BOOL synced = xhci_ep_consume_halt_synced(halt_ep_ctx);
+            if (!synced && xhci_read_hw_ep_state(udev, halt_ep_index) == EP_STATE_HALTED)
+            {
+                KprintfH("stack clear-halt on halted EP %lu: running recovery\n", (ULONG)halt_ep_index);
+                xhci_reset_ep(udev, halt_ep_index);
+                synced = TRUE;
+            }
+            if (synced)
+            {
+                io->req.io_Error = ERR_NO_ERROR;
+                io->actual_length = 0;
+                if (!(io->req.io_Flags & IOF_QUICK))
+                    ReplyMsg((struct Message *)io);
+                return ERR_NO_ERROR;
+            }
+        }
+    }
+
+    /* SetPortFeature(SUSPEND) to an external hub: stop the attached child's
+     * endpoint rings first (xHCI 4.15.1); the request is forwarded to the hub
+     * once the stops complete (xhci_udev_suspend_finish). */
+    if (udev->is_hub &&
+        setup->bmRequestType == (USB_DIR_OUT | USB_RT_PORT) &&
+        setup->bRequest == USB_REQ_SET_FEATURE &&
+        le16(setup->wValue) == USB_PORT_FEAT_SUSPEND)
+    {
+        struct usb_device *child = xhci_udev_find_child_on_port(udev, le16(setup->wIndex) & 0xffU);
+        if (child && xhci_udev_suspend_device(child, 0, io))
+            return ERR_NO_ERROR;
     }
 
     /* If we don't have a slot yet, enable one and allocate Virt Dev */
@@ -420,23 +604,35 @@ void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, 
     {
         io->req.io_Error = err;
 
-        /* Internal, reply-less requests (IOF_QUICK + magic tag) */
+        /* Internal, reply-less requests (IOF_QUICK + magic tag).  Free the
+         * transfer's payload buffer and the request struct, but do NOT resume
+         * any deferred work from here: a BOS/hub pre-fetch that STALLs leaves
+         * EP0 halted, and resuming the stashed SET_CONFIGURATION before EP0 has
+         * been recovered just re-STALLs the SET_CONFIGURATION transfer in an
+         * endless loop.  the UDEV_OP_CONFIGURE stash stays put and is
+         * resumed from handle_set_deq() once the EP0 reset/stop recovery
+         * completes. */
         if (io->driver_private_flags & REQ_INTERNAL)
         {
-            if (ctrl)
-                pool_free(ctrl->memoryPool, io);
-            return;
-        }
+            /* Internal EP0 requests are fire-and-forget; without this line a
+             * device rejecting e.g. SET_FEATURE(U1/U2_ENABLE) or SET_SEL would
+             * be invisible. */
+            Kprintf("internal EP0 request failed: addr %lu bmReqType=%02lx bReq=%02lx wValue=%lu err=%ld\n",
+                    (ULONG)io->virtual_address, (ULONG)io->setup.bmRequestType,
+                    (ULONG)io->setup.bRequest, (ULONG)le16(io->setup.wValue), (LONG)err);
 
-        /* RT ISO clones were never sent as messages — never ReplyMsg.
-         * IN clone staging buffers must be freed by callers (td_unmap_and_reply /
-         * ep_handle_rt_iso / halted branch) before reaching here; data_buffer
-         * should be NULL at this point. */
-        if (io->driver_private_flags & REQ_RT_ISO_CLONE)
-        {
+            /* A rejected SET_SEL ends the LPM sequence (no device-initiated
+             * U1/U2); free the op slot. */
+            if ((io->driver_private_flags & REQ_SET_SEL) && ctrl)
+            {
+                struct usb_device *udev = ctrl->devices_by_virtual_address[io->virtual_address];
+                if (udev)
+                    xhci_udev_op_cancel(udev, UDEV_OP_LPM_ENABLE, ERR_NO_ERROR);
+            }
+            if (ctrl && io->data_buffer)
+                dma_free(ctrl->dmaPool, io->data_buffer);
             if (ctrl)
-                slab_free(&ctrl->iso_clone_slab, io);
-
+                pool_free(ctrl->metaPool, io);
             return;
         }
 
@@ -449,6 +645,11 @@ static void xhci_udev_handle_hub_prefetch(struct usb_device *udev, struct USBIOR
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
+    /* ss_hub_desc was cached by xhci_udev_parse_control_message before we got
+     * here; mark it so a repeat SET_CONFIGURATION skips the re-fetch (and, for
+     * SS hubs, the chained BOS fetch below). */
+    udev->hub_desc_fetched = TRUE;
+
     KprintfH("Hub descriptor pre-fetch done for addr=%lu (ports=%lu tt=%lu)\n",
              (ULONG)udev->virtual_address,
              (ULONG)udev->ss_hub_desc.bNbrPorts,
@@ -456,26 +657,285 @@ static void xhci_udev_handle_hub_prefetch(struct usb_device *udev, struct USBIOR
 
     if (ctrl && io->data_buffer)
     {
-        dma_free(ctrl->memoryPool, io->data_buffer);
+        dma_free(ctrl->dmaPool, io->data_buffer);
         io->data_buffer = NULL;
     }
 
-    /* Retrieve the stashed SET_CONFIGURATION IOReq */
-    struct USBIORequest *orig_req = udev->pending_set_config_req;
-    udev->pending_set_config_req = NULL;
+    /* SS hubs: chain a BOS fetch so the hub's own U1/U2 exit latencies are
+     * known — they are needed to compute Max Exit Latency for any downstream
+     * device.  the UDEV_OP_CONFIGURE stash stays put and the BOS completion
+     * (or EP0-recovery) path runs the deferred SET_CONFIGURATION. */
+    if (udev->speed >= USB_SPEED_SUPER && xhci_udev_fetch_bos(udev))
+        return;
 
-    /* Now run the deferred xhci_set_configuration — hub data is cached */
-    const u8 config_value = le16(orig_req->setup.wValue) & 0xffU;
+    /* Hub data is cached (or the BOS fetch wasn't submitted): run the deferred
+     * SET_CONFIGURATION now. */
+    xhci_udev_run_pending_set_config(udev);
+}
+
+/* Program the configuration and issue CONFIG_EP for req (the stashed
+ * SET_CONFIGURATION travels onward as the command's completion request). */
+static void xhci_udev_do_set_config(struct usb_device *udev, struct USBIORequest *req)
+{
+    const u8 config_value = (u8)(le16(req->setup.wValue) & 0xffU);
     s8 ret = xhci_set_configuration(udev, config_value);
     if (ret != ERR_NO_ERROR)
     {
-        Kprintf("Hub SET_CONFIGURATION failed after hub desc fetch\n");
-        orig_req->req.io_Error = ret;
-        ReplyMsg((struct Message *)orig_req);
+        Kprintf("SET_CONFIGURATION failed after pre-fetch\n");
+        req->req.io_Error = ret;
+        ReplyMsg((struct Message *)req);
         return;
     }
 
-    xhci_configure_endpoints(udev, FALSE, orig_req);
+    xhci_configure_endpoints(udev, FALSE, req);
+}
+
+/**
+ * Run the device SET_CONFIGURATION that was deferred behind a BOS/hub pre-fetch.
+ * Consumes the UDEV_OP_CONFIGURE stash.  Must only be called once EP0 is idle
+ * and its ring is clean — i.e. from the pre-fetch success path, or from
+ * handle_set_deq() after an EP0 STALL/timeout recovery has completed
+ * (UDEV_OP_EVENT_EP0_RECOVERED).
+ */
+void xhci_udev_run_pending_set_config(struct usb_device *udev)
+{
+    if (udev->op.op != UDEV_OP_CONFIGURE)
+        return;
+
+    struct USBIORequest *orig_req = udev->op.stash;
+    xhci_udev_op_clear(udev);
+    if (!orig_req)
+        return;
+
+    xhci_udev_do_set_config(udev, orig_req);
+}
+
+/**
+ * xhci_udev_handle_bos_prefetch - BOS descriptor pre-fetch completion handler.
+ *
+ * Phase 1 (data_buffer_length == sizeof(struct usb_bos_descriptor)):
+ *   Parse wTotalLength from the 5-byte BOS header and issue the full-BOS
+ *   phase-2 fetch.  If the phase-2 ring submission succeeds we return without
+ *   touching the UDEV_OP_CONFIGURE stash; otherwise we fall through and run
+ *   SET_CONFIGURATION immediately with MEL = 0.
+ *
+ * Phase 2 (data_buffer_length > sizeof(struct usb_bos_descriptor)):
+ *   Walk every Device Capability descriptor and populate the USB2/USB3
+ *   exit-latency fields in udev, then run SET_CONFIGURATION.
+ *
+ * The io->data_buffer is always freed here.  The io struct itself is freed
+ * by the caller (xhci_udev_io_reply_data) after we return.
+ */
+static void xhci_udev_handle_bos_prefetch(struct usb_device *udev, struct USBIORequest *io)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+    u8 *buf = io->data_buffer;
+    KprintfH("BOS descriptor pre-fetch done for addr=%lu\n", (ULONG)udev->virtual_address);
+
+    io->data_buffer = NULL;
+
+    if (io->req.io_Error != ERR_NO_ERROR || !buf)
+        goto run_set_config;
+
+    if (io->data_buffer_length == (u32)sizeof(struct usb_bos_descriptor))
+    {
+        /* Phase 1: validate header and issue the full-BOS fetch */
+        KprintfH("HUB descriptor pre-fetch phase 1: total length field is %lu\n",
+                 (ULONG)le16(((struct usb_bos_descriptor *)buf)->wTotalLength));
+        const struct usb_bos_descriptor *hdr = (const struct usb_bos_descriptor *)buf;
+        if (hdr->bDescriptorType != USB_DT_BOS || hdr->bNumDeviceCaps == 0)
+            goto run_set_config;
+
+        u16 total = le16(hdr->wTotalLength);
+        if (total <= (u16)sizeof(struct usb_bos_descriptor) || total > 512u)
+        {
+            Kprintf("BOS wTotalLength %u out of range\n", (unsigned)total);
+            goto run_set_config;
+        }
+
+        dma_free(ctrl->dmaPool, buf);
+        buf = NULL;
+
+        u8 *buf2 = dma_alloc(ctrl->dmaPool, DMA_ALIGN_MIN, (u32)total);
+        struct USBIORequest *io2 = pool_zalloc(ctrl->metaPool, sizeof(*io2));
+        if (!io2 || !buf2)
+        {
+            Kprintf("xhci_udev_handle_bos_prefetch: phase-2 alloc failed\n");
+            if (buf2)
+                dma_free(ctrl->dmaPool, buf2);
+            if (io2)
+                pool_free(ctrl->metaPool, io2);
+            goto run_set_config;
+        }
+
+        io2->req.io_Command = CMD_REQUEST_CONTROL;
+        io2->req.io_Flags = IOF_QUICK;
+        io2->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED | REQ_BOS_FETCH;
+
+        io2->setup.bmRequestType = USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
+        io2->setup.bRequest = USB_REQ_GET_DESCRIPTOR;
+        io2->setup.wValue = le16((u16)(USB_DT_BOS << 8));
+        io2->setup.wIndex = 0;
+        io2->setup.wLength = le16(total);
+
+        io2->virtual_address = udev->virtual_address;
+        io2->data_buffer = buf2;
+        io2->data_buffer_length = (u32)total;
+        io2->direction = DIRECTION_IN;
+
+        s8 ring_ret = xhci_ring_enqueue_td(udev, io2, 1000, FALSE);
+        if (ring_ret != ERR_NO_ERROR)
+        {
+            Kprintf("xhci_udev_handle_bos_prefetch: phase-2 enqueue failed (%ld)\n", (LONG)ring_ret);
+            dma_free(ctrl->dmaPool, buf2);
+            pool_free(ctrl->metaPool, io2);
+            goto run_set_config;
+        }
+
+        /* Phase 2 in flight; the UDEV_OP_CONFIGURE stash stays put */
+        return;
+    }
+    else
+    {
+        /* Phase 2: parse all Device Capability descriptors */
+        const struct usb_bos_descriptor *hdr = (const struct usb_bos_descriptor *)buf;
+        if (hdr->bDescriptorType != USB_DT_BOS)
+            goto run_set_config;
+
+        KprintfH("BOS descriptor total length is %lu, num device caps is %lu\n",
+                 (ULONG)le16(hdr->wTotalLength), (ULONG)hdr->bNumDeviceCaps);
+        const u8 *cursor = buf + sizeof(struct usb_bos_descriptor);
+        const u8 *end = buf + (u32)le16(hdr->wTotalLength);
+        if (end > buf + io->data_buffer_length)
+            end = buf + io->data_buffer_length;
+
+        while (cursor + 3u <= end)
+        {
+            u8 caplen = cursor[0];
+            u8 dtype = cursor[1];
+            u8 captype = cursor[2];
+            if (caplen < 3u || cursor + caplen > end)
+                break;
+
+            if (dtype == USB_DT_DEVICE_CAPABILITY)
+            {
+                if (captype == USB_CAP_DESC_USB20_EXTENSION &&
+                    caplen >= (u8)sizeof(struct usb_2_0_extension_capability_descriptor))
+                {
+                    const struct usb_2_0_extension_capability_descriptor *ext =
+                        (const struct usb_2_0_extension_capability_descriptor *)cursor;
+                    u32 att = le32(ext->bmAttributes);
+                    udev->lpm_capable = (att & USB_20_EXTENSION_ATT_LINK_POWER_MANAGEMENT) ? TRUE : FALSE;
+                    udev->besl_supported = (att & USB_20_EXTENSION_ATT_BESL_SUPPORTED) ? TRUE : FALSE;
+                    udev->besl_baseline_valid = (att & USB_20_EXTENSION_ATT_BESL_BASELINE_VALID) ? TRUE : FALSE;
+                    udev->besl_deep_valid = (att & USB_20_EXTENSION_ATT_BESL_DEEP_VALID) ? TRUE : FALSE;
+                    if (udev->besl_baseline_valid)
+                        udev->besl_baseline = (u8)USB_20_EXTENSION_ATT_BESL_BASELINE(att);
+                    if (udev->besl_deep_valid)
+                        udev->besl_deep = (u8)USB_20_EXTENSION_ATT_BESL_DEEP(att);
+                    KprintfH("USB2 Ext Cap: lpm=%ld besl=%ld baseline=%lu(v=%ld) deep=%lu(v=%ld)\n",
+                             (LONG)udev->lpm_capable, (LONG)udev->besl_supported,
+                             (ULONG)udev->besl_baseline, (LONG)udev->besl_baseline_valid,
+                             (ULONG)udev->besl_deep, (LONG)udev->besl_deep_valid);
+                }
+                else if (captype == USB_CAP_DESC_SS_USB_DEVICE &&
+                         caplen >= (u8)sizeof(struct usb_ss_device_capability_descriptor))
+                {
+                    const struct usb_ss_device_capability_descriptor *ss =
+                        (const struct usb_ss_device_capability_descriptor *)cursor;
+                    udev->u1_dev_exit_lat = ss->bU1DevExitLat;
+                    udev->u2_dev_exit_lat = le16(ss->wU2DevExitLat);
+                    udev->ltm_capable = (ss->bmAttributes & USB_SS_DEVICE_ATT_LATENCY_TOLERANCE_MESSAGES) != 0;
+                    KprintfH("SS Dev Cap: U1=%lu U2=%lu\n",
+                             (ULONG)udev->u1_dev_exit_lat, (ULONG)udev->u2_dev_exit_lat);
+                }
+            }
+
+            cursor += caplen;
+        }
+        /* Fall through to run_set_config */
+        KprintfH("Finished parsing BOS device capabilities for addr=%lu\n", (ULONG)udev->virtual_address);
+        KprintfH("Device LPM capability: %ld, BESL support: %ld, BESL baseline: %lu\n",
+                 (LONG)udev->lpm_capable, (LONG)udev->besl_supported, (ULONG)udev->besl_baseline);
+        KprintfH("Device U1 exit latency: %lu us, U2 exit latency: %lu us\n",
+                 (ULONG)udev->u1_dev_exit_lat, (ULONG)udev->u2_dev_exit_lat);
+
+        /* For SS devices, LPM capability comes from the SS Device Cap exit
+         * latencies (the USB2 Ext cap LPM bit only governs USB2 L1).  Mirror
+         * usb_device_supports_lpm(): non-zero exit latency and an LPM-capable
+         * path to the root hub.  (USB2 lpm_capable was set from the Ext cap.) */
+        if (udev->speed >= USB_SPEED_SUPER)
+            udev->lpm_capable = ((udev->u1_dev_exit_lat || udev->u2_dev_exit_lat) &&
+                                 (!udev->parent || udev->parent->parent == NULL ||
+                                  udev->parent->lpm_capable))
+                                    ? TRUE
+                                    : FALSE;
+
+        /* Now that exit latencies are known, compute the USB3 SEL/PEL/MEL
+         * parameters (no-op for non-SS devices). */
+        xhci_set_lpm_parameters(udev);
+    }
+
+run_set_config:
+    /* BOS handling is terminal here (phase-2 parse, or a give-up path); cache it
+     * so a repeat SET_CONFIGURATION reuses the LPM data instead of re-fetching.
+     * The phase-1 success path returns earlier and does not reach this label. */
+    udev->bos_fetched = TRUE;
+    if (buf)
+        dma_free(ctrl->dmaPool, buf);
+
+    xhci_udev_run_pending_set_config(udev);
+}
+
+/**
+ * Complete a successful internal (REQ_INTERNAL) request: run any deferred
+ * pre-fetch completion handler, free transient payload buffers and release the
+ * io struct.  Only used on the success path (xhci_udev_io_reply_data) where EP0
+ * is healthy; the failure path frees the request directly and resumes the
+ * deferred SET_CONFIGURATION from handle_set_deq() after EP0 recovery.
+ */
+static void xhci_udev_complete_internal(struct usb_device *udev, struct USBIORequest *io)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    /* Hub descriptor pre-fetch completion: now run the full
+     * SET_CONFIGURATION + CONFIG_EP with real hub data available.
+     * On the success path xhci_udev_parse_control_message already ran, so
+     * handle_get_hub_descriptor cached ss_hub_desc + tt_think_time. */
+    if (io->driver_private_flags & REQ_HUB_DESC_FETCH)
+        xhci_udev_handle_hub_prefetch(udev, io);
+
+    if (io->driver_private_flags & REQ_BOS_FETCH)
+        xhci_udev_handle_bos_prefetch(udev, io);
+
+    /* SET_SEL OUT transfer completed: free its 6-byte payload buffer and, now
+     * that the device knows the exit latencies, enable device-initiated U1/U2
+     * (UDEV_OP_LPM_ENABLE step 1).  A failed SET_SEL goes through
+     * xhci_udev_io_reply_failed instead, which cancels the op. */
+    if (io->driver_private_flags & REQ_SET_SEL)
+    {
+        if (ctrl && io->data_buffer)
+        {
+            dma_free(ctrl->dmaPool, io->data_buffer);
+            io->data_buffer = NULL;
+        }
+        xhci_udev_op_advance(udev, UDEV_OP_EVENT_SET_SEL_DONE);
+    }
+
+#ifdef DEBUG_HIGH
+    /* Confirm the device actually accepted the LPM feature enables (rejects
+     * land in xhci_udev_io_reply_failed instead). */
+    if (io->setup.bRequest == USB_REQ_SET_FEATURE &&
+        io->setup.bmRequestType == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE) &&
+        (le16(io->setup.wValue) == USB_DEVICE_U1_ENABLE ||
+         le16(io->setup.wValue) == USB_DEVICE_U2_ENABLE))
+        KprintfH("SET_FEATURE U%lu_ENABLE accepted by addr %lu\n",
+                (ULONG)(le16(io->setup.wValue) - USB_DEVICE_U1_ENABLE + 1),
+                (ULONG)io->virtual_address);
+#endif
+
+    if (ctrl)
+        pool_free(ctrl->metaPool, io);
 }
 
 void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, s8 err, u32 actual)
@@ -494,83 +954,11 @@ void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, s
     /* Internal, reply-less requests (IOF_QUICK + magic tag) */
     if (io->driver_private_flags & REQ_INTERNAL)
     {
-        /* Hub descriptor pre-fetch completion: now run the full
-         * SET_CONFIGURATION + CONFIG_EP with real hub data available.
-         * xhci_udev_parse_control_message already ran above, so
-         * handle_get_hub_descriptor cached ss_hub_desc + tt_think_time. */
-        if (io->driver_private_flags & REQ_HUB_DESC_FETCH)
-            xhci_udev_handle_hub_prefetch(udev, io);
-
-        struct xhci_ctrl *ctrl = udev->controller;
-        if (ctrl)
-            pool_free(ctrl->memoryPool, io);
+        xhci_udev_complete_internal(udev, io);
         return;
     }
 
     ReplyMsg((struct Message *)io);
-}
-
-/**
- * Issue an internal GET_DESCRIPTOR(hub) on EP0 before CONFIG_EP for hubs.
- * On completion, the hub descriptor data is cached and CONFIG_EP is issued
- * with the correct slot context fields.
- */
-static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
-{
-    if (!udev || !udev->controller)
-        return FALSE;
-
-    struct xhci_ctrl *ctrl = udev->controller;
-
-    /* Choose descriptor type based on device speed */
-    const u8 desc_type = (udev->speed >= USB_SPEED_SUPER) ? USB_DT_SS_HUB : USB_DT_HUB;
-    const u8 desc_len = (desc_type == USB_DT_SS_HUB) ? 12 : 9;
-
-    u8 *buf = dma_alloc(ctrl->memoryPool, DMA_ALIGN_MIN, desc_len);
-    struct USBIORequest *io = pool_zalloc(ctrl->memoryPool, sizeof(*io));
-    if (!io || !buf)
-    {
-        Kprintf("xhci_udev_fetch_hub_descriptor: alloc failed, falling back to SET_CONFIGURATION without hub data\n");
-        if (buf)
-            dma_free(ctrl->memoryPool, buf);
-        if (io)
-            pool_free(ctrl->memoryPool, io);
-        udev->pending_set_config_req = NULL;
-        return FALSE;
-    }
-
-    io->req.io_Command = CMD_REQUEST_CONTROL;
-    io->req.io_Flags = IOF_QUICK;
-    io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED | REQ_HUB_DESC_FETCH;
-
-    io->setup.bmRequestType = USB_DIR_IN | USB_RT_HUB;
-    io->setup.bRequest = USB_REQ_GET_DESCRIPTOR;
-    io->setup.wValue = le16((u16)(desc_type << 8));
-    io->setup.wIndex = 0;
-    io->setup.wLength = le16(desc_len);
-
-    io->virtual_address = udev->virtual_address;
-    io->data_buffer = buf;
-    io->data_buffer_length = desc_len;
-    io->direction = DIRECTION_IN;
-
-    KprintfH("Fetching hub descriptor (type=0x%02lx len=%lu) for addr=%lu before CONFIG_EP\n",
-             (ULONG)desc_type, (ULONG)desc_len, (ULONG)udev->virtual_address);
-
-    /* Submit directly to the transfer ring — xhci_ep_enqueue only queues
-     * for later and requires a completion event to drain, but EP0 may be
-     * idle right now so nothing would ever kick the queue. */
-    s8 ring_ret = xhci_ring_enqueue_td(udev, io, 1000, FALSE);
-    if (ring_ret != ERR_NO_ERROR)
-    {
-        Kprintf("xhci_udev_fetch_hub_descriptor: ring_enqueue_td failed (%ld), falling back\n", (LONG)ring_ret);
-        dma_free(ctrl->memoryPool, buf);
-        pool_free(ctrl->memoryPool, io);
-        udev->pending_set_config_req = NULL;
-        return FALSE;
-    }
-
-    return TRUE;
 }
 
 static inline void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
@@ -582,7 +970,7 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, u8 ep
         return;
 
     struct xhci_ctrl *ctrl = udev->controller;
-    struct USBIORequest *io = pool_zalloc(ctrl->memoryPool, sizeof(*io));
+    struct USBIORequest *io = pool_zalloc(ctrl->metaPool, sizeof(*io));
     if (!io)
         return;
 
@@ -602,7 +990,7 @@ static inline void xhci_udev_send_control_request(struct usb_device *udev, u8 ep
     if (!ep_ctx)
     {
         Kprintf("No ep context for ep index %d\n", ep_index);
-        pool_free(ctrl->memoryPool, io);
+        pool_free(ctrl->metaPool, io);
         return;
     }
     if (enqueue)
@@ -619,6 +1007,344 @@ inline static u8 xhci_ep_index_to_address(u8 ep_index)
     return (u8)(EP_INDEX_TO_ENDPOINT(ep_index) | ((ep_index & 0x1U) ? USB_DIR_OUT : USB_DIR_IN));
 }
 
+/* Send SET_SEL (USB 3.2 9.4.12) to inform the device of host/path exit latencies.
+ * Returns TRUE if the transfer was submitted (and device-initiated LPM may be
+ * enabled), FALSE if SEL/PEL exceed the field range or submission failed. */
+BOOL xhci_udev_send_set_sel(struct usb_device *udev)
+{
+    if (!udev || !udev->controller || udev->speed < USB_SPEED_SUPER || !udev->lpm_capable)
+        return FALSE;
+
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    /* Convert ns -> us (round up) */
+    u32 u1_sel = (udev->u1_sel + 999u) / 1000u;
+    u32 u1_pel = (udev->u1_pel + 999u) / 1000u;
+    u32 u2_sel = (udev->u2_sel + 999u) / 1000u;
+    u32 u2_pel = (udev->u2_pel + 999u) / 1000u;
+
+    if (u1_sel > USB3_LPM_MAX_U1_SEL_PEL || u1_pel > USB3_LPM_MAX_U1_SEL_PEL ||
+        u2_sel > USB3_LPM_MAX_U2_SEL_PEL || u2_pel > USB3_LPM_MAX_U2_SEL_PEL)
+    {
+        Kprintf("SET_SEL skipped for addr %lu: SEL/PEL too large (u1 %lu/%lu u2 %lu/%lu us)\n",
+                (ULONG)udev->virtual_address, (ULONG)u1_sel, (ULONG)u1_pel,
+                (ULONG)u2_sel, (ULONG)u2_pel);
+        return FALSE;
+    }
+
+    u8 *buf = dma_alloc(ctrl->dmaPool, DMA_ALIGN_MIN, sizeof(struct usb_set_sel_req));
+    struct USBIORequest *io = pool_zalloc(ctrl->metaPool, sizeof(*io));
+    if (!io || !buf)
+    {
+        Kprintf("xhci_udev_send_set_sel: alloc failed\n");
+        if (buf)
+            dma_free(ctrl->dmaPool, buf);
+        if (io)
+            pool_free(ctrl->metaPool, io);
+        return FALSE;
+    }
+
+    struct usb_set_sel_req *sel = (struct usb_set_sel_req *)buf;
+    sel->u1_sel = (u8)u1_sel;
+    sel->u1_pel = (u8)u1_pel;
+    sel->u2_sel = le16((u16)u2_sel);
+    sel->u2_pel = le16((u16)u2_pel);
+
+    io->req.io_Command = CMD_REQUEST_CONTROL;
+    io->req.io_Flags = IOF_QUICK;
+    io->driver_private_flags = REQ_INTERNAL | REQ_ENQUEUED | REQ_SET_SEL;
+
+    io->setup.bmRequestType = USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
+    io->setup.bRequest = USB_REQ_SET_SEL;
+    io->setup.wValue = 0;
+    io->setup.wIndex = 0;
+    io->setup.wLength = le16((u16)sizeof(struct usb_set_sel_req));
+
+    io->virtual_address = udev->virtual_address;
+    io->data_buffer = buf;
+    io->data_buffer_length = (u32)sizeof(struct usb_set_sel_req);
+    io->direction = DIRECTION_OUT;
+
+    s8 ring_ret = xhci_ring_enqueue_td(udev, io, 1000, FALSE);
+    if (ring_ret != ERR_NO_ERROR)
+    {
+        Kprintf("xhci_udev_send_set_sel: enqueue failed (%ld)\n", (LONG)ring_ret);
+        dma_free(ctrl->dmaPool, buf);
+        pool_free(ctrl->metaPool, io);
+        return FALSE;
+    }
+
+    KprintfH("SET_SEL addr %lu: u1 sel=%lu pel=%lu, u2 sel=%lu pel=%lu (us)\n",
+             (ULONG)udev->virtual_address, (ULONG)u1_sel, (ULONG)u1_pel,
+             (ULONG)u2_sel, (ULONG)u2_pel);
+    return TRUE;
+}
+
+/* Enable device-initiated U1 or U2 transitions via SET_FEATURE.  Fire-and-forget. */
+void xhci_udev_set_device_lpm(struct usb_device *udev, BOOL u2)
+{
+    u8 feature = u2 ? USB_DEVICE_U2_ENABLE : USB_DEVICE_U1_ENABLE;
+    xhci_udev_send_control_request(udev, 0,
+                                   USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                                   USB_REQ_SET_FEATURE,
+                                   feature /* wValue */,
+                                   0 /* wIndex */,
+                                   0 /* wLength */,
+                                   FALSE /* send now */);
+    Kprintf("SET_FEATURE %s_ENABLE addr %lu\n", u2 ? "U2" : "U1", (ULONG)udev->virtual_address);
+}
+
+/* Enable device-initiated Latency Tolerance Messaging via SET_FEATURE.
+ * Fire-and-forget; the xHC consumes the resulting LTM packets in hardware
+ * (HCC_LTC) and uses the device's BELT for its U-state timing. */
+void xhci_udev_set_device_ltm(struct usb_device *udev)
+{
+    xhci_udev_send_control_request(udev, 0,
+                                   USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                                   USB_REQ_SET_FEATURE,
+                                   USB_DEVICE_LTM_ENABLE /* wValue */,
+                                   0 /* wIndex */,
+                                   0 /* wLength */,
+                                   FALSE /* send now */);
+    Kprintf("SET_FEATURE LTM_ENABLE addr %lu\n", (ULONG)udev->virtual_address);
+}
+
+/* Program the U1/U2 inactivity timeout on the device's immediate parent-hub
+ * downstream port.  A device directly on the root hub writes the root port's
+ * PORTPMSC register; a device behind an external hub gets a
+ * SetPortFeature(U1/U2_TIMEOUT) control transfer sent to that hub, which programs
+ * its own downstream port (mirrors usb_set_lpm_timeout()).  timeout==0 disables
+ * the state.  Fire-and-forget for the external-hub case. */
+void xhci_udev_set_port_lpm_timeout(struct usb_device *udev, BOOL u2, u16 timeout)
+{
+    if (!udev || !udev->controller)
+        return;
+
+    struct usb_device *parent = udev->parent;
+    if (!parent)
+        return;
+
+    if (parent->parent == NULL)
+    {
+        /* Direct root-hub child: write the root port PORTPMSC directly. */
+        xhci_roothub_set_usb3_port_timeout(udev->controller->root_hub,
+                                           udev->parent_port, u2, timeout);
+    }
+    else
+    {
+        /* Behind an external hub: ask the hub to program its downstream port.
+         * wValue = feature selector, wIndex = (timeout << 8) | port. */
+        u8 feature = u2 ? USB_SS_PORT_FEAT_U2_TIMEOUT : USB_SS_PORT_FEAT_U1_TIMEOUT;
+        u16 wIndex = (u16)(((u16)timeout << 8) | (u16)udev->parent_port);
+        xhci_udev_send_control_request(parent, 0,
+                                       USB_DIR_OUT | USB_RT_PORT,
+                                       USB_REQ_SET_FEATURE,
+                                       feature /* wValue */, wIndex,
+                                       0 /* wLength */, FALSE /* send now */);
+        Kprintf("SetPortFeature %s_TIMEOUT=%lu to hub addr %lu port %lu (for dev addr %lu)\n",
+                u2 ? "U2" : "U1", (ULONG)timeout, (ULONG)parent->virtual_address,
+                (ULONG)udev->parent_port, (ULONG)udev->virtual_address);
+    }
+}
+
+/* ---- Multi-step device operations ------------------------------------------
+ * One operation in flight per device (struct udev_operation).  Cross-module
+ * completion sites feed xhci_udev_op_advance(); op-specific steps live in its
+ * dispatch.  LPM enable is advisory and stashless, so a newly started
+ * operation preempts it; everything else is mutually exclusive by
+ * construction (and rejected with a log if that assumption ever breaks).
+ */
+
+static void xhci_udev_op_clear(struct usb_device *udev)
+{
+    udev->op.op = UDEV_OP_NONE;
+    udev->op.step = 0;
+    udev->op.waits = 0;
+    udev->op.arg = 0;
+    udev->op.stash = NULL;
+}
+
+/* Abort the in-flight operation (which == UDEV_OP_NONE matches any), replying
+ * the stashed request so the stack isn't left waiting. */
+void xhci_udev_op_cancel(struct usb_device *udev, enum udev_op which, s8 err)
+{
+    if (udev->op.op == UDEV_OP_NONE)
+        return;
+    if (which != UDEV_OP_NONE && udev->op.op != which)
+        return;
+
+    KprintfH("addr %lu: cancelling op %lu (step %lu)\n",
+             (ULONG)udev->virtual_address, (ULONG)udev->op.op, (ULONG)udev->op.step);
+
+    struct USBIORequest *stash = udev->op.stash;
+    xhci_udev_op_clear(udev);
+    if (stash)
+        xhci_udev_io_reply_failed(udev->controller, stash, err);
+}
+
+BOOL xhci_udev_op_begin(struct usb_device *udev, enum udev_op op, struct USBIORequest *stash)
+{
+    if (udev->op.op == UDEV_OP_LPM_ENABLE && op != UDEV_OP_LPM_ENABLE)
+        xhci_udev_op_cancel(udev, UDEV_OP_LPM_ENABLE, ERR_NO_ERROR);
+
+    if (udev->op.op != UDEV_OP_NONE)
+    {
+        Kprintf("addr %lu: op %lu in flight, cannot start %lu\n",
+                (ULONG)udev->virtual_address, (ULONG)udev->op.op, (ULONG)op);
+        return FALSE;
+    }
+
+    /* Slot-state gates (xHCI 4.5.3): operations only make sense once the
+     * device has reached the matching state. */
+    switch (op)
+    {
+    case UDEV_OP_CONFIGURE:
+    case UDEV_OP_SUSPEND:
+        if (udev->slot_state < USB_DEV_SLOT_STATE_ADDRESSED)
+        {
+            Kprintf("addr %lu: op %lu needs an addressed slot (state %lu)\n",
+                    (ULONG)udev->virtual_address, (ULONG)op, (ULONG)udev->slot_state);
+            return FALSE;
+        }
+        break;
+    case UDEV_OP_LPM_ENABLE:
+        if (udev->slot_state != USB_DEV_SLOT_STATE_CONFIGURED)
+            return FALSE;
+        break;
+    default:
+        return FALSE;
+    }
+
+    udev->op.op = op;
+    udev->op.step = 0;
+    udev->op.waits = 0;
+    udev->op.arg = 0;
+    udev->op.stash = stash;
+    return TRUE;
+}
+
+/* ---- Port suspend (U3) sequencing -----------------------------------------
+ * xHCI 4.15.1: all of a device's endpoints shall be stopped before its port is
+ * directed to U3.  Stop Endpoint completes asynchronously, so the suspend is
+ * sequenced as UDEV_OP_SUSPEND: stop every endpoint ring (queued TDs stay on
+ * the rings), count the completions, and only then suspend the port - a root
+ * port by writing PLS=U3, a device behind an external hub by forwarding the
+ * deferred SetPortFeature(SUSPEND) to that hub.  Mirrors Linux
+ * xhci_stop_device()/xhci_ring_device().  Suspending a hub does not recurse
+ * into its children: the stack suspends leaf devices first (as usbcore does).
+ */
+
+/* Tail of the suspend sequence, run when the last Stop Endpoint completes. */
+static void xhci_udev_suspend_finish(struct usb_device *udev)
+{
+    u8 port = udev->op.arg;
+    struct USBIORequest *req = udev->op.stash;
+    xhci_udev_op_clear(udev);
+
+    if (port != 0)
+    {
+        xhci_roothub_set_port_u3(udev->controller->root_hub, port);
+        return;
+    }
+
+    if (req)
+    {
+        u32 timeout_ms = (req->flags & DRIVER_FLAG_TIMEOUT_DEFINED) ? req->timeout : 0;
+        xhci_ring_enqueue_td(udev->parent, req, timeout_ms, FALSE);
+    }
+}
+
+/* Stop all endpoint rings of udev ahead of a port suspend.  Returns TRUE if
+ * Stop Endpoint commands are in flight and the port suspend is deferred to
+ * xhci_udev_suspend_finish(); FALSE if there is nothing to wait for (caller
+ * suspends the port synchronously). */
+static BOOL xhci_udev_suspend_device(struct usb_device *udev, u8 root_port, struct USBIORequest *deferred_req)
+{
+    if (!xhci_udev_op_begin(udev, UDEV_OP_SUSPEND, deferred_req))
+        return FALSE;
+
+    u8 stops = 0;
+    for (u8 i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
+        if (udev->ep_context[i] && xhci_ep_request_suspend(udev->ep_context[i]))
+            stops++;
+
+    if (stops == 0)
+    {
+        xhci_udev_op_clear(udev); /* nothing to wait for; caller acts synchronously */
+        return FALSE;
+    }
+
+    udev->op.waits = stops;
+    udev->op.arg = root_port;
+    KprintfH("suspending addr %lu: %lu endpoint stops pending\n",
+             (ULONG)udev->virtual_address, (ULONG)stops);
+    return TRUE;
+}
+
+/* Root-hub entry: stop the rings of the device on 1-based root port.  TRUE if
+ * the U3 write is deferred until the stops complete. */
+BOOL xhci_udev_suspend_port(struct usb_device *hub_udev, u8 port)
+{
+    struct usb_device *child = xhci_udev_find_child_on_port(hub_udev, port);
+    if (!child)
+        return FALSE;
+    return xhci_udev_suspend_device(child, port, NULL);
+}
+
+/* Port resumed (root hub U0 write, or ClearPortFeature(SUSPEND) completion on
+ * an external hub): restart the attached device's stopped endpoint rings. */
+void xhci_udev_resume_port(struct usb_device *hub_udev, u8 port)
+{
+    struct usb_device *child = xhci_udev_find_child_on_port(hub_udev, port);
+    if (!child)
+        return;
+
+    for (u8 i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
+        if (child->ep_context[i])
+            xhci_ep_resume(child->ep_context[i]);
+}
+
+/* Single entry point for async completions that advance the in-flight
+ * operation.  (op, event) pairs that don't match are silently ignored - the
+ * completion sites fire unconditionally and the op decides relevance. */
+void xhci_udev_op_advance(struct usb_device *udev, enum udev_op_event event)
+{
+    struct udev_operation *op = &udev->op;
+
+    switch (op->op)
+    {
+    case UDEV_OP_CONFIGURE:
+        if (event == UDEV_OP_EVENT_EP0_RECOVERED)
+            xhci_udev_run_pending_set_config(udev);
+        return;
+
+    case UDEV_OP_LPM_ENABLE:
+        if (event == UDEV_OP_EVENT_MEL_EVAL_DONE && op->step == 0)
+        {
+            op->step = 1;
+            /* No SET_SEL submitted: host-initiated only, sequence complete. */
+            if (!xhci_lpm_enable_stage2(udev))
+                xhci_udev_op_clear(udev);
+        }
+        else if (event == UDEV_OP_EVENT_SET_SEL_DONE && op->step == 1)
+        {
+            xhci_udev_op_clear(udev);
+            xhci_lpm_devinit_enable(udev);
+        }
+        return;
+
+    case UDEV_OP_SUSPEND:
+        if (event == UDEV_OP_EVENT_STOP_DONE && op->waits != 0 && --op->waits == 0)
+            xhci_udev_suspend_finish(udev);
+        return;
+
+    default:
+        KprintfH("addr %lu: event %lu with no op in flight\n",
+                 (ULONG)udev->virtual_address, (ULONG)event);
+        return;
+    }
+}
+
 /* Issue an internal CLEAR_FEATURE(ENDPOINT_HALT) to endpoint (by ep_index) on udev. Fire-and-forget. */
 void xhci_udev_clear_feature_halt(struct usb_device *udev, u8 ep_index)
 {
@@ -627,6 +1353,9 @@ void xhci_udev_clear_feature_halt(struct usb_device *udev, u8 ep_index)
 
     /* Convert ep_index (DCI-1) to USB endpoint address (number + direction bit). */
     u8 addr = xhci_ep_index_to_address(ep_index);
+
+    /* The next stack-issued clear-halt for this endpoint is a duplicate. */
+    xhci_ep_mark_halt_synced(xhci_ep_get_context_for_index(udev, ep_index));
 
     xhci_udev_send_control_request(udev, ep_index,
                                    USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
@@ -723,7 +1452,7 @@ static void parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
         return;
     }
 
-    struct usb_config *conf = pool_zalloc(udev->controller->memoryPool, sizeof(*conf));
+    struct usb_config *conf = pool_zalloc(udev->controller->metaPool, sizeof(*conf));
     if (!conf)
     {
         Kprintf("pool_zalloc failed\n");
@@ -922,7 +1651,7 @@ static void parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
         {
             KprintfH("removing old config with value %lu\n", (ULONG)oldconf->desc.bConfigurationValue);
             RemoveMinNode(n);
-            pool_free(udev->controller->memoryPool, oldconf);
+            pool_free(udev->controller->metaPool, oldconf);
             break;
         }
     }
@@ -931,7 +1660,7 @@ static void parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
     return;
 
 error:
-    pool_free(udev->controller->memoryPool, conf);
+    pool_free(udev->controller->metaPool, conf);
 }
 
 static void xhci_filter_ss_ep_companion_desc(struct USBIORequest *io)
@@ -1041,6 +1770,16 @@ static void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive)
              (ULONG)udev->virtual_address,
              (ULONG)udev->slot_id,
              (ULONG)udev->parent_port);
+
+    /* An operation in flight dies with the device: reply its stashed request
+     * (deferred SetPortFeature(SUSPEND) or SET_CONFIGURATION) so the stack
+     * isn't left waiting; late completions land on UDEV_OP_NONE and are
+     * ignored. */
+    xhci_udev_op_cancel(udev, UDEV_OP_NONE, ERR_TIMEOUT);
+
+    /* Clear USB2 hardware LPM on the root port before the slot goes away so
+     * PORTPMSC.L1DS no longer references this (about to be freed) slot. */
+    xhci_lpm_disable(udev);
 
     xhci_disable_slot(udev);
 }
@@ -1268,6 +2007,8 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct USBIORe
              (ULONG)dev_desc->iProduct,
              (ULONG)dev_desc->iSerialNumber,
              (ULONG)dev_desc->bNumConfigurations);
+
+    udev->device_protocol = dev_desc->bDeviceProtocol;
 
     // For full speed devices, max packet size may change once we read the device descriptor
     if (udev->speed == USB_SPEED_FULL)
@@ -1575,6 +2316,13 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBI
         handle_get_port_status(udev, io);
         break;
 
+    case ClearPortFeature:
+        /* Port resume on an external hub completed: restart the child's
+         * endpoint rings stopped for the suspend. */
+        if (le16(io->setup.wValue) == USB_PORT_FEAT_SUSPEND)
+            xhci_udev_resume_port(udev, le16(io->setup.wIndex) & 0xffU);
+        break;
+
     case (DeviceOutRequest | USB_REQ_SET_ADDRESS):
         /* If this was a successful standard SET_ADDRESS, migrate the glue context
          * from the old devaddr to the new one so subsequent transfers reuse the
@@ -1588,6 +2336,14 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBI
 
     case (InterfaceOutRequest | USB_REQ_SET_INTERFACE):
         handle_set_interface(udev, io);
+        break;
+
+    case (DeviceOutRequest | USB_REQ_SET_CONFIGURATION):
+        /* The device is now in the Configured state and accepts the LPM
+         * feature requests (SET_FEATURE U1/U2_ENABLE is a Request Error in the
+         * Address state, USB 3.2 9.4.9). */
+        if (le16(io->setup.wValue) != 0)
+            xhci_lpm_enable(udev);
         break;
     }
 }

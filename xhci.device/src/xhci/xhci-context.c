@@ -27,9 +27,11 @@
 #include <memory.h>
 
 #include <xhci/xhci.h>
+#include <xhci/ch9.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-ring.h>
+#include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-context.h>
 #include <xhci/xhci-descriptors.h>
@@ -53,7 +55,7 @@
  */
 struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 type)
 {
-    struct xhci_container_ctx *ctx = pool_zalloc(ctrl->memoryPool, sizeof(struct xhci_container_ctx));
+    struct xhci_container_ctx *ctx = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_container_ctx));
     if (!ctx)
     {
         Kprintf("Failed to allocate container context\n");
@@ -63,7 +65,7 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
     if ((type != XHCI_CTX_TYPE_DEVICE) && (type != XHCI_CTX_TYPE_INPUT))
     {
         Kprintf("Invalid context type\n");
-        pool_free(ctrl->memoryPool, ctx);
+        pool_free(ctrl->metaPool, ctx);
         return NULL;
     }
 
@@ -72,7 +74,7 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
     if (type == XHCI_CTX_TYPE_INPUT)
         ctx->size += CTX_SIZE(mmio_read32(&ctrl->hccr->cr_hccparams1));
 
-    ctx->bytes = xhci_malloc(ctrl, ctx->size);
+    ctx->bytes = xhci_malloc_page_bounded(ctrl, ctx->size, XHCI_ALIGNMENT);
     return ctx;
 }
 
@@ -84,8 +86,8 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
  */
 void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx)
 {
-    dma_free(ctrl->memoryPool, ctx->bytes);
-    pool_free(ctrl->memoryPool, ctx);
+    dma_free(ctrl->dmaPool, ctx->bytes);
+    pool_free(ctrl->metaPool, ctx);
 }
 
 /**
@@ -257,14 +259,36 @@ static u32 find_root_port(struct usb_device *udev)
     return root_port;
 }
 
+/* TRUE if hub is a HS multi-TT hub with its multi-TT interface selected:
+ * bDeviceProtocol == 2 (capability) and the active altsetting of the hub
+ * interface has bInterfaceProtocol == 2. */
+static BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub)
+{
+    if (!hub->is_hub || hub->speed != USB_SPEED_HIGH || hub->device_protocol != 2)
+        return FALSE;
+
+    struct usb_config *cfg = hub->active_config;
+    if (!cfg)
+        return FALSE;
+
+    for (u8 i = 0; i < cfg->no_of_if; ++i)
+    {
+        struct usb_interface_altsetting *alt = cfg->if_desc[i].active_altsetting;
+        if (alt && alt->desc.bInterfaceClass == USB_CLASS_HUB)
+            return alt->desc.bInterfaceProtocol == 2;
+    }
+    return FALSE;
+}
+
 /**
  * Setup an xHCI virtual device for a Set Address command
  *
  * @param udev pointer to the Device Data Structure
  * Return: returns negative value on failure else 0 on success
  */
-void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev)
+void xhci_setup_addressable_virt_dev(struct usb_device *udev)
 {
+    struct xhci_ctrl *ctrl = udev->controller;
     KprintfH("Setting up addressable virtual device addr=%lu parent_addr=%lu parent_port=%lu\n",
              (ULONG)udev->virtual_address,
              (ULONG)(udev->parent ? udev->parent->virtual_address : 0),
@@ -304,13 +328,6 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
         Kprintf("Unknown device speed %lu\n", (ULONG)udev->speed);
     }
 
-    /*
-     * TODO calcualte and set max exit latency on evaluate context
-     * 4.23.5.2
-     * worst case delay to wake up links on path to root hub in U1/U2
-     * minimum interval for any isoch endpoint
-     * worst case time to transfer isoch data
-     */
     slot_ctx->dev_info = le32(dev_info);
 
     // Find root hub port number
@@ -334,10 +351,20 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
         {
             if (tt_hub->is_hub && tt_hub->speed >= USB_SPEED_HIGH)
             {
-                // TODO set MTT if parent hub has multiple transaction translator capability enabled
                 tt_info = TT_SLOT(tt_hub->slot_id) | TT_PORT(parent_port);
-                KprintfH("xhci_setup_addressable_virt_dev: tt_slot=%lu tt_port=%lu tt_info=%08lx\n",
-                         (ULONG)tt_hub->slot_id, (ULONG)parent_port, (ULONG)tt_info);
+
+                /* xHCI 6.2.2: a LS/FS device behind a multi-TT hub mirrors
+                 * the hub's enabled MTT mode.  Safe at address time: the hub
+                 * class selects the TT mode before powering ports. */
+                if (xhci_hub_multi_tt_enabled(tt_hub))
+                {
+                    dev_info |= DEV_MTT;
+                    slot_ctx->dev_info = le32(dev_info);
+                }
+
+                KprintfH("xhci_setup_addressable_virt_dev: tt_slot=%lu tt_port=%lu tt_info=%08lx mtt=%ld\n",
+                         (ULONG)tt_hub->slot_id, (ULONG)parent_port, (ULONG)tt_info,
+                         (LONG)((dev_info & DEV_MTT) != 0));
                 break;
             }
             parent_port = tt_hub->parent_port;
@@ -389,7 +416,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     /* EP 0 can handle "burst" sizes of 1, so Max Burst Size field is 0 */
     ep0_ctx->ep_info2 |= le32(MAX_BURST(0) | ERROR_COUNT(3));
 
-    BOOL result = xhci_ep_create_context(udev, 0, max_packet_size, /*max_burst*/ 0, ctrl->memoryPool);
+    BOOL result = xhci_ep_create_context(udev, 0, max_packet_size, /*max_burst*/ 0);
     if (!result)
         Kprintf("Failed to create EP0 context\n");
 
@@ -447,6 +474,12 @@ static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ct
             /* For high-speed hubs, TT think time is encoded in the hub descriptor */
             tt_info &= ~TT_THINK_TIME(0x03);
             tt_info |= TT_THINK_TIME(udev->tt_think_time);
+
+            /* xHCI 6.2.2: MTT reflects the *enabled* multi-TT mode */
+            if (xhci_hub_multi_tt_enabled(udev))
+                dev_info |= DEV_MTT;
+            else
+                dev_info &= ~(u32)DEV_MTT;
         }
     }
 
@@ -516,10 +549,9 @@ void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size)
  * @param ifdesc	pointer to the USB interface config descriptor
  * Return: returns the status of xhci_init_ep_contexts_if
  */
-static s8 xhci_init_ep_contexts_if(struct usb_device *udev,
-                                    struct xhci_ctrl *ctrl,
-                                    struct usb_interface *ifdesc)
+static s8 xhci_init_ep_contexts_if(struct usb_device *udev, struct usb_interface *ifdesc)
 {
+    struct xhci_ctrl *ctrl = udev->controller;
     KprintfH("xhci_init_ep_contexts_if: enter\n");
     struct xhci_ep_ctx *ep_ctx[USB_MAX_ENDPOINT_CONTEXTS];
     u8 cur_ep;
@@ -582,7 +614,7 @@ static s8 xhci_init_ep_contexts_if(struct usb_device *udev,
 
         u16 max_packet_size = usb_endpoint_maxp(endpt_desc);
         /* Allocate the ep rings */
-        BOOL result = xhci_ep_create_context(udev, ep_index, max_packet_size, max_burst, ctrl->memoryPool);
+        BOOL result = xhci_ep_create_context(udev, ep_index, max_packet_size, max_burst);
         if (!result)
             return ERR_ALLOC_ERROR;
 
@@ -646,6 +678,38 @@ static void xhci_update_slot_last_ctx(struct xhci_ctrl *ctrl,
     slot_ctx->dev_info = le32(dev_info);
 }
 
+/* Current hardware endpoint state (EP_STATE_*) from the output endpoint context. */
+/* Reads the live hardware EP State (EP_STATE_*) from the HC's device context.
+ * Distinct from xhci_ep_get_state(), which returns the driver's software
+ * ep_state bookkeeping. */
+u32 xhci_read_hw_ep_state(struct usb_device *udev, u8 ep_index)
+{
+    struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
+    xhci_inval_cache(ep_ctx, sizeof(*ep_ctx));
+    return le32(ep_ctx->ep_info) & EP_STATE_MASK;
+}
+
+/* Writes the current udev->max_exit_latency_us into MAX_EXIT in the input slot context. */
+void xhci_update_mel_in_input_ctx(struct usb_device *udev)
+{
+    u32 mel = udev->max_exit_latency_us > 0xffffU ? 0xffffU : udev->max_exit_latency_us;
+    struct xhci_slot_ctx *slot = xhci_get_slot_ctx(udev->controller, udev->in_ctx);
+    u32 d2 = le32(slot->dev_info2);
+    d2 = (d2 & ~MAX_EXIT) | mel;
+    slot->dev_info2 = le32(d2);
+}
+
+static u32 xhci_calculate_mel(struct usb_device *udev);
+
+/* Compute the device's MEL and, when non-zero, write it into the input slot
+ * context.  Shared by xhci_set_configuration() and xhci_set_interface(). */
+static void xhci_compute_and_apply_mel(struct usb_device *udev)
+{
+    udev->max_exit_latency_us = xhci_calculate_mel(udev);
+    if (udev->max_exit_latency_us > 0)
+        xhci_update_mel_in_input_ctx(udev);
+}
+
 /**
  * Configure the endpoint, programming the device contexts.
  *
@@ -690,6 +754,7 @@ s8 xhci_set_configuration(struct usb_device *udev, u32 config_value)
 
     /* slot context */
     xhci_slot_copy(ctrl, in_ctx, out_ctx);
+    xhci_compute_and_apply_mel(udev);
     xhci_update_slot_last_ctx(ctrl, udev, max_ep_flag);
 
     xhci_endpoint_copy(ctrl, in_ctx, out_ctx, 0);
@@ -701,7 +766,7 @@ s8 xhci_set_configuration(struct usb_device *udev, u32 config_value)
     for (u8 ifnum = 0; ifnum < max_ifnum; ++ifnum)
     {
         struct usb_interface *ifdesc = &cfg->if_desc[ifnum];
-        s8 err = xhci_init_ep_contexts_if(udev, ctrl, ifdesc);
+        s8 err = xhci_init_ep_contexts_if(udev, ifdesc);
         if (err != ERR_NO_ERROR)
         {
             return err;
@@ -760,6 +825,9 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
     u32 add_mask = xhci_collect_ep_mask(new_alt, NULL);
     xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
     xhci_slot_copy(ctrl, udev->in_ctx, udev->out_ctx);
+    xhci_compute_and_apply_mel(udev);
+    /* Hub TT mode (MTT) is selected via SET_INTERFACE - refresh hub fields */
+    xhci_update_hub_tt(udev, udev->in_ctx);
     xhci_endpoint_copy(ctrl, udev->in_ctx, udev->out_ctx, 0);
 
     struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
@@ -773,7 +841,7 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
     s8 err = ERR_NO_ERROR;
     if (new_alt->no_of_ep > 0)
     {
-        err = xhci_init_ep_contexts_if(udev, ctrl, iface);
+        err = xhci_init_ep_contexts_if(udev, iface);
         if (err != ERR_NO_ERROR)
         {
             Kprintf("xhci_set_interface: failed to init ep contexts (err=%ld)\n", (LONG)err);
@@ -940,6 +1008,415 @@ void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx)
             address,
             slot_state_name(slot_state),
             slot_state);
+}
+
+/* BESL selector (0-15) to microseconds — USB 2.0 LPM ECN Table; identical to
+ * Linux xhci_besl_encoding[]. */
+static const u32 besl_encoding[16] = {
+    125, 150, 200, 300, 400, 500, 1000, 2000,
+    3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000};
+
+static inline u32 u32max(u32 a, u32 b) { return a > b ? a : b; }
+
+/* TRUE if any active periodic (int/isoc) endpoint has a service interval <= the
+ * given MEL (ns), in which case that link state must not be enabled (xHCI
+ * 4.23.5.2; mirrors xhci_calculate_u1/u2_timeout ESIT guard). */
+static BOOL xhci_lpm_esit_blocks(struct usb_device *udev, u32 mel_ns)
+{
+    struct usb_config *cfg = udev->active_config;
+    if (!cfg)
+        return FALSE;
+
+    for (u8 i = 0; i < cfg->no_of_if; i++)
+    {
+        struct usb_interface_altsetting *alt = cfg->if_desc[i].active_altsetting;
+        if (!alt)
+            continue;
+        for (u8 j = 0; j < alt->no_of_ep; j++)
+        {
+            struct usb_endpoint_descriptor *ep = &alt->ep_desc[j];
+            if (!usb_endpoint_xfer_int(ep) && !usb_endpoint_xfer_isoc(ep))
+                continue;
+            u8 bi = ep->bInterval;
+            if (bi == 0)
+                continue;
+            if (bi > 16) /* SS bInterval is 1..16; clamp malformed values */
+                bi = 16;
+            /* SS service interval = 2^(bInterval-1) microframes * 125us.
+             * Compare as uframes vs mel/125000 to avoid 64-bit math. */
+            u32 uframes = 1u << (bi - 1);
+            if (uframes <= mel_ns / 125000u)
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* Returns the hub-encoded U1/U2 timeout (generic, non-Intel host path: the
+ * timeout equals SEL), or USB3_LPM_DISABLED if the state should not be enabled.
+ * Mirrors xhci_calculate_u1_timeout / xhci_calculate_u2_timeout. */
+static u16 xhci_usb3_state_timeout(struct usb_device *udev, BOOL u2)
+{
+    u32 dev_exit = u2 ? (u32)udev->u2_dev_exit_lat : (u32)udev->u1_dev_exit_lat;
+    if (dev_exit == 0)
+        return USB3_LPM_DISABLED; /* device doesn't implement this link state */
+
+    u32 mel_ns = u2 ? udev->u2_mel : udev->u1_mel;
+    if (xhci_lpm_esit_blocks(udev, mel_ns))
+        return USB3_LPM_DISABLED;
+
+    u32 sel_ns = u2 ? udev->u2_sel : udev->u1_sel;
+    u32 timeout;
+    if (u2)
+    {
+        timeout = (sel_ns + (256u * 1000u - 1u)) / (256u * 1000u); /* 256us units */
+        if (timeout == 0)
+            timeout = 1;
+        if (timeout > USB3_LPM_U2_MAX_TIMEOUT)
+            return USB3_LPM_DISABLED;
+    }
+    else
+    {
+        timeout = (sel_ns + 999u) / 1000u; /* us */
+        if (timeout == 0)
+            timeout = 1;
+        if (timeout > USB3_LPM_U1_MAX_TIMEOUT)
+            return USB3_LPM_DISABLED;
+    }
+    return (u16)timeout;
+}
+
+/* Compute USB3 SEL/PEL/MEL (USB 3.1 Appendix C) and detect USB2 hardware LPM
+ * eligibility.  Mirrors usb_set_lpm_parameters() + xhci_update_device().  Run
+ * once after the BOS descriptor has been parsed. */
+void xhci_set_lpm_parameters(struct usb_device *udev)
+{
+    if (!udev || !udev->controller || !udev->lpm_capable || !udev->parent)
+        return;
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    if (udev->speed == USB_SPEED_HIGH)
+    {
+        /* USB2 hardware LPM: non-hub device directly on a root-hub port that
+         * advertises HLC in its Supported-Protocol cap. */
+        if (!udev->is_hub && udev->parent->parent == NULL)
+        {
+            u32 root_port = find_root_port(udev);
+            BOOL hw_lpm = FALSE, besl_lpm = FALSE;
+            xhci_roothub_port_lpm_caps(ctrl->root_hub, root_port, &hw_lpm, &besl_lpm);
+            if (hw_lpm)
+            {
+                udev->usb2_hw_lpm_capable = TRUE;
+                udev->usb2_hw_lpm_besl_capable = besl_lpm;
+            }
+        }
+        return;
+    }
+
+    if (udev->speed < USB_SPEED_SUPER)
+        return;
+
+    struct usb_device *parent = udev->parent;
+    BOOL is_root = (parent->parent == NULL);
+
+    u32 udev_u1 = (u32)udev->u1_dev_exit_lat;
+    u32 udev_u2 = (u32)udev->u2_dev_exit_lat;
+    u32 hub_u1 = is_root ? (u32)ctrl->u1_host_exit_lat : (u32)parent->u1_dev_exit_lat;
+    u32 hub_u2 = is_root ? (u32)ctrl->u2_host_exit_lat : (u32)parent->u2_dev_exit_lat;
+    u32 parent_u1_mel = is_root ? 0 : parent->u1_mel;
+    u32 parent_u2_mel = is_root ? 0 : parent->u2_mel;
+    u32 parent_u1_pel = is_root ? 0 : parent->u1_pel;
+    u32 parent_u2_pel = is_root ? 0 : parent->u2_pel;
+    u32 hub_hdr_dec = is_root ? 0 : (u32)parent->ss_hub_desc.u.ss.bHubHdrDecLat;
+    u32 hub_delay = is_root ? 0 : (u32)le16(parent->ss_hub_desc.u.ss.wHubDelay);
+
+    u32 common = hub_hdr_dec * 100u + (hub_delay + USB_TP_TRANSMISSION_DELAY) * 2u + (is_root ? (USB_PING_RESPONSE_TIME + 2100u) : 0u);
+
+    /* MEL (ns) */
+    udev->u1_mel = parent_u1_mel + u32max(udev_u1, hub_u1) * 1000u + common;
+    udev->u2_mel = parent_u2_mel + u32max(udev_u2, hub_u2) * 1000u + common;
+
+    /* PEL (ns) */
+    u32 u1_first = u32max(udev_u1, hub_u1) * 1000u;
+    udev->u1_pel = u32max(u1_first, 1u * 1000u + parent_u1_pel); /* p2p U1 = 1us */
+
+    u32 p2p_u2 = (hub_u2 > hub_u1) ? (1u + hub_u2 - hub_u1) : (1u + hub_u1);
+    u32 u2_first = u32max(udev_u2, hub_u2) * 1000u;
+    udev->u2_pel = u32max(u2_first, p2p_u2 * 1000u + parent_u2_pel);
+
+    /* SEL (ns) */
+    u32 num_hubs = 0;
+    for (struct usb_device *p = udev->parent; p->parent; p = p->parent)
+        num_hubs++;
+    u32 sel_extra = (num_hubs > 0 ? 2100u + 250u * (num_hubs - 1u) : 0u) + 250u * num_hubs;
+    udev->u1_sel = udev->u1_pel + sel_extra;
+    udev->u2_sel = udev->u2_pel + sel_extra;
+
+    KprintfH("LPM params addr %lu: U1 sel=%lu pel=%lu mel=%lu | U2 sel=%lu pel=%lu mel=%lu (ns)\n",
+             (ULONG)udev->virtual_address,
+             (ULONG)udev->u1_sel, (ULONG)udev->u1_pel, (ULONG)udev->u1_mel,
+             (ULONG)udev->u2_sel, (ULONG)udev->u2_pel, (ULONG)udev->u2_mel);
+}
+
+static u32 xhci_calculate_mel(struct usb_device *udev)
+{
+    if (udev->speed < USB_SPEED_HIGH)
+        return 0;
+
+    if (udev->speed == USB_SPEED_HIGH)
+    {
+        /* Only BESL-capable hosts program MEL for USB2 L1 (mirror
+         * xhci_set_usb2_hardware_lpm: MEL = besl_encoding[baseline]). */
+        if (!udev->lpm_capable || !udev->usb2_hw_lpm_capable ||
+            !udev->usb2_hw_lpm_besl_capable)
+            return 0;
+        u8 besl = udev->besl_baseline_valid ? udev->besl_baseline : XHCI_DEFAULT_BESL;
+        return besl_encoding[besl & 0xfU];
+    }
+
+    /* USB3: MEL is the max over the states that will actually be enabled. */
+    u32 mel_ns = 0;
+    if (xhci_usb3_state_timeout(udev, FALSE) != USB3_LPM_DISABLED)
+        mel_ns = u32max(mel_ns, udev->u1_mel);
+    if (xhci_usb3_state_timeout(udev, TRUE) != USB3_LPM_DISABLED)
+        mel_ns = u32max(mel_ns, udev->u2_mel);
+
+    u32 mel_us = (mel_ns + 999u) / 1000u;
+    if (mel_us > 0xffffU)
+        mel_us = 0xffffU;
+    KprintfH("Calculated MEL for addr %lu: %lu us (u1_mel=%lu u2_mel=%lu ns)\n",
+             (ULONG)udev->virtual_address, (ULONG)mel_us,
+             (ULONG)udev->u1_mel, (ULONG)udev->u2_mel);
+    return mel_us;
+}
+
+/* HIRD/BESL value for USB2 PORTPMSC (mirror xhci_calculate_hird_besl). */
+static u8 xhci_calculate_hird_besl(struct usb_device *udev)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+    u32 u2del = (u32)ctrl->u2_host_exit_lat;
+    u32 besl_host = 0;
+    u32 besl_device = 0;
+
+    if (udev->besl_supported)
+    {
+        for (besl_host = 0; besl_host < 16; besl_host++)
+            if (besl_encoding[besl_host] >= u2del)
+                break;
+        if (udev->besl_baseline_valid)
+            besl_device = udev->besl_baseline;
+        else if (udev->besl_deep_valid)
+            besl_device = udev->besl_deep;
+    }
+    else
+    {
+        if (u2del <= 50)
+            besl_host = 0;
+        else
+            besl_host = (u2del - 51) / 75 + 1;
+    }
+
+    u32 besl = besl_host + besl_device;
+    if (besl > 15)
+        besl = 15;
+    return (u8)besl;
+}
+
+/* Decide USB2 hardware-LPM (L1) policy for the device and program its root-hub
+ * port.  Mirrors xhci_set_usb2_hardware_lpm(enable=1); the register writes live
+ * in xhci_roothub_set_usb2_hw_lpm(). */
+static void xhci_usb2_set_hw_lpm(struct usb_device *udev)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+    if (udev->speed != USB_SPEED_HIGH || !udev->lpm_capable || !udev->usb2_hw_lpm_capable)
+        return;
+    if (udev->is_hub || !udev->parent || udev->parent->parent != NULL)
+        return;
+
+    BOOL besl_mode = udev->usb2_hw_lpm_besl_capable;
+    u8 hird;
+    u8 besld = 0;
+    if (besl_mode)
+    {
+        hird = udev->besl_baseline_valid ? udev->besl_baseline : XHCI_DEFAULT_BESL;
+        besld = udev->besl_deep_valid ? udev->besl_deep : 0;
+    }
+    else
+    {
+        hird = xhci_calculate_hird_besl(udev);
+    }
+
+    u32 root_port = find_root_port(udev);
+    xhci_roothub_set_usb2_hw_lpm(ctrl->root_hub, root_port, hird, udev->slot_id,
+                                 besl_mode, besld, XHCI_L1_TIMEOUT);
+
+    KprintfH("USB2 HW LPM enabled: port %lu slot %lu hird=%lu besl_cap=%ld\n",
+             (ULONG)root_port, (ULONG)udev->slot_id, (ULONG)hird, (LONG)besl_mode);
+}
+
+/* TRUE if device-initiated U1/U2 entry is allowed: every periodic endpoint's
+ * service interval must absorb the system exit latency (mirror
+ * usb_device_may_initiate_lpm: reject if sel + 125us > interval). */
+static BOOL xhci_lpm_may_initiate(struct usb_device *udev, BOOL u2)
+{
+    u32 sel_us = ((u2 ? udev->u2_sel : udev->u1_sel) + 999u) / 1000u;
+
+    struct usb_config *cfg = udev->active_config;
+    if (!cfg)
+        return FALSE;
+
+    for (u8 i = 0; i < cfg->no_of_if; i++)
+    {
+        struct usb_interface_altsetting *alt = cfg->if_desc[i].active_altsetting;
+        if (!alt)
+            continue;
+        for (u8 j = 0; j < alt->no_of_ep; j++)
+        {
+            struct usb_endpoint_descriptor *ep = &alt->ep_desc[j];
+            if (!usb_endpoint_xfer_int(ep) && !usb_endpoint_xfer_isoc(ep))
+                continue;
+            u8 bi = ep->bInterval;
+            if (bi == 0)
+                continue;
+            if (bi > 16)
+                bi = 16;
+            u32 interval_us = (1u << (bi - 1)) * 125u;
+            if (sel_us + 125u > interval_us)
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* Issue an Evaluate Context carrying udev->max_exit_latency_us (mirror
+ * xhci_change_max_exit_latency).  The xHC evaluates the slot's Max Exit
+ * Latency only through Address Device / Evaluate Context (xHCI 6.2.2); the
+ * value carried in a CONFIG_EP input context is ignored, and with an internal
+ * MEL of 0 the controller will not take the link into U1/U2. */
+static void xhci_evaluate_mel(struct usb_device *udev)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
+    ctrl_ctx->add_flags = le32(SLOT_FLAG);
+    ctrl_ctx->drop_flags = 0;
+
+    xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
+    xhci_slot_copy(ctrl, udev->in_ctx, udev->out_ctx);
+    xhci_update_mel_in_input_ctx(udev);
+
+    struct xhci_slot_ctx *slot = xhci_get_slot_ctx(ctrl, udev->in_ctx);
+    slot->dev_state = 0;
+
+    Kprintf("Evaluate Context: MEL=%lu us for addr %lu (slot %lu)\n",
+            (ULONG)udev->max_exit_latency_us, (ULONG)udev->virtual_address,
+            (ULONG)udev->slot_id);
+    xhci_configure_endpoints(udev, TRUE, NULL);
+}
+
+/* Orchestrate the LPM enable sequence (mirror usb_enable_lpm).  Run once, after
+ * the SET_CONFIGURATION control transfer has completed on the wire: the device
+ * must be in the Configured state or it rejects SET_FEATURE(U1/U2_ENABLE) with
+ * a Request Error (USB 3.2 9.4.9).  The sequence continues in
+ * xhci_lpm_enable_stage2() once the MEL Evaluate Context completes, and
+ * device-initiated enable chains from the SET_SEL completion
+ * (xhci_lpm_devinit_enable). */
+void xhci_lpm_enable(struct usb_device *udev)
+{
+    if (!udev)
+        return;
+
+    /* LTM is independent of the U1/U2 policy (mirror usb_enable_ltm): enable
+     * it for any configured SS device that advertises it, when the
+     * controller consumes LTM packets (HCC_LTC). */
+    if (!udev->ltm_setup_done && udev->speed >= USB_SPEED_SUPER &&
+        udev->ltm_capable && udev->controller->ltc_supported)
+    {
+        udev->ltm_setup_done = TRUE;
+        xhci_udev_set_device_ltm(udev);
+    }
+
+    if (!udev->lpm_capable || udev->lpm_setup_done)
+        return;
+
+    if (udev->speed == USB_SPEED_HIGH)
+    {
+        xhci_usb2_set_hw_lpm(udev);
+        udev->lpm_setup_done = TRUE;
+        return;
+    }
+
+    if (udev->speed < USB_SPEED_SUPER)
+        return;
+
+    udev->u1_timeout = xhci_usb3_state_timeout(udev, FALSE);
+    udev->u2_timeout = xhci_usb3_state_timeout(udev, TRUE);
+    udev->lpm_setup_done = TRUE;
+
+    if (udev->u1_timeout == USB3_LPM_DISABLED && udev->u2_timeout == USB3_LPM_DISABLED)
+        return;
+
+    /* MEL must be latched by the controller before the port timeouts arm
+     * (xHCI 4.23.5.2); handle_config_ep() resumes with stage 2 on success
+     * (UDEV_OP_EVENT_MEL_EVAL_DONE). */
+    if (!xhci_udev_op_begin(udev, UDEV_OP_LPM_ENABLE, NULL))
+        return;
+    xhci_evaluate_mel(udev);
+}
+
+/* Continue LPM enable after the MEL Evaluate Context succeeded: arm the parent
+ * port's U1/U2 inactivity timeouts (root port PORTPMSC for a root-hub child,
+ * SetPortFeature to the external hub otherwise) and send SET_SEL, whose
+ * completion enables device-initiated entry.  Returns TRUE if SET_SEL was
+ * submitted (the op stays alive for UDEV_OP_EVENT_SET_SEL_DONE). */
+BOOL xhci_lpm_enable_stage2(struct usb_device *udev)
+{
+    if (!udev)
+        return FALSE;
+
+    if (udev->u1_timeout != USB3_LPM_DISABLED)
+        xhci_udev_set_port_lpm_timeout(udev, FALSE, udev->u1_timeout);
+
+    if (udev->u2_timeout != USB3_LPM_DISABLED)
+        xhci_udev_set_port_lpm_timeout(udev, TRUE, udev->u2_timeout);
+
+    return xhci_udev_send_set_sel(udev);
+}
+
+/* Enable device-initiated U1/U2 (SET_FEATURE) for the states whose port timeout
+ * was enabled.  Called from the SET_SEL completion path, so the device is
+ * configured and knows the exit latencies. */
+void xhci_lpm_devinit_enable(struct usb_device *udev)
+{
+    if (!udev || udev->speed < USB_SPEED_SUPER || !udev->lpm_capable)
+        return;
+
+    if (udev->u1_timeout != USB3_LPM_DISABLED && xhci_lpm_may_initiate(udev, FALSE))
+        xhci_udev_set_device_lpm(udev, FALSE);
+
+    if (udev->u2_timeout != USB3_LPM_DISABLED && xhci_lpm_may_initiate(udev, TRUE))
+        xhci_udev_set_device_lpm(udev, TRUE);
+}
+
+/* Tear down LPM when a device disconnects.  Mirrors usb_disable_device(): on a
+ * physical disconnect Linux clears only USB2 hardware LPM (a direct root-port
+ * register write via usb_disable_usb2_hardware_lpm()).  USB3 timeout teardown
+ * short-circuits in usb_disable_lpm() because the device is already NOTATTACHED
+ * (state < CONFIGURED), so we likewise leave USB3 PORTPMSC timeouts alone - they
+ * are inert without a link and are overwritten on the next enumerate - and never
+ * issue control transfers to a (possibly already-gone) external hub. */
+void xhci_lpm_disable(struct usb_device *udev)
+{
+    if (!udev || !udev->lpm_setup_done)
+        return;
+
+    /* USB2 hardware LPM is only ever enabled for an HS device directly on a
+     * root-hub port, so this clear is always a safe local register write. */
+    if (udev->speed == USB_SPEED_HIGH && udev->usb2_hw_lpm_capable &&
+        udev->parent && udev->parent->parent == NULL)
+        xhci_roothub_clear_usb2_hw_lpm(udev->controller->root_hub, find_root_port(udev));
+
+    udev->lpm_setup_done = FALSE;
 }
 
 void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, u8 ep_index)
