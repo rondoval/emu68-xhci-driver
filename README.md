@@ -16,16 +16,24 @@ The API is not an exact match — certain fields passed by the stack are intenti
 > in `LIBS:` for PCIe-based units (unit 1+, VL805 on Pi 4B) to work.
 > See release notes for the full change log from 3.7 to 4.4.
 
+> **Note for users upgrading from 4.4:** no configuration changes are required.
+> 5.0 adds USB 3.0 Link Power Management (U1/U2), USB 2.0 hardware LPM (L1),
+> Latency Tolerance Messaging and multi-TT hub support, and is more robust
+> across machine resets and SuperSpeed device bring-up.  See
+> `RELEASE-NOTES-5.0.md` for details.
+
 ---
 
 ## Status
 
 The following has been verified:
 
-- Root hub enumeration, USB 2.0 hub support, external hubs
+- Root hub enumeration, USB 2.0 hub support, external hubs (including multi-TT hubs)
 - Control, bulk, interrupt and real-time isochronous transfers (both directions)
 - HID devices, mass storage (thumb drives), USB audio cards
 - Experimental SuperSpeed (USB 3.0) support, including USB 3.0 hubs
+- USB 3.0 Link Power Management (U1/U2), USB 2.0 hardware LPM (L1) and Latency
+  Tolerance Messaging
 
 Known gaps / issues:
 
@@ -199,10 +207,53 @@ on EP0, and stashes the original IOReq.  The `GET_DESCRIPTOR` completion handler
 (`xhci_udev_handle_hub_prefetch`) caches the result in `udev->ss_hub_desc`, programs
 the slot context accordingly, and then lets the original `SET_CONFIGURATION` proceed.
 
+**Multi-TT hubs.** When a high-speed hub advertises the multiple-Transaction-
+Translator capability and its multi-TT interface alternate setting is selected,
+the driver sets the `MTT` bit in the relevant slot contexts — the hub's own
+context and the context of any low-/full-speed device behind it — so the
+controller routes split transactions through the hub's per-port translators.
+Hubs without that capability are programmed as single-TT.
+
+### Power management (LPM)
+
+After a device finishes configuration, the driver enables link power management
+where the device and host support it.  This is driven entirely by the driver
+from its own enumeration state — the USB 2.0 stack is not involved.
+
+**USB 3.0 U1/U2.** For SuperSpeed devices the driver parses the BOS descriptor,
+computes the U1/U2 SEL/PEL/MEL latency parameters (USB 3.1 Appendix C), applies
+the Max Exit Latency to the slot context via an Evaluate Context command (the
+xHC only evaluates MEL on Address Device / Evaluate Context, never from a
+Configure Endpoint context), sends `SET_SEL` to the device, programs the port
+U1/U2 timeouts and enables device-initiated transitions with
+`SET_FEATURE(U1_ENABLE/U2_ENABLE)`.  The sequence starts only once the
+`SET_CONFIGURATION` control transfer has completed on the wire, since devices
+reject `U1/U2_ENABLE` until configured.  On the Raspberry Pi 4B the VL805 root
+ports never enter U1/U2 (seems to be a firmware bug?), so
+USB 3.0 LPM is effective only on the downstream links of external SuperSpeed
+hubs.
+
+**USB 2.0 hardware LPM (L1).** For a USB 2.0 device directly on a root-hub port,
+hardware-controlled L1 is enabled when both ends advertise BESL: the driver
+reads the device's BOS USB 2.0 Extension capability and programs the port's
+HIRD/BESL value.
+
+**Latency Tolerance Messaging.** For configured SuperSpeed devices that
+advertise LTM (and when the controller reports LTM capability), the driver
+enables it with `SET_FEATURE(LTM_ENABLE)`; the xHC then consumes the device's
+LTM packets in hardware.
+
+**Suspend.** When Poseidon suspends a device, the driver stops the device's
+endpoint rings before writing the port into U3 (xHCI §4.15.1).
+
 ### Teardown
 
 On `CloseDevice()` / `Expunge()` the unit task is stopped, all rings are freed, the
 interrupt is removed and the PCIe controller is left in a quiescent state.
+
+A reset guard installed at init halts every controller — stopping all ring,
+event and MSI DMA — before the machine resets, so in-flight DMA cannot corrupt
+memory or hang the host across a reboot.
 
 ---
 
@@ -265,7 +316,9 @@ xhci.device/
       xhci-td.c             Transfer descriptor construction
       xhci-descriptors.c    USB descriptor parsing helpers
       xhci-root-hub.c       Root hub emulation (USB 2.0 and USB 3.0 descriptor sets)
-      xhci-udev.c           USB device state, SS-to-HS translation, hub emulation
+      xhci-udev.c           USB device state and SS-to-HS translation
+      xhci-hub.c            SuperSpeed hub emulation (descriptor/port-feature translation)
+      xhci-lpm.c            Link Power Management (USB 3.0 U1/U2, USB 2.0 L1/BESL, LTM)
       xhci-endpoint.c       Endpoint open/close/reset
   include/
     device.h                XHCIDevice / XHCIUnit structs, device interface
