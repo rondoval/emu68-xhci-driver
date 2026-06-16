@@ -227,12 +227,12 @@ u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, u8 ep_index);
 
 void xhci_setup_addressable_virt_dev(struct usb_device *udev);
 
+/* Walk the device tree to the root-hub port this device hangs off. */
+u32 xhci_find_root_port(struct usb_device *udev);
+
 void xhci_update_mel_in_input_ctx(struct usb_device *udev);
-void xhci_set_lpm_parameters(struct usb_device *udev);
-void xhci_lpm_enable(struct usb_device *udev);
-BOOL xhci_lpm_enable_stage2(struct usb_device *udev);
-void xhci_lpm_devinit_enable(struct usb_device *udev);
-void xhci_lpm_disable(struct usb_device *udev);
+/* Build an input slot context and issue Evaluate Context to latch MAX_EXIT. */
+void xhci_evaluate_mel(struct usb_device *udev);
 
 void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size);
 s8 xhci_set_configuration(struct usb_device *udev, u32 config_value);

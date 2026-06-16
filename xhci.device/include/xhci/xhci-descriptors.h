@@ -26,6 +26,10 @@ inline static u8 xhci_address_to_ep_index(const struct usb_endpoint_descriptor *
     return (u8)((ep_num << 1) - (u32)(usb_endpoint_dir_in(descriptor) ? 0 : 1));
 }
 
+/* Parse a configuration descriptor blob into a usb_config and store it on the
+ * device (replacing any prior config with the same bConfigurationValue). */
+void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len);
+
 struct usb_config *xhci_find_config(struct usb_device *udev, int config_value);
 struct usb_interface *xhci_find_interface(struct usb_config *cfg, u32 iface_number);
 struct usb_interface_altsetting *xhci_find_altsetting(struct usb_interface *iface, u8 alt_setting);

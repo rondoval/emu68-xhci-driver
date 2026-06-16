@@ -425,3 +425,251 @@ void xhci_dump_config(const char *tag, const struct usb_config *cfg, u16 addr)
     for (u8 i = 0; i < cfg->no_of_if; ++i)
         xhci_dump_interface(pfx, i, &cfg->if_desc[i]);
 }
+
+/* Running state while walking a configuration descriptor's sub-descriptors. */
+struct cfg_parse_state
+{
+    struct usb_config *conf;
+    int interface_map[USB_MAXINTERFACES];
+    int if_index;
+    int current_alt_index;
+    struct usb_interface *current_if;
+    struct usb_interface_altsetting *current_alt;
+};
+
+/* Handle an INTERFACE descriptor: select/allocate the interface and start a new
+ * alternate setting.  Returns FALSE on a fatal error that must abort the parse
+ * (too many unique interfaces); a recoverable problem just resets current_if/alt
+ * and returns TRUE so the caller keeps scanning. */
+static BOOL parse_interface_descriptor(struct cfg_parse_state *st, struct usb_interface_descriptor *ifd)
+{
+    u32 iface_number = ifd->bInterfaceNumber;
+    if (iface_number >= USB_MAXINTERFACES)
+    {
+        Kprintf("interface number %lu exceeds max %lu\n", (ULONG)iface_number, (ULONG)USB_MAXINTERFACES);
+        st->current_if = NULL;
+        st->current_alt = NULL;
+        st->current_alt_index = -1;
+        return TRUE;
+    }
+
+    st->if_index = st->interface_map[iface_number];
+    if (st->if_index < 0)
+    {
+        st->if_index = st->conf->no_of_if;
+        if (st->if_index >= USB_MAXINTERFACES)
+        {
+            Kprintf("too many unique interfaces (%lu)\n", (ULONG)st->if_index);
+            return FALSE;
+        }
+        st->interface_map[iface_number] = st->if_index;
+        st->current_if = &st->conf->if_desc[st->if_index];
+        mem_zero(st->current_if, sizeof(struct usb_interface));
+        st->current_if->interface_number = (u8)iface_number;
+        st->current_if->num_altsetting = 0;
+        st->current_if->active_altsetting = NULL;
+        st->conf->no_of_if++;
+    }
+    else
+    {
+        st->current_if = &st->conf->if_desc[st->if_index];
+    }
+
+    st->current_if->interface_number = (u8)iface_number;
+
+    if (st->current_if->num_altsetting >= USB_ALTSETTINGALLOC)
+    {
+        Kprintf("too many alternate settings (%lu) for interface %lu\n",
+                (ULONG)st->current_if->num_altsetting, (ULONG)iface_number);
+        st->current_alt = NULL;
+        st->current_alt_index = -1;
+        return TRUE;
+    }
+
+    st->current_alt_index = st->current_if->num_altsetting++;
+    st->current_alt = &st->current_if->altsetting[st->current_alt_index];
+    mem_zero(st->current_alt, sizeof(struct usb_interface_altsetting));
+
+    CopyMem(ifd, &st->current_alt->desc, sizeof(struct usb_interface_descriptor));
+    st->current_alt->no_of_ep = 0;
+
+    KprintfH("interface %lu alt %lu: bInterfaceNumber=%lu bAlternateSetting=%lu bNumEndpoints=%lu bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%lu\n",
+             (ULONG)st->if_index,
+             (ULONG)st->current_alt_index,
+             (ULONG)ifd->bInterfaceNumber,
+             (ULONG)ifd->bAlternateSetting,
+             (ULONG)ifd->bNumEndpoints,
+             (ULONG)ifd->bInterfaceClass,
+             (ULONG)ifd->bInterfaceSubClass,
+             (ULONG)ifd->bInterfaceProtocol,
+             (ULONG)ifd->iInterface);
+
+    if (st->current_if->active_altsetting == NULL || st->current_alt->desc.bAlternateSetting == 0)
+        st->current_if->active_altsetting = st->current_alt;
+    return TRUE;
+}
+
+/* Handle an ENDPOINT descriptor: append it to the current alternate setting. */
+static void parse_endpoint_descriptor(struct cfg_parse_state *st, struct usb_endpoint_descriptor *epd)
+{
+    if (!st->current_if || !st->current_alt)
+    {
+        Kprintf("endpoint without interface or altsetting\n");
+        return;
+    }
+    if (st->current_alt->no_of_ep >= USB_MAXENDPOINTS)
+    {
+        Kprintf("too many endpoints for interface %lu alt %lu\n",
+                (ULONG)st->if_index, (ULONG)st->current_alt_index);
+        return;
+    }
+
+    u32 ep_idx = st->current_alt->no_of_ep;
+    CopyMem(epd, &st->current_alt->ep_desc[ep_idx], sizeof(struct usb_endpoint_descriptor));
+    KprintfH("  endpoint %lu: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%lu bInterval=%lu\n",
+             (ULONG)ep_idx,
+             (ULONG)epd->bEndpointAddress,
+             (ULONG)epd->bmAttributes,
+             (ULONG)le16(epd->wMaxPacketSize),
+             (ULONG)epd->bInterval);
+
+    st->current_alt->no_of_ep++;
+}
+
+/* Handle a SuperSpeed ENDPOINT COMPANION descriptor: attach it to the endpoint
+ * it follows. */
+static void parse_ss_ep_comp_descriptor(struct cfg_parse_state *st, struct usb_ss_ep_comp_descriptor *comp)
+{
+    KprintfH("found SS EP COMP descriptor\n");
+    if (st->current_if && st->current_alt && st->current_alt->no_of_ep > 0)
+    {
+        u32 ep_slot = (u32)(st->current_alt->no_of_ep - 1U);
+        CopyMem(comp, &st->current_alt->ss_ep_comp_desc[ep_slot], sizeof(struct usb_ss_ep_comp_descriptor));
+    }
+}
+
+/* Parse a complete configuration descriptor (config + interface/altsetting/
+ * endpoint/SS-companion sub-descriptors) into a fresh usb_config and store it on
+ * the device, replacing any prior config with the same bConfigurationValue. */
+void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
+{
+    if (len < 2)
+    {
+        KprintfH("too short, len=%lu\n", (ULONG)len);
+        return;
+    }
+
+    struct usb_config *conf = pool_zalloc(udev->controller->metaPool, sizeof(*conf));
+    if (!conf)
+    {
+        Kprintf("pool_zalloc failed\n");
+        return;
+    }
+
+    struct usb_config_descriptor *desc = (struct usb_config_descriptor *)data;
+    if (desc->bDescriptorType != USB_DT_CONFIG)
+    {
+        Kprintf("bad desc type %lu\n", (ULONG)desc->bDescriptorType);
+        goto error;
+    }
+
+    u16 total_len = le16(desc->wTotalLength);
+    if (len < total_len)
+    {
+        KprintfH("short buffer len=%lu total_len=%lu\n", (ULONG)len, (ULONG)total_len);
+        return;
+    }
+
+    u8 *cursor = data;
+    u8 *end = data + total_len;
+    if (cursor + desc->bLength > end)
+    {
+        Kprintf("bad desc length %lu\n", (ULONG)desc->bLength);
+        goto error;
+    }
+
+    CopyMem(desc, &conf->desc, sizeof(struct usb_config_descriptor));
+    cursor += desc->bLength;
+
+    KprintfH("wTotalLength=%lu bNumInterfaces=%lu bConfigurationValue=%lu iConfiguration=%lu bmAttributes=0x%02lx bMaxPower=%lu\n",
+             (ULONG)le16(desc->wTotalLength),
+             (ULONG)desc->bNumInterfaces,
+             (ULONG)desc->bConfigurationValue,
+             (LONG)desc->iConfiguration,
+             (LONG)desc->bmAttributes,
+             (LONG)desc->bMaxPower);
+
+    // in 3.x there are association descriptors here
+
+    struct cfg_parse_state st;
+    st.conf = conf;
+    for (int i = 0; i < USB_MAXINTERFACES; ++i)
+        st.interface_map[i] = -1;
+    conf->no_of_if = 0;
+    st.if_index = 0;
+    st.current_alt_index = -1;
+    st.current_if = NULL;
+    st.current_alt = NULL;
+
+    while (cursor + 2 <= end)
+    {
+        u8 dlen = cursor[0];
+        u8 dtype = cursor[1];
+        if (dlen == 0)
+        {
+            Kprintf("zero length descriptor, aborting\n");
+            break;
+        }
+        if (cursor + dlen > end)
+        {
+            Kprintf("descriptor overruns buffer (type=%lu len=%lu)\n", (ULONG)dtype, (ULONG)dlen);
+            break;
+        }
+
+        switch (dtype)
+        {
+        case USB_DT_INTERFACE:
+            if (!parse_interface_descriptor(&st, (struct usb_interface_descriptor *)cursor))
+                goto error;
+            break;
+        case USB_DT_ENDPOINT:
+            parse_endpoint_descriptor(&st, (struct usb_endpoint_descriptor *)cursor);
+            break;
+        case USB_DT_SS_ENDPOINT_COMP:
+            parse_ss_ep_comp_descriptor(&st, (struct usb_ss_ep_comp_descriptor *)cursor);
+            break;
+        default:
+            // Skip class- or vendor-specific descriptors gracefully.
+            KprintfH("found class/vendor-specific descriptor 0x%lx, len=%lu\n", (ULONG)dtype, (ULONG)dlen);
+            break;
+        }
+
+        cursor += dlen;
+    }
+    KprintfH("parsed config with %lu interfaces\n", (ULONG)conf->no_of_if);
+
+    if (conf->no_of_if != desc->bNumInterfaces)
+    {
+        Kprintf("interface count mismatch %lu != %lu\n",
+                (ULONG)conf->no_of_if, (ULONG)desc->bNumInterfaces);
+        goto error;
+    }
+
+    for (struct MinNode *n = udev->configurations.mlh_Head; n->mln_Succ; n = n->mln_Succ)
+    {
+        struct usb_config *oldconf = (struct usb_config *)n;
+        if (oldconf->desc.bConfigurationValue == conf->desc.bConfigurationValue)
+        {
+            KprintfH("removing old config with value %lu\n", (ULONG)oldconf->desc.bConfigurationValue);
+            RemoveMinNode(n);
+            pool_free(udev->controller->metaPool, oldconf);
+            break;
+        }
+    }
+    AddHeadMinList(&udev->configurations, (struct MinNode *)conf);
+
+    return;
+
+error:
+    pool_free(udev->controller->metaPool, conf);
+}

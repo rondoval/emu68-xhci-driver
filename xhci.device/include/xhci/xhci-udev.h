@@ -268,6 +268,10 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address);
 struct usb_device *xhci_udev_get(struct XHCIUnit *unit, u16 virtual_address);
 void xhci_udev_free(struct usb_device *udev);
 
+/* Device-tree lifecycle helpers (also used by the SS-hub emulation in xhci-hub.c) */
+struct usb_device *xhci_udev_find_child_on_port(struct usb_device *hub, u32 port);
+void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive);
+
 /* Dispatch */
 s8 xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io);
 s8 xhci_udev_send(struct USBIORequest *req);
@@ -282,10 +286,13 @@ void xhci_udev_run_pending_set_config(struct usb_device *udev);
 /* Send commands to device */
 void xhci_udev_clear_feature_halt(struct usb_device *udev, u8 ep_index);
 void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type);
-BOOL xhci_udev_send_set_sel(struct usb_device *udev);
-void xhci_udev_set_device_lpm(struct usb_device *udev, BOOL u2);
-void xhci_udev_set_device_ltm(struct usb_device *udev);
-void xhci_udev_set_port_lpm_timeout(struct usb_device *udev, BOOL u2, u16 timeout);
+
+/* Build and submit a fire-and-forget internal control request on EP0 (shared by
+ * the LPM senders in xhci-lpm.c and the halt/TT recovery senders here). */
+void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
+                                    u8 bmRequestType, u8 bRequest,
+                                    u16 wValue, u16 wIndex, u16 wLength,
+                                    BOOL enqueue);
 
 /* Multi-step operation sequencing (see enum udev_op) */
 BOOL xhci_udev_op_begin(struct usb_device *udev, enum udev_op op, struct USBIORequest *stash);
