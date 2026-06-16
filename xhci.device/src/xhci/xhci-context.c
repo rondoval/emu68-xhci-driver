@@ -27,12 +27,15 @@
 #include <memory.h>
 
 #include <xhci/xhci.h>
+#include <xhci/ch9.h>
 #include <xhci/xhci-commands.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-ring.h>
+#include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-context.h>
 #include <xhci/xhci-descriptors.h>
+#include <xhci/xhci-lpm.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -53,7 +56,7 @@
  */
 struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 type)
 {
-    struct xhci_container_ctx *ctx = pool_zalloc(ctrl->memoryPool, sizeof(struct xhci_container_ctx));
+    struct xhci_container_ctx *ctx = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_container_ctx));
     if (!ctx)
     {
         Kprintf("Failed to allocate container context\n");
@@ -63,7 +66,7 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
     if ((type != XHCI_CTX_TYPE_DEVICE) && (type != XHCI_CTX_TYPE_INPUT))
     {
         Kprintf("Invalid context type\n");
-        pool_free(ctrl->memoryPool, ctx);
+        pool_free(ctrl->metaPool, ctx);
         return NULL;
     }
 
@@ -72,7 +75,7 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
     if (type == XHCI_CTX_TYPE_INPUT)
         ctx->size += CTX_SIZE(mmio_read32(&ctrl->hccr->cr_hccparams1));
 
-    ctx->bytes = xhci_malloc(ctrl, ctx->size);
+    ctx->bytes = xhci_malloc_page_bounded(ctrl, ctx->size, XHCI_ALIGNMENT);
     return ctx;
 }
 
@@ -84,8 +87,8 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
  */
 void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx)
 {
-    dma_free(ctrl->memoryPool, ctx->bytes);
-    pool_free(ctrl->memoryPool, ctx);
+    dma_free(ctrl->dmaPool, ctx->bytes);
+    pool_free(ctrl->metaPool, ctx);
 }
 
 /**
@@ -236,7 +239,7 @@ static void build_route_string(struct usb_device *udev)
     udev->route = parent->route | ((u32)nibble << route_shift);
 }
 
-static u32 find_root_port(struct usb_device *udev)
+u32 xhci_find_root_port(struct usb_device *udev)
 {
     u32 root_port = udev->parent_port;
     if (udev->parent)
@@ -257,14 +260,36 @@ static u32 find_root_port(struct usb_device *udev)
     return root_port;
 }
 
+/* TRUE if hub is a HS multi-TT hub with its multi-TT interface selected:
+ * bDeviceProtocol == 2 (capability) and the active altsetting of the hub
+ * interface has bInterfaceProtocol == 2. */
+static BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub)
+{
+    if (!hub->is_hub || hub->speed != USB_SPEED_HIGH || hub->device_protocol != 2)
+        return FALSE;
+
+    struct usb_config *cfg = hub->active_config;
+    if (!cfg)
+        return FALSE;
+
+    for (u8 i = 0; i < cfg->no_of_if; ++i)
+    {
+        struct usb_interface_altsetting *alt = cfg->if_desc[i].active_altsetting;
+        if (alt && alt->desc.bInterfaceClass == USB_CLASS_HUB)
+            return alt->desc.bInterfaceProtocol == 2;
+    }
+    return FALSE;
+}
+
 /**
  * Setup an xHCI virtual device for a Set Address command
  *
  * @param udev pointer to the Device Data Structure
  * Return: returns negative value on failure else 0 on success
  */
-void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *udev)
+void xhci_setup_addressable_virt_dev(struct usb_device *udev)
 {
+    struct xhci_ctrl *ctrl = udev->controller;
     KprintfH("Setting up addressable virtual device addr=%lu parent_addr=%lu parent_port=%lu\n",
              (ULONG)udev->virtual_address,
              (ULONG)(udev->parent ? udev->parent->virtual_address : 0),
@@ -304,17 +329,10 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
         Kprintf("Unknown device speed %lu\n", (ULONG)udev->speed);
     }
 
-    /*
-     * TODO calcualte and set max exit latency on evaluate context
-     * 4.23.5.2
-     * worst case delay to wake up links on path to root hub in U1/U2
-     * minimum interval for any isoch endpoint
-     * worst case time to transfer isoch data
-     */
     slot_ctx->dev_info = le32(dev_info);
 
     // Find root hub port number
-    u32 root_port = find_root_port(udev);
+    u32 root_port = xhci_find_root_port(udev);
 
     KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%lu port_num=%lu root_port_num=%lu speed=%lu route=%lx route_depth=%lu\n",
              (ULONG)udev->parent->virtual_address, (ULONG)udev->parent_port, (ULONG)root_port, (ULONG)udev->speed, (ULONG)udev->route, (ULONG)udev->route_depth);
@@ -334,10 +352,20 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
         {
             if (tt_hub->is_hub && tt_hub->speed >= USB_SPEED_HIGH)
             {
-                // TODO set MTT if parent hub has multiple transaction translator capability enabled
                 tt_info = TT_SLOT(tt_hub->slot_id) | TT_PORT(parent_port);
-                KprintfH("xhci_setup_addressable_virt_dev: tt_slot=%lu tt_port=%lu tt_info=%08lx\n",
-                         (ULONG)tt_hub->slot_id, (ULONG)parent_port, (ULONG)tt_info);
+
+                /* xHCI 6.2.2: a LS/FS device behind a multi-TT hub mirrors
+                 * the hub's enabled MTT mode.  Safe at address time: the hub
+                 * class selects the TT mode before powering ports. */
+                if (xhci_hub_multi_tt_enabled(tt_hub))
+                {
+                    dev_info |= DEV_MTT;
+                    slot_ctx->dev_info = le32(dev_info);
+                }
+
+                KprintfH("xhci_setup_addressable_virt_dev: tt_slot=%lu tt_port=%lu tt_info=%08lx mtt=%ld\n",
+                         (ULONG)tt_hub->slot_id, (ULONG)parent_port, (ULONG)tt_info,
+                         (LONG)((dev_info & DEV_MTT) != 0));
                 break;
             }
             parent_port = tt_hub->parent_port;
@@ -389,7 +417,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     /* EP 0 can handle "burst" sizes of 1, so Max Burst Size field is 0 */
     ep0_ctx->ep_info2 |= le32(MAX_BURST(0) | ERROR_COUNT(3));
 
-    BOOL result = xhci_ep_create_context(udev, 0, max_packet_size, /*max_burst*/ 0, ctrl->memoryPool);
+    BOOL result = xhci_ep_create_context(udev, 0, max_packet_size, /*max_burst*/ 0);
     if (!result)
         Kprintf("Failed to create EP0 context\n");
 
@@ -405,8 +433,8 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
 
     /* Steps 7 and 8 were done in xhci_alloc_virt_device() */
 
-    xhci_flush_cache(ep0_ctx, sizeof(struct xhci_ep_ctx));
-    xhci_flush_cache(slot_ctx, sizeof(struct xhci_slot_ctx));
+    xhci_flush_cache(ep0_ctx, sizeof(struct xhci_ep_ctx), 0);
+    xhci_flush_cache(slot_ctx, sizeof(struct xhci_slot_ctx), 0);
     KprintfH("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
              (ULONG)le64(ep0_ctx->deq), (ULONG)le32(ep0_ctx->tx_info),
              (ULONG)le32(slot_ctx->dev_info), (ULONG)le32(slot_ctx->dev_info2));
@@ -415,7 +443,7 @@ void xhci_setup_addressable_virt_dev(struct xhci_ctrl *ctrl, struct usb_device *
     ctrl_ctx->add_flags = le32(SLOT_FLAG | EP0_FLAG);
     ctrl_ctx->drop_flags = 0;
 
-    xhci_flush_cache(ctrl_ctx, sizeof(struct xhci_input_control_ctx));
+    xhci_flush_cache(ctrl_ctx, sizeof(struct xhci_input_control_ctx), 0);
 }
 
 static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ctx *in_ctx)
@@ -447,6 +475,12 @@ static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ct
             /* For high-speed hubs, TT think time is encoded in the hub descriptor */
             tt_info &= ~TT_THINK_TIME(0x03);
             tt_info |= TT_THINK_TIME(udev->tt_think_time);
+
+            /* xHCI 6.2.2: MTT reflects the *enabled* multi-TT mode */
+            if (xhci_hub_multi_tt_enabled(udev))
+                dev_info |= DEV_MTT;
+            else
+                dev_info &= ~(u32)DEV_MTT;
         }
     }
 
@@ -516,10 +550,9 @@ void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size)
  * @param ifdesc	pointer to the USB interface config descriptor
  * Return: returns the status of xhci_init_ep_contexts_if
  */
-static s8 xhci_init_ep_contexts_if(struct usb_device *udev,
-                                    struct xhci_ctrl *ctrl,
-                                    struct usb_interface *ifdesc)
+static s8 xhci_init_ep_contexts_if(struct usb_device *udev, struct usb_interface *ifdesc)
 {
+    struct xhci_ctrl *ctrl = udev->controller;
     KprintfH("xhci_init_ep_contexts_if: enter\n");
     struct xhci_ep_ctx *ep_ctx[USB_MAX_ENDPOINT_CONTEXTS];
     u8 cur_ep;
@@ -561,6 +594,20 @@ static s8 xhci_init_ep_contexts_if(struct usb_device *udev,
         interval = xhci_get_endpoint_interval(udev, endpt_desc);
         mult = xhci_get_endpoint_mult(udev, endpt_desc, ss_ep_comp_desc);
         max_burst = xhci_get_endpoint_max_burst(udev, endpt_desc, ss_ep_comp_desc);
+
+        /* VL805 corrupts SS bulk OUT bursts for mass-storage devices behind a
+         * hub (Linux XHCI_VLI_SS_BULK_OUT_BUG, xhci-mem.c). */
+        if ((ctrl->quirks & XHCI_QUIRK_SS_BULK_OUT) && max_burst != 0 &&
+            udev->speed >= USB_SPEED_SUPER && udev->route != 0 &&
+            usb_endpoint_xfer_bulk(endpt_desc) && usb_endpoint_dir_out(endpt_desc) &&
+            ifdesc->altsetting[0].desc.bInterfaceClass == USB_CLASS_MASS_STORAGE)
+        {
+            Kprintf("VL805 quirk: max_burst %lu -> 0 for addr %lu ep 0x%02lx (SS bulk OUT, UMS behind hub)\n",
+                    (ULONG)max_burst, (ULONG)udev->virtual_address,
+                    (ULONG)endpt_desc->bEndpointAddress);
+            max_burst = 0;
+        }
+
         avg_trb_len = max_esit_payload;
 
         ep_index = xhci_get_ep_index(endpt_desc);
@@ -568,7 +615,7 @@ static s8 xhci_init_ep_contexts_if(struct usb_device *udev,
 
         u16 max_packet_size = usb_endpoint_maxp(endpt_desc);
         /* Allocate the ep rings */
-        BOOL result = xhci_ep_create_context(udev, ep_index, max_packet_size, max_burst, ctrl->memoryPool);
+        BOOL result = xhci_ep_create_context(udev, ep_index, max_packet_size, max_burst);
         if (!result)
             return ERR_ALLOC_ERROR;
 
@@ -632,6 +679,36 @@ static void xhci_update_slot_last_ctx(struct xhci_ctrl *ctrl,
     slot_ctx->dev_info = le32(dev_info);
 }
 
+/* Current hardware endpoint state (EP_STATE_*) from the output endpoint context. */
+/* Reads the live hardware EP State (EP_STATE_*) from the HC's device context.
+ * Distinct from xhci_ep_get_state(), which returns the driver's software
+ * ep_state bookkeeping. */
+u32 xhci_read_hw_ep_state(struct usb_device *udev, u8 ep_index)
+{
+    struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
+    xhci_inval_cache(ep_ctx, sizeof(*ep_ctx));
+    return le32(ep_ctx->ep_info) & EP_STATE_MASK;
+}
+
+/* Writes the current udev->max_exit_latency_us into MAX_EXIT in the input slot context. */
+void xhci_update_mel_in_input_ctx(struct usb_device *udev)
+{
+    u32 mel = udev->max_exit_latency_us > 0xffffU ? 0xffffU : udev->max_exit_latency_us;
+    struct xhci_slot_ctx *slot = xhci_get_slot_ctx(udev->controller, udev->in_ctx);
+    u32 d2 = le32(slot->dev_info2);
+    d2 = (d2 & ~MAX_EXIT) | mel;
+    slot->dev_info2 = le32(d2);
+}
+
+/* Compute the device's MEL and, when non-zero, write it into the input slot
+ * context.  Shared by xhci_set_configuration() and xhci_set_interface(). */
+static void xhci_compute_and_apply_mel(struct usb_device *udev)
+{
+    udev->max_exit_latency_us = xhci_calculate_mel(udev);
+    if (udev->max_exit_latency_us > 0)
+        xhci_update_mel_in_input_ctx(udev);
+}
+
 /**
  * Configure the endpoint, programming the device contexts.
  *
@@ -676,6 +753,7 @@ s8 xhci_set_configuration(struct usb_device *udev, u32 config_value)
 
     /* slot context */
     xhci_slot_copy(ctrl, in_ctx, out_ctx);
+    xhci_compute_and_apply_mel(udev);
     xhci_update_slot_last_ctx(ctrl, udev, max_ep_flag);
 
     xhci_endpoint_copy(ctrl, in_ctx, out_ctx, 0);
@@ -687,7 +765,7 @@ s8 xhci_set_configuration(struct usb_device *udev, u32 config_value)
     for (u8 ifnum = 0; ifnum < max_ifnum; ++ifnum)
     {
         struct usb_interface *ifdesc = &cfg->if_desc[ifnum];
-        s8 err = xhci_init_ep_contexts_if(udev, ctrl, ifdesc);
+        s8 err = xhci_init_ep_contexts_if(udev, ifdesc);
         if (err != ERR_NO_ERROR)
         {
             return err;
@@ -746,6 +824,9 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
     u32 add_mask = xhci_collect_ep_mask(new_alt, NULL);
     xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
     xhci_slot_copy(ctrl, udev->in_ctx, udev->out_ctx);
+    xhci_compute_and_apply_mel(udev);
+    /* Hub TT mode (MTT) is selected via SET_INTERFACE - refresh hub fields */
+    xhci_update_hub_tt(udev, udev->in_ctx);
     xhci_endpoint_copy(ctrl, udev->in_ctx, udev->out_ctx, 0);
 
     struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
@@ -759,7 +840,7 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
     s8 err = ERR_NO_ERROR;
     if (new_alt->no_of_ep > 0)
     {
-        err = xhci_init_ep_contexts_if(udev, ctrl, iface);
+        err = xhci_init_ep_contexts_if(udev, iface);
         if (err != ERR_NO_ERROR)
         {
             Kprintf("xhci_set_interface: failed to init ep contexts (err=%ld)\n", (LONG)err);
@@ -926,6 +1007,32 @@ void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx)
             address,
             slot_state_name(slot_state),
             slot_state);
+}
+
+/* Issue an Evaluate Context carrying udev->max_exit_latency_us (mirror
+ * xhci_change_max_exit_latency).  The xHC evaluates the slot's Max Exit
+ * Latency only through Address Device / Evaluate Context (xHCI 6.2.2); the
+ * value carried in a CONFIG_EP input context is ignored, and with an internal
+ * MEL of 0 the controller will not take the link into U1/U2. */
+void xhci_evaluate_mel(struct usb_device *udev)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
+    ctrl_ctx->add_flags = le32(SLOT_FLAG);
+    ctrl_ctx->drop_flags = 0;
+
+    xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
+    xhci_slot_copy(ctrl, udev->in_ctx, udev->out_ctx);
+    xhci_update_mel_in_input_ctx(udev);
+
+    struct xhci_slot_ctx *slot = xhci_get_slot_ctx(ctrl, udev->in_ctx);
+    slot->dev_state = 0;
+
+    KprintfH("Evaluate Context: MEL=%lu us for addr %lu (slot %lu)\n",
+             (ULONG)udev->max_exit_latency_us, (ULONG)udev->virtual_address,
+             (ULONG)udev->slot_id);
+    xhci_configure_endpoints(udev, TRUE, NULL);
 }
 
 void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, u8 ep_index)

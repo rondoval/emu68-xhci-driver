@@ -102,7 +102,10 @@ struct USBIORequest
 #define CMD_START_REALTIME_ISOCHRONOUS (CMD_NONSTD + 9)
 #define CMD_STOP_REALTIME_ISOCHRONOUS (CMD_NONSTD + 10)
 
-/* error codes */
+/* error codes (Poseidon's dead-device
+ * heuristic weighs TIMEOUT(6)=+3, NAK_TIMEOUT(10)=+2, CRC_ERROR(8)=+1 and
+ * halves the count on anything else; NAK_TIMEOUT with a non-zero
+ * actual_length is treated as partial success by bulk pipe streams) */
 #define ERR_NO_ERROR 0
 #define ERR_SHORT_TRANSFER 9
 
@@ -110,7 +113,9 @@ struct USBIORequest
 #define ERR_HCI_ERROR 3
 #define ERR_BAD_PARAMETERS 11
 
-#define ERR_TIMEOUT 6
+#define ERR_TIMEOUT 6      /* no answer at all (device gone/dead) */
+#define ERR_NAK_TIMEOUT 10 /* request retired after the caller's timeout */
+#define ERR_CRC_ERROR 8    /* USB transaction error (CRC/bit stuffing) */
 #define ERR_DEVICE_STALL 4
 #define ERR_DEVICE_BABBLE 13
 #define ERR_ISOC_OVERRUN 7

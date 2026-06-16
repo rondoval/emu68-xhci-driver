@@ -52,7 +52,7 @@
 
 #define STATUS_CHANGE_BITMAP_LENGTH 2 /* in bytes; supports up to 15 ports */
 
-static struct descriptor
+static const struct descriptor
 {
 	struct usb_hub_descriptor hub_30;
 	struct usb_hub_descriptor hub_20;
@@ -217,7 +217,10 @@ struct xhci_root_hub
 	struct USBIORequest *int_req;
 
 	struct xhci_root_hub_port *ports;
+	u8 num_ports;
 	BOOL is_super_speed;
+	BOOL remote_wakeup; /* DEVICE_REMOTE_WAKEUP feature state (bookkeeping only -
+						 * the xHC manages root-port wake hardware itself) */
 };
 
 #ifdef DEBUG_HIGH
@@ -340,7 +343,7 @@ static void xhci_roothub_debug_port(struct xhci_root_hub *rh, u32 port)
 struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data_fn io_reply_data)
 {
 	struct xhci_ctrl *ctrl = udev->controller;
-	struct xhci_root_hub *rh = pool_zalloc(ctrl->memoryPool, sizeof(struct xhci_root_hub));
+	struct xhci_root_hub *rh = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_root_hub));
 	if (!rh)
 		return NULL;
 
@@ -350,6 +353,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 	CopyMem(&prototype_descriptor, &rh->descriptor, sizeof(prototype_descriptor));
 
 	const u8 ports = HCS_MAX_PORTS(mmio_read32(&ctrl->hccr->cr_hcsparams1));
+	rh->num_ports = ports;
 	rh->descriptor.hub_30.bNbrPorts = ports;
 	rh->descriptor.hub_20.bNbrPorts = ports;
 
@@ -371,9 +375,12 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 		Kprintf("Host controller supports per-port power control\n");
 	}
 
+	/* Advertise LTM when the controller consumes it (devices are enabled via
+	 * SET_FEATURE(LTM_ENABLE) from xhci_lpm_enable).  The Set Latency
+	 * Tolerance Value *command* is the reverse direction - host-platform
+	 * latency reporting - which neither we nor Linux ever issue. */
 	if (HCC_LTC(hccParams1))
 		rh->descriptor.ss_dev_cap.bmAttributes |= USB_SS_DEVICE_ATT_LATENCY_TOLERANCE_MESSAGES;
-	// TODO add support for Set Latency Tolerance Value command
 
 	rh->descriptor.hub_30.wHubCharacteristics = le16(wHubCharacteristics);
 	rh->descriptor.hub_20.wHubCharacteristics = le16(wHubCharacteristics);
@@ -386,10 +393,10 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 	Kprintf("Host controller U2 exit latency: %lu microseconds\n", (ULONG)le16(rh->descriptor.ss_dev_cap.wU2DevExitLat));
 
 	/* Create port structs and fill with data from protool extended capability */
-	rh->ports = pool_zalloc(ctrl->memoryPool, ports * sizeof(struct xhci_root_hub_port));
+	rh->ports = pool_zalloc(ctrl->metaPool, ports * sizeof(struct xhci_root_hub_port));
 	if (!rh->ports)
 	{
-		pool_free(ctrl->memoryPool, rh);
+		pool_free(ctrl->metaPool, rh);
 		Kprintf("Failed to allocate root hub port data\n");
 		return NULL;
 	}
@@ -454,9 +461,9 @@ void xhci_roothub_destroy(struct xhci_root_hub *rh)
 	xhci_roothub_abort_int_request(rh);
 
 	if (rh->ports)
-		pool_free(rh->udev->controller->memoryPool, rh->ports);
+		pool_free(rh->udev->controller->metaPool, rh->ports);
 
-	pool_free(rh->udev->controller->memoryPool, rh);
+	pool_free(rh->udev->controller->metaPool, rh);
 }
 
 u16 xhci_roothub_get_address(struct xhci_root_hub *rh)
@@ -472,7 +479,95 @@ u8 xhci_roothub_get_num_ports(struct xhci_root_hub *rh)
 	if (!rh)
 		return 0;
 
-	return rh->descriptor.hub_30.bNbrPorts;
+	return rh->num_ports;
+}
+
+/* Report the USB2 hardware-LPM (HLC) and BESL-LPM (BLC) capability of a 1-based
+ * root-hub port. */
+void xhci_roothub_port_lpm_caps(struct xhci_root_hub *rh, u32 port, BOOL *hw_lpm, BOOL *besl_lpm)
+{
+	if (hw_lpm)
+		*hw_lpm = FALSE;
+	if (besl_lpm)
+		*besl_lpm = FALSE;
+	if (!rh || !rh->ports || port == 0 || port > rh->num_ports)
+		return;
+
+	if (hw_lpm)
+		*hw_lpm = rh->ports[port - 1].usb2_hw_lpm;
+	if (besl_lpm)
+		*besl_lpm = rh->ports[port - 1].usb2_besl_lpm;
+}
+
+/* Program the U1 or U2 inactivity timeout in a 1-based root-hub port's PORTPMSC. */
+void xhci_roothub_set_usb3_port_timeout(struct xhci_root_hub *rh, u32 port, BOOL u2, u16 timeout)
+{
+	if (!rh || port == 0 || port > rh->num_ports)
+		return;
+
+	KprintfH("Setting USB3 port %lu timeout: U%lu timeout=%lu %s\n", (ULONG)port, (ULONG)(u2 ? 2 : 1),
+			 (ULONG)timeout, u2 ? "x256 microseconds" : "microseconds");
+
+	volatile u32 *pmsc = &rh->udev->controller->hcor->portregs[port - 1].or_portpmsc;
+	u32 reg = mmio_read32(pmsc);
+	if (u2)
+	{
+		reg &= ~(u32)PORT_U2_TIMEOUT(0xff);
+		reg |= (u32)PORT_U2_TIMEOUT(timeout);
+	}
+	else
+	{
+		reg &= ~(u32)PORT_U1_TIMEOUT(0xff);
+		reg |= (u32)PORT_U1_TIMEOUT(timeout);
+	}
+	mmio_write32(reg, pmsc);
+	mmio_read32(pmsc); /* flush */
+}
+
+/* Program USB2 hardware LPM (L1) on a 1-based root-hub port.  In BESL mode also
+ * writes PORTHLPMC (deep BESL + L1 timeout in 256us units + HIRDM=BESL). */
+void xhci_roothub_set_usb2_hw_lpm(struct xhci_root_hub *rh, u32 port, u8 hird, u8 slot_id,
+								  BOOL besl_mode, u8 besld, u16 l1_timeout_us)
+{
+	if (!rh || port == 0 || port > rh->num_ports)
+		return;
+
+	struct xhci_hcor_port_regs *pr = &rh->udev->controller->hcor->portregs[port - 1];
+
+	KprintfH("Setting USB2 hardware LPM on port %lu: HIRD=%u, slot ID=%u, BESL mode=%u, BESLD=%u, L1 timeout=%u microseconds\n",
+			 (ULONG)port, (ULONG)hird, (ULONG)slot_id, (ULONG)besl_mode, (ULONG)besld, (ULONG)l1_timeout_us);
+
+	if (besl_mode)
+	{
+		u32 hv = (u32)PORT_BESLD(besld) | (u32)PORT_L1_TIMEOUT(l1_timeout_us / 256u) | (u32)PORT_HIRDM(1);
+		mmio_write32(hv, &pr->or_porthlpmc);
+		mmio_read32(&pr->or_porthlpmc); /* flush */
+	}
+
+	u32 pm = mmio_read32(&pr->or_portpmsc);
+	pm &= ~((u32)PORT_HIRD_MASK | (u32)PORT_L1DS_MASK);
+	pm |= (u32)PORT_HIRD(hird) | (u32)PORT_RWE | (u32)PORT_L1DS(slot_id);
+	mmio_write32(pm, &pr->or_portpmsc);
+	pm = mmio_read32(&pr->or_portpmsc);
+	pm |= (u32)PORT_HLE;
+	mmio_write32(pm, &pr->or_portpmsc);
+	mmio_read32(&pr->or_portpmsc); /* flush */
+}
+
+/* Disable USB2 hardware LPM (L1) on a 1-based root-hub port, clearing HLE, RWE,
+ * HIRD and the stale L1 device slot.  Mirrors xhci_set_usb2_hardware_lpm(enable=0);
+ * used on device teardown so PORTPMSC.L1DS no longer points at a freed slot. */
+void xhci_roothub_clear_usb2_hw_lpm(struct xhci_root_hub *rh, u32 port)
+{
+	if (!rh || port == 0 || port > rh->num_ports)
+		return;
+
+	struct xhci_hcor_port_regs *pr = &rh->udev->controller->hcor->portregs[port - 1];
+
+	u32 pm = mmio_read32(&pr->or_portpmsc);
+	pm &= ~((u32)PORT_HLE | (u32)PORT_RWE | (u32)PORT_HIRD_MASK | (u32)PORT_L1DS_MASK);
+	mmio_write32(pm, &pr->or_portpmsc);
+	mmio_read32(&pr->or_portpmsc); /* flush */
 }
 
 s8 xhci_roothub_submit_int_request(struct xhci_root_hub *rh, struct USBIORequest *req)
@@ -497,7 +592,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 
 	u8 *buffer = (u8 *)rh->int_req->data_buffer;
 
-	const u8 num_ports = rh->descriptor.hub_30.bNbrPorts;
+	const u8 num_ports = rh->num_ports;
 	/* USB 3.0 spec is always two bytes, however the stack may request fewer bytes */
 	const u8 need_bytes = (u8)(((u32)num_ports + 7U) / 8U);
 	if (!buffer || rh->int_req->data_buffer_length < need_bytes)
@@ -663,27 +758,22 @@ static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, 
 
 static void xhci_roothub_handle_device_get_status(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	(void)rh;
 	KprintfH("USB_REQ_GET_STATUS\n");
 	/* Device GET_STATUS: bit0=self-powered, bit1=remote-wakeup */
-	u8 status[2] = {1, 0}; /* self-powered, remote-wakeup disabled */
+	u8 status[2] = {(u8)(1 | (rh->remote_wakeup ? 2 : 0)), 0};
 	xhci_roothub_reply(req, status, 2);
 }
 
-/**
- * Save Read Only (RO) bits and save read/write bits where
- * writing a 0 clears the bit and writing a 1 sets the bit (RWS).
- * For all other types (RW1S, RW1CS, RW, and RZ), writing a '0' has no effect.
- *
- * @param state	state of the Port Status and Control Regsiter
- * Return: a value that would result in the port being in the
- *	   same state, if the value was written to the port
- *	   status control register.
- */
-inline static u32 xhci_roothub_port_state_to_neutral(u32 state)
+/* Direct a 1-based root-hub port to U3.  Deferred tail of the port-suspend
+ * sequence (xhci_udev_suspend_finish): the attached device's endpoint rings
+ * are already stopped when this runs. */
+void xhci_roothub_set_port_u3(struct xhci_root_hub *rh, u8 port)
 {
-	/* Save read-only status and port state */
-	return (state & XHCI_PORT_RO) | (state & XHCI_PORT_RWS);
+	if (!rh || port == 0 || port > rh->num_ports)
+		return;
+
+	xhci_port_set_link_state(rh->udev->controller->hcor, port, XDEV_U3);
+	KprintfH("port %lu -> U3 standby (endpoints stopped)\n", (ULONG)port);
 }
 
 /**
@@ -755,7 +845,7 @@ inline static struct xhci_hcor_port_regs *xhci_roothub_get_port(struct xhci_root
 	struct xhci_ctrl *ctrl = rh->udev->controller;
 	u8 port = le16(req->setup.wIndex) & 0xffU; // port number is in low byte of wIndex;
 
-	if (port == 0 || port > rh->descriptor.hub_30.bNbrPorts)
+	if (port == 0 || port > rh->num_ports)
 		return NULL;
 
 	return &ctrl->hcor->portregs[port - 1];
@@ -772,7 +862,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	u32 reg = mmio_read32(&port->or_portsc);
-	reg = xhci_roothub_port_state_to_neutral(reg);
+	reg = xhci_port_state_to_neutral(reg);
 
 	switch (wValue)
 	{
@@ -796,7 +886,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 			u32 tmp = mmio_read32(&port->or_portsc);
 			if (tmp & PORT_WRC)
 			{
-				tmp = xhci_roothub_port_state_to_neutral(tmp);
+				tmp = xhci_port_state_to_neutral(tmp);
 				mmio_write32(tmp | PORT_WRC, &port->or_portsc);
 			}
 		}
@@ -843,18 +933,13 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		/* For USB2, need to write 15 (XDEV_RESUME) first, wait 20ms, then write U0 */
 		if (rh->ports[portNo - 1].major_revision < 3)
 		{
-			reg &= ~PORT_PLS_MASK;
-			reg |= XDEV_RESUME;
-			reg |= PORT_LINK_STROBE;
-			mmio_write32(reg, &port->or_portsc);
+			xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_RESUME);
 			xhci_roothub_delay_ms(25); // wait at least 20ms for resume to take effect
-			reg = mmio_read32(&port->or_portsc);
-			reg = xhci_roothub_port_state_to_neutral(reg);
 		}
-		reg &= ~PORT_PLS_MASK;
-		reg |= XDEV_U0; // put port back to U0 (active) state
-		reg |= PORT_LINK_STROBE;
-		mmio_write32(reg, &port->or_portsc);
+		/* put port back to U0 (active) state */
+		xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_U0);
+		/* Restart the attached device's endpoint rings (TDs kept across U3). */
+		xhci_udev_resume_port(rh->udev, (u8)portNo);
 		break;
 	case USB_PORT_FEAT_C_ENABLE:
 	case USB_PORT_FEAT_C_SUSPEND:
@@ -1036,28 +1121,28 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	u32 reg = mmio_read32(&port->or_portsc);
-	reg = xhci_roothub_port_state_to_neutral(reg);
+	reg = xhci_port_state_to_neutral(reg);
 
 	switch (wValue)
 	{
 	// Common for USB2 and USB3 ports
 	case USB_PORT_FEAT_RESET:
 	{
-		/* USB 3.0 ports in Compliance or SS.Inactive state need a warm reset
-		 * to recover from link training failure. A hot reset alone may briefly
-		 * train the link but leave it unstable. This mirrors Linux's
-		 * hub_port_warm_reset_required() logic in hub.c. */
-		u32 pls = reg & PORT_PLS_MASK;
-		if (rh->ports[portNo - 1].major_revision >= 3 &&
-			(pls == XDEV_COMPLIANCE || pls == XDEV_INACTIVE))
+		/* Always warm-reset SuperSpeed root ports. A hot reset can leave the
+		 * SuperSpeed link trained-but-dysfunctional (the port reports enabled
+		 * /U0, yet ADDRESS_DEVICE times out), and that bad state is not
+		 * observable from PORTSC - it is not limited to Compliance/SS.Inactive.
+		 * A warm reset forces full link retraining and is the reliable path;
+		 * it is a superset of a hot reset, so anything that worked after a hot
+		 * reset still works after a warm reset. */
+		if (rh->ports[portNo - 1].major_revision >= 3)
 		{
-			Kprintf("SS port %lu PLS=%lu (%s); upgrading to warm reset (portsc=%08lx)\n",
-					(ULONG)portNo, (ULONG)(pls >> 5),
-					pls == XDEV_COMPLIANCE ? "Compliance" : "SS.Inactive",
-					(ULONG)mmio_read32(&port->or_portsc));
+			KprintfH("SS port %lu warm reset (PLS=%lu portsc=%08lx)\n",
+					 (ULONG)portNo, (ULONG)((reg & PORT_PLS_MASK) >> 5),
+					 (ULONG)mmio_read32(&port->or_portsc));
 
 			/* Clear all pending change bits before the warm reset.
-			 * Stale change bits (especially PLC from the Compliance
+			 * Stale change bits (especially PLC from a Compliance
 			 * transition) can cause the VL805 to botch the warm reset:
 			 * the link bounces through disconnect/reconnect and recovers
 			 * via normal link training instead, leaving WRC=0 and the
@@ -1068,7 +1153,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 
 			/* Re-read and re-neutralize after clearing change bits */
 			reg = mmio_read32(&port->or_portsc);
-			reg = xhci_roothub_port_state_to_neutral(reg);
+			reg = xhci_port_state_to_neutral(reg);
 
 			/* Initiate warm reset */
 			mmio_write32(reg | PORT_WR, &port->or_portsc);
@@ -1095,9 +1180,9 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 				}
 				else
 				{
-					Kprintf("SS port %lu warm reset completed in %ld0ms "
-							"(portsc=%08lx)\n",
-							(ULONG)portNo, (LONG)attempts, (ULONG)temp);
+					KprintfH("SS port %lu warm reset completed in %ld0ms "
+							 "(portsc=%08lx)\n",
+							 (ULONG)portNo, (LONG)attempts, (ULONG)temp);
 				}
 			}
 		}
@@ -1182,11 +1267,15 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 
 	// USB2 specific features
 	case USB_PORT_FEAT_SUSPEND:
+		/* xHCI 4.15.1: the attached device's endpoint rings must be stopped
+		 * before the port goes to U3.  With a device present the U3 write is
+		 * deferred to xhci_udev_suspend_finish() (the request completes now;
+		 * port status reflects U3 moments later).  Empty port, or a device
+		 * with nothing to stop: suspend immediately. */
+		if (xhci_udev_suspend_port(rh->udev, (u8)portNo))
+			break;
 		KprintfH("Putting port %lu link to U3 standby\n", (ULONG)portNo);
-		reg &= ~PORT_PLS_MASK;
-		reg |= XDEV_U3;
-		reg |= PORT_LINK_STROBE;
-		mmio_write32(reg, &port->or_portsc);
+		xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_U3);
 		break;
 	case USB_PORT_FEAT_TEST:
 		/* No-op */
@@ -1210,13 +1299,11 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequest *io)
 {
 	const u16 wIndex = le16(io->setup.wIndex);
-#ifdef DEBUG_HIGH
 	const u16 wValue = le16(io->setup.wValue);
-#endif
 
 	struct USBSetupPacket *setup = &io->setup;
 
-	if ((setup->bmRequestType & USB_RT_PORT) && (wIndex & 0xff) > rh->descriptor.hub_30.bNbrPorts)
+	if ((setup->bmRequestType & USB_RT_PORT) && (wIndex & 0xff) > rh->num_ports)
 	{
 		Kprintf("The request port(%lu) exceeds maximum port number\n", (ULONG)wIndex);
 		xhci_roothub_stall(io);
@@ -1228,8 +1315,15 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 	{
 	/* Standard device requests */
 	case DeviceOutRequest | USB_REQ_CLEAR_FEATURE:
-		// TODO
-		xhci_roothub_stall(io);
+		/* Remote wakeup is bookkeeping only (the xHC manages root-port wake
+		 * hardware); everything else is unsupported. */
+		if (wValue == USB_DEVICE_REMOTE_WAKEUP)
+		{
+			rh->remote_wakeup = FALSE;
+			xhci_roothub_no_error(io);
+		}
+		else
+			xhci_roothub_stall(io);
 		break;
 	case DeviceRequest | USB_REQ_GET_CONFIGURATION:
 		xhci_roothub_handle_device_get_configuration(rh, io);
@@ -1251,8 +1345,14 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 		xhci_roothub_no_error(io);
 		break;
 	case DeviceOutRequest | USB_REQ_SET_FEATURE:
-		// TODO
-		xhci_roothub_stall(io);
+		/* TEST_MODE is compliance-lab only; remote wakeup as above. */
+		if (wValue == USB_DEVICE_REMOTE_WAKEUP)
+		{
+			rh->remote_wakeup = TRUE;
+			xhci_roothub_no_error(io);
+		}
+		else
+			xhci_roothub_stall(io);
 		break;
 	case DeviceOutRequest | USB_REQ_SET_ISOCH_DELAY:
 		KprintfH("USB_REQ_SET_ISOCH_DELAY\n");
@@ -1268,10 +1368,13 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 	/* Hub class requests */
 	case ClearHubFeature:
 		KprintfH("CLEAR_FEATURE HUB feature=%lx\n", wValue);
-		// TODO
-		// C_HUB_LOCAL_POWER
-		// C_HUB_OVER_CURRENT
-		xhci_roothub_stall(io);
+		/* The xHC handles hub power/over-current in hardware and our hub
+		 * GET_STATUS never reports the change bits - ACK as no-ops (mirrors
+		 * Linux rh_call_control). */
+		if (wValue == C_HUB_LOCAL_POWER || wValue == C_HUB_OVER_CURRENT)
+			xhci_roothub_no_error(io);
+		else
+			xhci_roothub_stall(io);
 		break;
 	case ClearPortFeature:
 		xhci_roothub_handle_port_clear_feature(rh, io);
@@ -1291,8 +1394,12 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 		break;
 	case SetHubFeature:
 		KprintfH("SET_FEATURE HUB feature=%lx\n", wValue);
-		// TODO
-		xhci_roothub_stall(io);
+		/* Same two features as ClearHubFeature; setting them is nonsensical
+		 * for a root hub but harmless - ACK (mirrors Linux). */
+		if (wValue == C_HUB_LOCAL_POWER || wValue == C_HUB_OVER_CURRENT)
+			xhci_roothub_no_error(io);
+		else
+			xhci_roothub_stall(io);
 		break;
 	case SetHubDepth:
 		KprintfH("SET_HUB_DEPTH depth=%lx\n", wValue);

@@ -9,11 +9,11 @@
 
 #include <xhci/xhci.h>
 #include <xhci/xhci-commands.h>
+#include <xhci/xhci-context.h>
 #include <xhci/xhci-descriptors.h>
 #include <xhci/xhci-endpoint.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
-#include <xhci/xhci-context.h>
 #include <devices/hcd_api.h>
 
 #ifdef DEBUG
@@ -165,7 +165,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     }
 
     /* Add command handler to pending list */
-    struct pending_command *pending_cmd = pool_zalloc(ctrl->memoryPool, sizeof(struct pending_command));
+    struct pending_command *pending_cmd = pool_zalloc(ctrl->metaPool, sizeof(struct pending_command));
     if (!pending_cmd)
     {
         Kprintf("Failed to allocate pending command\n");
@@ -196,7 +196,7 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     /* Ring the command ring doorbell — suppressed while an abort is in
      * progress; COMP_CMD_STOP will restart the ring once the HC has stopped. */
     if (!ctrl->cmd_abort_pending)
-        mmio_write32(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
+        xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
 }
 
 /*
@@ -223,10 +223,22 @@ static void handle_reset_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd,
         xhci_ep_set_failed(ep_ctx);
         return;
     }
+
+    /* COMP_CTX_STATE = the endpoint was not Halted (raced out of it, or is in
+     * Error state) - the ring flush via Set TR Dequeue is still the right
+     * recovery, so fall through instead of wedging in RESETTING. */
+    xhci_comp_code comp = GET_COMP_CODE(le32(event->event_cmd.status));
+    if (comp != COMP_SUCCESS && comp != COMP_CTX_STATE)
+    {
+        Kprintf("Reset EP %lu failed with completion code %lu\n", (ULONG)ep_index, (ULONG)comp);
+        xhci_ep_set_failed(ep_ctx);
+        return;
+    }
+
     struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
     u32 deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
 
-    KprintfH("Reset EP %lu completed successfully\n", (ULONG)ep_index);
+    KprintfH("Reset EP %lu completed (comp=%lu)\n", (ULONG)ep_index, (ULONG)comp);
     xhci_set_deq_pointer(cmd->udev, ep_index, deq_ptr);
 }
 
@@ -283,6 +295,14 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
     }
 
     xhci_ep_set_idle(ep_ctx);
+
+    /* A BOS/hub pre-fetch on EP0 may have STALLed or timed out mid-enumeration,
+     * deferring the device's SET_CONFIGURATION until EP0 was recovered.  Both
+     * the STALL (handle_reset_ep) and timeout (handle_stop_ring) recovery paths
+     * converge here with EP0 now idle and its ring clean (dequeue == enqueue),
+     * so this is the one safe point to resume a deferred configuration. */
+    if (ep_index == 0)
+        xhci_udev_op_advance(cmd->udev, UDEV_OP_EVENT_EP0_RECOVERED);
 }
 
 static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
@@ -304,6 +324,18 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
     {
         Kprintf("Expected a TRB for slot %lu completion, got %lu with %lu\n", (ULONG)slot_id, (ULONG)TRB_TO_SLOT_ID(flags), (ULONG)comp);
         xhci_ep_set_failed(ep_ctx);
+        return;
+    }
+
+    /* Suspend stop (port about to be directed to U3): the ring and its queued
+     * TDs stay untouched for the resume; just advance the suspend sequence.
+     * Counted even on an unexpected completion code so the port suspend can't
+     * wedge. */
+    if (xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_SUSPENDED)
+    {
+        if (comp != COMP_SUCCESS && comp != COMP_CTX_STATE)
+            Kprintf("Suspend stop EP %lu: unexpected completion code %lu\n", (ULONG)ep_index, (ULONG)comp);
+        xhci_udev_op_advance(cmd->udev, UDEV_OP_EVENT_STOP_DONE);
         return;
     }
 
@@ -341,7 +373,8 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-    xhci_comp_code comp = GET_COMP_CODE(le32(event->event_cmd.status));
+    const u32 status = le32(event->event_cmd.status);
+    xhci_comp_code comp = GET_COMP_CODE(status);
 #ifdef DEBUG_HIGH
     const u32 flags = le32(event->event_cmd.flags);
     const u32 slot_id = TRB_TO_SLOT_ID(flags);
@@ -354,15 +387,55 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
     }
 #endif
 
+    /* COMP_MEL_ERR (29): xHC rejected MAX_EXIT as too large for the current
+     * schedule.  The ELD in bits 23:0 of status tells us by how much to
+     * reduce.  Patch in_ctx and re-issue TRB_CONFIG_EP (spec §4.23.5.2). */
+    if (comp == COMP_MEL_ERR &&
+        (cmd->type == TRB_CONFIG_EP || cmd->type == TRB_EVAL_CONTEXT) && cmd->udev)
+    {
+        struct usb_device *udev = cmd->udev;
+        u32 eld = EVENT_TRB_LEN(status);
+        if (udev->mel_retry_count >= 3)
+        {
+            Kprintf("MEL retry limit reached for slot %lu (eld=%lu), giving up\n",
+                    (ULONG)udev->slot_id, (ULONG)eld);
+            xhci_udev_op_cancel(udev, UDEV_OP_LPM_ENABLE, ERR_NO_ERROR);
+            if (cmd->req)
+                xhci_udev_io_reply_failed(udev->controller, cmd->req, ERR_HCI_ERROR);
+            return;
+        }
+        udev->max_exit_latency_us = (udev->max_exit_latency_us > eld)
+                                        ? udev->max_exit_latency_us - eld
+                                        : 0;
+        udev->mel_retry_count++;
+        KprintfH("COMP_MEL_ERR slot %lu: eld=%lu new_mel=%lu retry=%lu\n",
+                 (ULONG)udev->slot_id, (ULONG)eld,
+                 (ULONG)udev->max_exit_latency_us, (ULONG)udev->mel_retry_count);
+        xhci_update_mel_in_input_ctx(udev);
+        xhci_configure_endpoints(udev, cmd->type == TRB_EVAL_CONTEXT, cmd->req);
+        return;
+    }
+
     if (comp != COMP_SUCCESS)
     {
         KprintfH("ERROR: %s command for slot %lu returned completion code 0x%lx.\n", type_name, (ULONG)slot_id, (ULONG)comp);
+        if (cmd->type == TRB_EVAL_CONTEXT && cmd->udev)
+            xhci_udev_op_cancel(cmd->udev, UDEV_OP_LPM_ENABLE, ERR_NO_ERROR);
         return;
     }
 
     KprintfH("%s command for slot %lu completed successfully\n", type_name, (ULONG)slot_id);
 
+    cmd->udev->mel_retry_count = 0;
+
     cmd->udev->slot_state = USB_DEV_SLOT_STATE_CONFIGURED;
+
+    /* LPM enable starts from the SET_CONFIGURATION wire completion
+     * (xhci_udev_parse_control_message): the device rejects
+     * SET_FEATURE(U1/U2_ENABLE) until it is in the Configured state.  The MEL
+     * Evaluate Context it issues resumes the sequence here. */
+    if (cmd->type == TRB_EVAL_CONTEXT)
+        xhci_udev_op_advance(cmd->udev, UDEV_OP_EVENT_MEL_EVAL_DONE);
 
     if (cmd->req)
     {
@@ -398,7 +471,7 @@ static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *c
     /* Point to output device context in dcbaa. */
     ctrl->dcbaa->dev_context_ptrs[slot_id] = le64((dma_addr_t)udev->out_ctx->bytes);
 
-    xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[slot_id], sizeof(__le64));
+    xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[slot_id], sizeof(__le64), 0);
     KprintfH("DCBAA[%lu]=%lx\n", (ULONG)slot_id, (ULONG)le64(ctrl->dcbaa->dev_context_ptrs[slot_id]));
 
     // Continue with Address Device command, passing cmd->req
@@ -599,10 +672,42 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
     if (comp == COMP_CMD_STOP)
     {
         Kprintf("Command Ring Stopped; restarting\n");
+
+        struct pending_command *timed_out_cmd = NULL;
+        struct MinNode *head = ctrl->pending_commands.mlh_Head;
+        if (head->mln_Succ)
+        {
+            struct pending_command *head_cmd = (struct pending_command *)head;
+            if (!head_cmd->deadline_active)
+                timed_out_cmd = head_cmd;
+        }
+
         ctrl->cmd_abort_pending = FALSE;
+
+        if (timed_out_cmd)
+        {
+            Kprintf("Missing Command Abort completion; failing timed out %s slot=%ld trb_dma=%lx on Command Ring Stop\n",
+                    xhci_command_type_name(timed_out_cmd->type),
+                    timed_out_cmd->udev ? (LONG)timed_out_cmd->udev->slot_id : -1L,
+                    (ULONG)timed_out_cmd->cmd_trb_dma);
+            Remove((struct Node *)timed_out_cmd);
+            xhci_fail_timed_out_command(ctrl, timed_out_cmd);
+            pool_free(ctrl->metaPool, timed_out_cmd);
+        }
+
+        /*
+         * After a Command Abort the HC has stopped on the old command ring
+         * dequeue pointer. Reprogram CRCR to the next software enqueue
+         * position so restart resumes with queued commands instead of the
+         * aborted TRB.
+         */
+        u64 trb_64 = xhci_ring_get_new_dequeue_ptr(ctrl->cmd_ring);
+        xhci_writeq(&ctrl->hcor->or_crcr,
+                    trb_64 & (u64)~CMD_RING_ADDR_MASK);
+
         /* Restart only if there are still pending commands. */
         if (ctrl->pending_commands.mlh_Head->mln_Succ)
-            mmio_write32(DB_VALUE_HOST, &ctrl->dba->doorbell[0]);
+            xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
         return;
     }
 
@@ -622,7 +727,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
                 (ULONG)cmd->cmd_trb_dma);
         Remove((struct Node *)cmd);
         xhci_fail_timed_out_command(ctrl, cmd);
-        pool_free(ctrl->memoryPool, cmd);
+        pool_free(ctrl->metaPool, cmd);
         return;
     }
 
@@ -634,7 +739,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
             Kprintf("No handler for command TRB %lx\n", cmd->cmd_trb_dma);
 
         Remove((struct Node *)cmd);
-        pool_free(ctrl->memoryPool, cmd);
+        pool_free(ctrl->metaPool, cmd);
         return;
     }
 
@@ -646,14 +751,14 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 }
 
 /*
- * Send reset endpoint command for given endpoint. This recovers from a
- * halted endpoint (e.g. due to a stall error).
+ * Recover a halted or errored endpoint.  Reset Endpoint is only valid in the
+ * Halted state (xHCI 4.6.8); an endpoint in the Error state (control endpoints,
+ * xHCI 4.8.3) skips it and goes straight to Set TR Dequeue - issuing the reset
+ * there would just fail with COMP_CTX_STATE.  Both paths converge in
+ * handle_set_deq() with the ring flushed.
  */
 void xhci_reset_ep(struct usb_device *udev, u8 ep_index)
 {
-    // TODO for error state, just set deq pointer to current enqueue pointer
-    // ep needs be in halted state, otherwise this command will fail
-
     struct xhci_ctrl *ctrl = udev->controller;
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
@@ -663,6 +768,14 @@ void xhci_reset_ep(struct usb_device *udev, u8 ep_index)
     }
 
     xhci_ep_set_resetting(ep_ctx);
+
+    if (xhci_read_hw_ep_state(udev, ep_index) == EP_STATE_ERROR)
+    {
+        KprintfH("EP %lu in Error state, skipping Reset Endpoint\n", (ULONG)ep_index);
+        struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
+        xhci_set_deq_pointer(udev, ep_index, xhci_ring_get_new_dequeue_ptr(ring));
+        return;
+    }
 
     // set TSP=0 - reset split transaction, flush cached TDs
     xhci_queue_command(ctrl, 0, udev->slot_id, ep_index, TRB_RESET_EP, NULL, udev); // handle_reset_ep
@@ -725,7 +838,7 @@ void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct U
     struct xhci_ctrl *ctrl = udev->controller;
     struct xhci_container_ctx *in_ctx = udev->in_ctx;
 
-    xhci_flush_cache(in_ctx->bytes, in_ctx->size);
+    xhci_flush_cache(in_ctx->bytes, in_ctx->size, 0);
     // TODO support deconfigure - DC flag?
     xhci_queue_command(ctrl, (dma_addr_t)in_ctx->bytes, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
 }
@@ -788,7 +901,7 @@ static void xhci_set_address(struct usb_device *udev, struct USBIORequest *req)
      * This is the first Set Address since device plug-in
      * so setting up the slot context.
      */
-    xhci_setup_addressable_virt_dev(ctrl, udev);
+    xhci_setup_addressable_virt_dev(udev);
 
     KprintfH("queue ADDR_DEV cmd, in_ctx->bytes=%lx addr=%lu slot=%lu parent_addr=%lu parent_port=%lu route=0x%lx, depth=%lu\n",
              (ULONG)udev->in_ctx->bytes,

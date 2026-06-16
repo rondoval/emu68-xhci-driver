@@ -154,31 +154,32 @@ static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
         switch (tag->ti_Tag)
         {
         case TAG_DRIVER_STATE:
-            // TODO: derive from internal unit state
-            *out = DRIVER_STATE_OPERATIONAL;
-            io->state = DRIVER_STATE_OPERATIONAL;
+            *out = unit->driver_state;
+            io->state = unit->driver_state;
             filled++;
             break;
         case TAG_DEVICE_VENDOR:
-            if (unit->xhci_ctrl->pci_dev)
+            if (!unit->xhci_ctrl->pci_dev)
+                *out = (ULONG)(APTR) "Broadcom";
+            else if (unit->xhci_ctrl->pci_dev->vendor == 0x1106)
+                *out = (ULONG)(APTR) "VIA Labs";
+            else
             {
                 uword_to_hex(unit->xhci_ctrl->pci_dev->vendor, (UBYTE *)unit->vendor_str);
                 *out = (ULONG)(APTR)unit->vendor_str;
             }
-            else
-                *out = (ULONG)(APTR) "Broadcom";
-                
             filled++;
             break;
         case TAG_DEVICE_PRODUCT:
-            if (unit->xhci_ctrl->pci_dev)
+            if (!unit->xhci_ctrl->pci_dev)
+                *out = (ULONG)(APTR) "BCM2711 xHCI";
+            else if (unit->xhci_ctrl->pci_dev->device == 0x3483)
+                *out = (ULONG)(APTR) "VL805 xHCI";
+            else
             {
                 uword_to_hex(unit->xhci_ctrl->pci_dev->device, (UBYTE *)unit->device_str);
                 *out = (ULONG)(APTR)unit->device_str;
             }
-            else
-                *out = (ULONG)(APTR) "OTG controller";
-
             filled++;
             break;
         case TAG_DEVICE_VERSION:
@@ -203,7 +204,13 @@ static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
             filled++;
             break;
         case TAG_DRIVER_FEATURES:
-            *out = DRIVER_FEAT_USB2 | DRIVER_FEAT_USB3 | DRIVER_FEAT_ISOCHRONOUS | DRIVER_FEAT_ISOCHRONOUS_HOOKS; // | DRIVER_FEAT_QUICK_IO;
+            /* No QUICK_IO: Poseidon's RT-ISO setup path (psdAllocRTIsoHandler)
+             * sends ADDISOHANDLER/STARTRTISO via DoIO on a pipe with a NULL
+             * reply port and relies on QuickIO drivers completing those
+             * requests *synchronously* in BeginIO ("hardware must support
+             * quick IO for this to work").  Our BeginIO always defers to the
+             * unit task, so advertising QUICK_IO hangs RT ISO registration. */
+            *out = DRIVER_FEAT_USB2 | DRIVER_FEAT_USB3 | DRIVER_FEAT_ISOCHRONOUS | DRIVER_FEAT_ISOCHRONOUS_HOOKS;
             filled++;
             break;
         default:
@@ -246,7 +253,8 @@ static inline u32 Do_CMD_DEVICE_RESET(struct USBIORequest *io)
     }
 
     io->req.io_Error = ERR_NO_ERROR;
-    io->state = (io->req.io_Error == ERR_NO_ERROR) ? DRIVER_STATE_RESETING : 0;
+    unit->driver_state = DRIVER_STATE_RESETING;
+    io->state = unit->driver_state;
 
     return COMMAND_PROCESSED;
 }
@@ -283,7 +291,8 @@ static inline u32 Do_CMD_DEVICE_RESUME(struct USBIORequest *io)
     }
 
     io->req.io_Error = ERR_NO_ERROR;
-    io->state = DRIVER_STATE_OPERATIONAL;
+    unit->driver_state = DRIVER_STATE_OPERATIONAL;
+    io->state = unit->driver_state;
     return COMMAND_PROCESSED;
 }
 
@@ -312,7 +321,8 @@ static inline u32 Do_CMD_STOP(struct USBIORequest *io)
     }
 
     io->req.io_Error = ERR_NO_ERROR;
-    io->state = DRIVER_STATE_SUSPENDED;
+    unit->driver_state = DRIVER_STATE_SUSPENDED;
+    io->state = unit->driver_state;
     return COMMAND_PROCESSED;
 }
 
@@ -342,7 +352,8 @@ static inline u32 Do_CMD_START(struct USBIORequest *io)
     }
 
     io->req.io_Error = ERR_NO_ERROR;
-    io->state = DRIVER_STATE_OPERATIONAL;
+    unit->driver_state = DRIVER_STATE_OPERATIONAL;
+    io->state = unit->driver_state;
     return COMMAND_PROCESSED;
 }
 

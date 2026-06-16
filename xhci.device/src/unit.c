@@ -113,6 +113,26 @@ static BOOL pcie_xhci_is_supported(struct Library *pcielibBase, struct pci_dev *
 	return TRUE;
 }
 
+#define PCI_VENDOR_ID_VIA 0x1106
+#define PCI_DEVICE_ID_VIA_VL805 0x3483
+
+/* Derive controller quirks from the PCI identity (mirrors the VL805 entries in
+ * Linux xhci_pci_quirks).  pci_dev == NULL is the onboard BCM2711 controller,
+ * which needs no quirks (Linux only applies system-PM quirks there). */
+static void xhci_detect_quirks(struct Library *pcielibBase, struct xhci_ctrl *ctrl, struct pci_dev *pd)
+{
+	if (!pd)
+		return;
+
+	if (pd->vendor == PCI_VENDOR_ID_VIA && pd->device == PCI_DEVICE_ID_VIA_VL805)
+	{
+		ctrl->quirks |= XHCI_QUIRK_TRB_OVERFETCH | XHCI_QUIRK_SS_BULK_OUT;
+		ctrl->vl805_fw_version = pci_read_config_long((UBYTE)0x50, pd);
+		Kprintf("[xhci] %s: VL805 quirks enabled (0x%lx), fw 0x%08lx\n",
+				__func__, (ULONG)ctrl->quirks, (ULONG)ctrl->vl805_fw_version);
+	}
+}
+
 /*
  * Map BAR, get register pointers and enable bus mastering
  */
@@ -202,6 +222,7 @@ static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_dev *pci_dev,
 
 	xhci_ctrl->utilityBase = unit->device->utilityBase;
 	xhci_ctrl->pci_dev = pci_dev;
+	xhci_detect_quirks(unit->device->pcieBase, xhci_ctrl, pci_dev);
 
 	s32 result = xhci_register(xhci_ctrl, hccr, hcor);
 	if (result)
@@ -251,6 +272,7 @@ s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	unit->flags = flags;
 	unit->unit.unit_OpenCnt = 1;
 	unit->unitNumber = unitNumber;
+	unit->driver_state = DRIVER_STATE_OPERATIONAL;
 
 	unit->memoryPool = CreatePool(MEMF_FAST | MEMF_PUBLIC, 16384, 8192);
 	if (unit->memoryPool == NULL)

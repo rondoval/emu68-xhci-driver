@@ -45,6 +45,8 @@ add_executable(xhci.device
     src/xhci/xhci.c
     src/xhci/xhci-ring.c
     src/xhci/xhci-context.c
+    src/xhci/xhci-lpm.c
+    src/xhci/xhci-hub.c
     src/xhci/xhci-events.c
     src/xhci/xhci-commands.c
     src/xhci/xhci-td.c
@@ -65,6 +67,9 @@ target_link_libraries(xhci.device
         Emu68Common::common
         Emu68PCIe::pcie_headers
 )
+
+# ROM-able: no writable .data/.bss may sneak in (see driver-stack TODO.md)
+emu68_rom_check(xhci.device)
 
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device
