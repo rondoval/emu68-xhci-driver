@@ -869,6 +869,8 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
     return err;
 }
 
+#ifdef DEBUG /* name helpers below are used only by the context dumps */
+
 static const char *slot_state_name(u32 state)
 {
     switch (state)
@@ -1009,6 +1011,8 @@ void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx)
             slot_state);
 }
 
+#endif /* DEBUG (context-dump helpers + xhci_dump_slot_ctx) */
+
 /* Issue an Evaluate Context carrying udev->max_exit_latency_us (mirror
  * xhci_change_max_exit_latency).  The xHC evaluates the slot's Max Exit
  * Latency only through Address Device / Evaluate Context (xHCI 6.2.2); the
@@ -1034,6 +1038,8 @@ void xhci_evaluate_mel(struct usb_device *udev)
              (ULONG)udev->slot_id);
     xhci_configure_endpoints(udev, TRUE, NULL);
 }
+
+#ifdef DEBUG
 
 void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, u8 ep_index)
 {
@@ -1111,3 +1117,5 @@ void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, u8 ep_index)
             avg_trb_len,
             max_esit_payload);
 }
+
+#endif /* DEBUG (xhci_dump_ep_ctx) */

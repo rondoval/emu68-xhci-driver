@@ -353,6 +353,8 @@ u32 xhci_get_max_esit_payload(struct usb_device *udev,
     return max_packet * max_burst;
 }
 
+#ifdef DEBUG
+
 static void xhci_dump_interface(const char *tag, u8 index, const struct usb_interface *iface)
 {
     if (!iface)
@@ -425,6 +427,8 @@ void xhci_dump_config(const char *tag, const struct usb_config *cfg, u16 addr)
     for (u8 i = 0; i < cfg->no_of_if; ++i)
         xhci_dump_interface(pfx, i, &cfg->if_desc[i]);
 }
+
+#endif /* DEBUG (xhci_dump_config / xhci_dump_interface) */
 
 /* Running state while walking a configuration descriptor's sub-descriptors. */
 struct cfg_parse_state

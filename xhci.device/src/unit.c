@@ -59,7 +59,9 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 		return -1;
 	}
 
+#ifdef DEBUG
 	CONST_STRPTR compatible = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "compatible"));
+#endif
 
 	APTR base = DT_GetBaseAddressVirtual((CONST_STRPTR) "/scb/xhci");
 	if (base == NULL)
@@ -89,6 +91,9 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 
 static BOOL pcie_xhci_is_supported(struct Library *pcielibBase, struct pci_dev *pd)
 {
+#ifndef DEBUG
+	(void)pcielibBase; /* only used by the debug PCI-config reads below */
+#endif
 	Kprintf("[xhci] %s: Device Info:\n", __func__);
 	Kprintf("[xhci] %s:   Vendor:Device = 0x%04lx:%04lx\n", __func__,
 			(ULONG)pd->vendor, (ULONG)pd->device);
@@ -100,6 +105,7 @@ static BOOL pcie_xhci_is_supported(struct Library *pcielibBase, struct pci_dev *
 		return FALSE;
 	}
 
+#ifdef DEBUG
 	UBYTE revision = pci_read_config_byte(PCI_REVISION_ID, pd);
 	UBYTE prog_if = pci_read_config_byte(PCI_CLASS_PROG, pd);
 	UBYTE subclass = pci_read_config_byte((UBYTE)PCI_CLASS_DEVICE, pd);
@@ -109,6 +115,7 @@ static BOOL pcie_xhci_is_supported(struct Library *pcielibBase, struct pci_dev *
 	Kprintf("[xhci] %s:   Class = %02lx:%02lx:%02lx (revision %02lx)\n",
 			__func__, (ULONG)baseclass, (ULONG)subclass, (ULONG)prog_if, (ULONG)revision);
 	Kprintf("[xhci] %s:   MCU Firmware Version: 0x%08lx\n", __func__, mcu_firmware);
+#endif
 
 	return TRUE;
 }

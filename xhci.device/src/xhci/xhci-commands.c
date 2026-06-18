@@ -56,6 +56,7 @@ static u32 xhci_pending_command_count(struct xhci_ctrl *ctrl)
 }
 #endif
 
+#ifdef DEBUG
 static const char *xhci_command_type_name(trb_type type)
 {
     switch (type)
@@ -82,6 +83,7 @@ static const char *xhci_command_type_name(trb_type type)
         return "UNKNOWN";
     }
 }
+#endif /* DEBUG (xhci_command_type_name) */
 
 static inline struct pending_command *xhci_find_pending_command_by_dma(struct xhci_ctrl *ctrl, dma_addr_t trb_dma)
 {
@@ -579,6 +581,9 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
 static void handle_reset_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
+#ifndef DEBUG
+    (void)cmd; /* only referenced by debug logging below */
+#endif
     const u32 status = le32(event->event_cmd.status);
 
     KprintfH("event status=%08lx flags=%08lx\n", (ULONG)status, (ULONG)le32(event->event_cmd.flags));

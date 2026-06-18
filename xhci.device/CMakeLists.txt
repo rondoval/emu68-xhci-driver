@@ -20,9 +20,11 @@ add_compile_options(
     -Wshadow
     -Wmissing-prototypes
     -Wstrict-prototypes
-    -DDEBUG
     -fomit-frame-pointer
 )
+
+# Debug-output backend defines (EMU68_DEBUG_BACKEND, see emu68-common).
+emu68_debug_backend_definitions()
 
 add_compile_definitions(
     PRIVATE
@@ -68,8 +70,9 @@ target_link_libraries(xhci.device
         Emu68PCIe::pcie_headers
 )
 
-# ROM-able: no writable .data/.bss may sneak in (see driver-stack TODO.md)
-emu68_rom_check(xhci.device)
+# ROM-able: no writable .data/.bss may sneak in (see driver-stack TODO.md). For the
+# serial backend this instead links debug.lib (+ __divsi3 glue) and skips the check.
+emu68_debug_backend_finalize(xhci.device ROMABLE)
 
 install(
     PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device

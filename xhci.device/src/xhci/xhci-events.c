@@ -48,7 +48,13 @@
 
 typedef void (*ep_state_handler)(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
+/* Default handler only logs an unexpected-state warning; compiled out (calls
+ * included) without DEBUG. */
+#ifdef DEBUG
 static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
+#else
+#define ep_handle_default(udev, ep_ctx, event) ((void)0)
+#endif
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_rt_iso(struct ep_context *ep_ctx, const struct xhci_td_completion *done);
 static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
@@ -259,6 +265,7 @@ inline static s8 translate_status(xhci_comp_code comp)
 /* Default endpoint event handler
  * Called when no specific handler is registered for the current endpoint state
  */
+#ifdef DEBUG
 static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
     (void)event;
@@ -272,6 +279,7 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
              (ULONG)le32(event->generic.field[2]),
              (ULONG)le32(event->generic.field[3]));
 }
+#endif /* DEBUG (ep_handle_default) */
 
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
@@ -385,6 +393,11 @@ static void ep_handle_rt_iso(struct ep_context *ep_ctx, const struct xhci_td_com
  * on the ring for the resume - drop the event quietly. */
 static void ep_handle_suspended(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
+#ifndef DEBUG
+    /* only referenced by debug logging / the default handler */
+    (void)udev;
+    (void)ep_ctx;
+#endif
     const xhci_comp_code comp = GET_COMP_CODE(le32(event->trans_event.transfer_len));
 
     if (comp == COMP_STOP || comp == COMP_STOP_INVAL || comp == COMP_STOP_SHORT)
