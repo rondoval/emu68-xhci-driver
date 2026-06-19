@@ -23,6 +23,12 @@
 #define DEVICE_USE_MSI TRUE
 #endif
 
+/* Prefer MSI-X when the device and controller support it (falls back to MSI
+ * then INTx).  Set FALSE to forbid MSI-X for this driver. */
+#ifndef DEVICE_USE_MSIX
+#define DEVICE_USE_MSIX TRUE
+#endif
+
 #define STACK_SIZE 65535
 #define UNIT_TASK_PRIORITY 30
 #define UNIT_TASK_POLL_DELAY_MS 100

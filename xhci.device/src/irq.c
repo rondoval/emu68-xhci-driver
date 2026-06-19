@@ -17,6 +17,7 @@
 #include <config.h>
 #include <debug.h>
 #include <libraries/openpci.h>
+#include <libraries/pci_constants.h> /* PCI_IRQ_* flags */
 #include <xhci/xhci.h>
 #include <xhci/xhci-events.h>
 #include <device.h>
@@ -70,7 +71,7 @@ static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *
 	{
 		if (ctrl->msi_enabled)
 		{
-			MaskMSI(ctrl->pci_dev);
+			MaskIntVector(ctrl->pci_dev, 0);
 		}
 		else if (!CheckSetINTxMask(ctrl->pci_dev, TRUE))
 		{
@@ -110,7 +111,7 @@ void xhci_int_rearm(struct XHCIUnit *unit)
 
 	if (ctrl->pci_dev && ctrl->msi_enabled)
 	{
-		UnmaskMSI(ctrl->pci_dev);
+		UnmaskIntVector(ctrl->pci_dev, 0);
 	}
 	else if (ctrl->pci_dev && !CheckSetINTxMask(ctrl->pci_dev, FALSE))
 	{
@@ -126,19 +127,29 @@ static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
 	struct Library *pcielibBase = unit->device->pcieBase;
 
-	if (DEVICE_USE_MSI && EnableMSI(ctrl->pci_dev)!=0)
+	ULONG flags = PCI_IRQ_INTX;
+	if (DEVICE_USE_MSI)
+		flags |= PCI_IRQ_MSI;
+	if (DEVICE_USE_MSIX)
+		flags |= PCI_IRQ_MSIX;
+
+	LONG nvec = AllocIntVectors(ctrl->pci_dev, 1, 1, flags);
+	if (nvec < 1)
 	{
-		Kprintf("[xhci] %s: MSI not supported, falling back to INTx\n", __func__);
-	}
-	else
-	{
-		Kprintf("[xhci] %s: MSI enabled successfully\n", __func__);
-		ctrl->msi_enabled = TRUE;
+		Kprintf("[xhci] %s: AllocIntVectors failed (%ld)\n", __func__, (LONG)nvec);
+		return -1;
 	}
 
-	if (!pci_add_intserver(&unit->irq_isr, ctrl->pci_dev))
+	/* Message-signalled (MSI or MSI-X) vs INTx steers the ISR's masking path. */
+	ULONG itype = GetIntVectorType(ctrl->pci_dev);
+	ctrl->msi_enabled = (itype != PCI_IRQ_INTX);
+	Kprintf("[xhci] %s: using %s\n", __func__,
+			itype == PCI_IRQ_MSIX ? "MSI-X" : itype == PCI_IRQ_MSI ? "MSI" : "INTx");
+
+	if (AddIntVectorServer(ctrl->pci_dev, 0, &unit->irq_isr) != 0)
 	{
-		Kprintf("[xhci] %s: pci_add_intserver failed\n", __func__);
+		Kprintf("[xhci] %s: AddIntVectorServer failed\n", __func__);
+		FreeIntVectors(ctrl->pci_dev);
 		return -1;
 	}
 
@@ -172,5 +183,8 @@ void xhci_int_shutdown(struct XHCIUnit *unit)
 	if (!unit->xhci_ctrl->pci_dev)
 		RemIntServerEx((ULONG)unit->irq_line, &unit->irq_isr);
 	else
-		pci_rem_intserver(&unit->irq_isr, unit->xhci_ctrl->pci_dev);
+	{
+		RemIntVectorServer(unit->xhci_ctrl->pci_dev, 0, &unit->irq_isr);
+		FreeIntVectors(unit->xhci_ctrl->pci_dev);
+	}
 }
