@@ -136,7 +136,8 @@ static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
 	LONG nvec = AllocIntVectors(ctrl->pci_dev, 1, 1, flags);
 	if (nvec < 1)
 	{
-		Kprintf("[xhci] %s: AllocIntVectors failed (%ld)\n", __func__, (LONG)nvec);
+		Kprintf("[xhci] %s: AllocIntVectors failed: %s (%ld)\n", __func__,
+				pcie_strerror(nvec), (LONG)nvec);
 		return -1;
 	}
 
@@ -144,11 +145,14 @@ static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
 	ULONG itype = GetIntVectorType(ctrl->pci_dev);
 	ctrl->msi_enabled = (itype != PCI_IRQ_INTX);
 	Kprintf("[xhci] %s: using %s\n", __func__,
-			itype == PCI_IRQ_MSIX ? "MSI-X" : itype == PCI_IRQ_MSI ? "MSI" : "INTx");
+			itype == PCI_IRQ_MSIX ? "MSI-X" : itype == PCI_IRQ_MSI ? "MSI"
+																   : "INTx");
 
-	if (AddIntVectorServer(ctrl->pci_dev, 0, &unit->irq_isr) != 0)
+	LONG rc = AddIntVectorServer(ctrl->pci_dev, 0, &unit->irq_isr);
+	if (rc != 0)
 	{
-		Kprintf("[xhci] %s: AddIntVectorServer failed\n", __func__);
+		Kprintf("[xhci] %s: AddIntVectorServer failed: %s (%ld)\n", __func__,
+				pcie_strerror(rc), rc);
 		FreeIntVectors(ctrl->pci_dev);
 		return -1;
 	}
