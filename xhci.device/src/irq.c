@@ -67,16 +67,13 @@ static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *
 	mmio_write32(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
 	xhci_irq_disable_runtime(ctrl);
 
-	if (ctrl->pci_dev)
+	/* xhci_irq_disable_runtime() already gated the xHC interrupter (IMAN), which
+	 * stops MSI/MSI-X message generation — so no PCIe-level vector mask is needed
+	 * for message-signalled modes.  INTx is level-triggered and may be shared, so
+	 * it still needs the PCIe-pin mask. */
+	if (ctrl->pci_dev && !ctrl->msi_enabled && !CheckSetINTxMask(ctrl->pci_dev, TRUE))
 	{
-		if (ctrl->msi_enabled)
-		{
-			MaskIntVector(ctrl->pci_dev, 0);
-		}
-		else if (!CheckSetINTxMask(ctrl->pci_dev, TRUE))
-		{
-			KprintfH("[xhci] %s: failed to mask INTx line\n", __func__);
-		}
+		KprintfH("[xhci] %s: failed to mask INTx line\n", __func__);
 	}
 
 	Signal(unit->task, 1UL << unit->irq_signal);
@@ -109,11 +106,9 @@ void xhci_int_rearm(struct XHCIUnit *unit)
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
 	struct Library *pcielibBase = unit->device->pcieBase;
 
-	if (ctrl->pci_dev && ctrl->msi_enabled)
-	{
-		UnmaskIntVector(ctrl->pci_dev, 0);
-	}
-	else if (ctrl->pci_dev && !CheckSetINTxMask(ctrl->pci_dev, FALSE))
+	/* INTx needs its PCIe-pin unmask; MSI/MSI-X is re-armed purely by
+	 * re-enabling the xHC interrupter (IMAN) below. */
+	if (ctrl->pci_dev && !ctrl->msi_enabled && !CheckSetINTxMask(ctrl->pci_dev, FALSE))
 	{
 		Signal(unit->task, 1UL << unit->irq_signal);
 		return;
