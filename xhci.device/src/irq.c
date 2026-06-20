@@ -53,9 +53,10 @@ static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *
 	(void)vector;
 
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	struct Library *pcielibBase = unit->device->pcieBase;
 	ULONG status = mmio_read32(&ctrl->hcor->or_usbsts) & XHCI_IRQ_ACK_MASK;
 
+	/* USBSTS.EINT is the "is this interrupt ours?" check for a shared INTx line:
+	 * when it isn't set we return 0 and let the next interrupt server run. */
 	if (!status)
 		return 0;
 
@@ -64,17 +65,11 @@ static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *
 		Kprintf("[xhci] %s: fatal status interrupt (USBSTS=0x%08lx)\n", __func__, status);
 	}
 
+	/* Acking USBSTS.EINT and gating the interrupter (IMAN) deasserts the xHC's
+	 * interrupt for MSI/MSI-X and INTx alike, so no PCIe-config
+	 * PCI_COMMAND.INTX_DISABLE masking is needed. */
 	mmio_write32(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
 	xhci_irq_disable_runtime(ctrl);
-
-	/* xhci_irq_disable_runtime() already gated the xHC interrupter (IMAN), which
-	 * stops MSI/MSI-X message generation — so no PCIe-level vector mask is needed
-	 * for message-signalled modes.  INTx is level-triggered and may be shared, so
-	 * it still needs the PCIe-pin mask. */
-	if (ctrl->pci_dev && !ctrl->msi_enabled && !CheckSetINTxMask(ctrl->pci_dev, TRUE))
-	{
-		KprintfH("[xhci] %s: failed to mask INTx line\n", __func__);
-	}
 
 	Signal(unit->task, 1UL << unit->irq_signal);
 
@@ -103,18 +98,9 @@ static inline void xhci_irq_stop(struct xhci_ctrl *ctrl)
 
 void xhci_int_rearm(struct XHCIUnit *unit)
 {
-	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	struct Library *pcielibBase = unit->device->pcieBase;
-
-	/* INTx needs its PCIe-pin unmask; MSI/MSI-X is re-armed purely by
-	 * re-enabling the xHC interrupter (IMAN) below. */
-	if (ctrl->pci_dev && !ctrl->msi_enabled && !CheckSetINTxMask(ctrl->pci_dev, FALSE))
-	{
-		Signal(unit->task, 1UL << unit->irq_signal);
-		return;
-	}
-
-	xhci_irq_enable_runtime(ctrl);
+	/* Re-enabling the xHC interrupter (IMAN) rearms the source for MSI/MSI-X and
+	 * INTx alike; events that arrived while masked re-raise the interrupt. */
+	xhci_irq_enable_runtime(unit->xhci_ctrl);
 }
 
 static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
@@ -136,12 +122,12 @@ static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
 		return -1;
 	}
 
-	/* Message-signalled (MSI or MSI-X) vs INTx steers the ISR's masking path. */
+#ifdef DEBUG
 	ULONG itype = GetIntVectorType(ctrl->pci_dev);
-	ctrl->msi_enabled = (itype != PCI_IRQ_INTX);
 	Kprintf("[xhci] %s: using %s\n", __func__,
 			itype == PCI_IRQ_MSIX ? "MSI-X" : itype == PCI_IRQ_MSI ? "MSI"
 																   : "INTx");
+#endif
 
 	LONG rc = AddIntVectorServer(ctrl->pci_dev, 0, &unit->irq_isr);
 	if (rc != 0)

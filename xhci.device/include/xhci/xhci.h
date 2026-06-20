@@ -155,7 +155,6 @@ struct xhci_ctrl
 	struct slab_cache bounce_large;				 /* XHCI_BOUNCE_LARGE_SIZE bytes per slot */
 	struct Library *utilityBase;
 	struct pci_dev *pci_dev;
-	BOOL msi_enabled; /* TRUE after EnableMSI + AddIntServer succeed */
 	struct usb_device *devices_by_virtual_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];
 
