@@ -15,6 +15,7 @@
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
 #include <devices/hcd_api.h>
+#include <minlist.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -350,12 +351,12 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     KprintfH("Stopped EP %lu with completion code %lu\n", (ULONG)ep_index, (ULONG)comp);
 
-    u32 deq_ptr = 0;
+    dma_addr_t deq_ptr = 0;
     xhci_ep_process_stop(ep_ctx, &deq_ptr);
 
     if (deq_ptr)
     {
-        xhci_set_deq_pointer(cmd->udev, ep_index, deq_ptr);
+        xhci_set_deq_pointer(cmd->udev, ep_index, (u32)deq_ptr);
         return;
     }
 
@@ -364,7 +365,7 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
     deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
-    xhci_set_deq_pointer(cmd->udev, ep_index, deq_ptr);
+    xhci_set_deq_pointer(cmd->udev, ep_index, (u32)deq_ptr);
 }
 
 /*

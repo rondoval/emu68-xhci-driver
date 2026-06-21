@@ -7,7 +7,7 @@
 
 struct xhci_root_hub;
 
-typedef void (*io_reply_data_fn)(struct usb_device *udev, struct USBIORequest *io, s8 err, ULONG actual);
+typedef void (*io_reply_data_fn)(struct usb_device *udev, struct USBIORequest *io, s8 err, u32 actual);
 
 struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev,
                                          io_reply_data_fn io_reply_data);
