@@ -244,7 +244,7 @@ static void xhci_cleanup(struct xhci_ctrl *ctrl)
 	xhci_scratchpad_free(ctrl);
 	dma_free(ctrl->dmaPool, ctrl->erst.entries);
 	dma_free(ctrl->dmaPool, ctrl->dcbaa);
-	mem_zero(ctrl, sizeof(struct xhci_ctrl));
+	memset(ctrl, 0, sizeof(struct xhci_ctrl));
 }
 
 /**

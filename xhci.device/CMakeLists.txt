@@ -11,7 +11,7 @@ add_link_options(
 )
 
 add_compile_options(
-    -Os
+    -O3
     -m68040
     -Wall
     -Wextra

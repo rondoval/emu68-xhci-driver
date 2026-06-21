@@ -469,7 +469,7 @@ static BOOL parse_interface_descriptor(struct cfg_parse_state *st, struct usb_in
         }
         st->interface_map[iface_number] = st->if_index;
         st->current_if = &st->conf->if_desc[st->if_index];
-        mem_zero(st->current_if, sizeof(struct usb_interface));
+        memset(st->current_if, 0, sizeof(struct usb_interface));
         st->current_if->interface_number = (u8)iface_number;
         st->current_if->num_altsetting = 0;
         st->current_if->active_altsetting = NULL;
@@ -493,7 +493,7 @@ static BOOL parse_interface_descriptor(struct cfg_parse_state *st, struct usb_in
 
     st->current_alt_index = st->current_if->num_altsetting++;
     st->current_alt = &st->current_if->altsetting[st->current_alt_index];
-    mem_zero(st->current_alt, sizeof(struct usb_interface_altsetting));
+    memset(st->current_alt, 0, sizeof(struct usb_interface_altsetting));
 
     CopyMem(ifd, &st->current_alt->desc, sizeof(struct usb_interface_descriptor));
     st->current_alt->no_of_ep = 0;

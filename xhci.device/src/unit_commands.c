@@ -241,7 +241,7 @@ static inline u32 Do_CMD_DEVICE_RESET(struct USBIORequest *io)
     for (u8 p = 1; p <= maxp; ++p)
     {
         struct USBIORequest req;
-        mem_zero(&req, sizeof(req));
+        memset(&req, 0, sizeof(req));
         req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
         req.setup.bRequest = USB_REQ_SET_FEATURE;
         req.setup.wValue = le16(USB_PORT_FEAT_RESET);
@@ -280,7 +280,7 @@ static inline u32 Do_CMD_DEVICE_RESUME(struct USBIORequest *io)
     for (u8 p = 1; p <= maxp; ++p)
     {
         struct USBIORequest req;
-        mem_zero(&req, sizeof(req));
+        memset(&req, 0, sizeof(req));
         req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
         req.setup.bRequest = USB_REQ_CLEAR_FEATURE;
         req.setup.wValue = le16(USB_PORT_FEAT_SUSPEND);
@@ -310,7 +310,7 @@ static inline u32 Do_CMD_STOP(struct USBIORequest *io)
     for (u8 p = 1; p <= maxp; ++p)
     {
         struct USBIORequest req;
-        mem_zero(&req, sizeof(req));
+        memset(&req, 0, sizeof(req));
         req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
         req.setup.bRequest = USB_REQ_SET_FEATURE;
         req.setup.wValue = le16(USB_PORT_FEAT_SUSPEND);
@@ -341,7 +341,7 @@ static inline u32 Do_CMD_START(struct USBIORequest *io)
     for (u8 p = 1; p <= maxp; ++p)
     {
         struct USBIORequest req;
-        mem_zero(&req, sizeof(req));
+        memset(&req, 0, sizeof(req));
         req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
         req.setup.bRequest = USB_REQ_SET_FEATURE;
         req.setup.wValue = le16(USB_PORT_FEAT_POWER);
