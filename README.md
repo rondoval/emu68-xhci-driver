@@ -1,5 +1,10 @@
 # emu68-xhci-driver
 
+> **Releases:** this component ships as part of the
+> [emu68-driver-stack](https://github.com/rondoval/emu68-driver-stack) — the downloadable
+> `.lha` and bundled documentation are published there. This repository is source-only
+> and versioned via git tags.
+
 AmigaOS xHCI USB 2.0 / USB 3.0 host controller driver for [Emu68](https://github.com/michalsc/Emu68)
 on Raspberry Pi 4 (BCM2711).
 
