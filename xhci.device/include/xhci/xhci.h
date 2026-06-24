@@ -24,6 +24,7 @@
 #include <proto/exec.h>
 #endif
 
+#include <exec/execbase.h> /* DMA_ReadFromRAM for CachePreDMA(); older NDKs don't pull it in transitively */
 #include <bits.h>
 #include <iomem.h>
 #include <slab.h>
@@ -155,7 +156,6 @@ struct xhci_ctrl
 	struct slab_cache bounce_large;				 /* XHCI_BOUNCE_LARGE_SIZE bytes per slot */
 	struct Library *utilityBase;
 	struct pci_dev *pci_dev;
-	BOOL msi_enabled; /* TRUE after EnableMSI + AddIntServer succeed */
 	struct usb_device *devices_by_virtual_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];
 
@@ -170,12 +170,12 @@ struct xhci_ctrl
 /* Pre-DMA flush for a buffer.  @flags is passed straight to CachePreDMA: 0 for a
  * plain clean+invalidate, or DMA_ReadFromRAM for an OUT buffer (device reads RAM)
  * which only needs a clean. */
-inline void xhci_flush_cache(void *addr, u32 len, ULONG flags)
+inline void xhci_flush_cache(void *addr, ULONG len, ULONG flags)
 {
 	CachePreDMA((APTR)addr, &len, flags);
 }
 
-inline void xhci_inval_cache(void *addr, u32 len)
+inline void xhci_inval_cache(void *addr, ULONG len)
 {
 	CachePostDMA((APTR)addr, &len, 0);
 }

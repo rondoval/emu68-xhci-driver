@@ -15,6 +15,7 @@
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
 #include <devices/hcd_api.h>
+#include <minlist.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -56,6 +57,7 @@ static u32 xhci_pending_command_count(struct xhci_ctrl *ctrl)
 }
 #endif
 
+#ifdef DEBUG
 static const char *xhci_command_type_name(trb_type type)
 {
     switch (type)
@@ -82,6 +84,7 @@ static const char *xhci_command_type_name(trb_type type)
         return "UNKNOWN";
     }
 }
+#endif /* DEBUG (xhci_command_type_name) */
 
 static inline struct pending_command *xhci_find_pending_command_by_dma(struct xhci_ctrl *ctrl, dma_addr_t trb_dma)
 {
@@ -348,12 +351,12 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     KprintfH("Stopped EP %lu with completion code %lu\n", (ULONG)ep_index, (ULONG)comp);
 
-    u32 deq_ptr = 0;
+    dma_addr_t deq_ptr = 0;
     xhci_ep_process_stop(ep_ctx, &deq_ptr);
 
     if (deq_ptr)
     {
-        xhci_set_deq_pointer(cmd->udev, ep_index, deq_ptr);
+        xhci_set_deq_pointer(cmd->udev, ep_index, (u32)deq_ptr);
         return;
     }
 
@@ -362,7 +365,7 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
     deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
-    xhci_set_deq_pointer(cmd->udev, ep_index, deq_ptr);
+    xhci_set_deq_pointer(cmd->udev, ep_index, (u32)deq_ptr);
 }
 
 /*
@@ -579,6 +582,9 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
 static void handle_reset_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
+#ifndef DEBUG
+    (void)cmd; /* only referenced by debug logging below */
+#endif
     const u32 status = le32(event->event_cmd.status);
 
     KprintfH("event status=%08lx flags=%08lx\n", (ULONG)status, (ULONG)le32(event->event_cmd.flags));

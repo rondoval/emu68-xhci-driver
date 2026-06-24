@@ -1222,6 +1222,7 @@ inline static u32 xhci_ring_calc_num_trbs(struct xhci_ctrl *ctrl, struct USBIORe
 	return xhci_ring_calc_data_trbs(*addr, io->data_buffer_length, trb_buff_len);
 }
 
+#ifdef DEBUG
 static void __attribute__((unused)) xhci_dump_request(const char *tag, const struct USBIORequest *req)
 {
 	if (!req)
@@ -1244,6 +1245,7 @@ static void __attribute__((unused)) xhci_dump_request(const char *tag, const str
 				(ULONG)le16(req->setup.wValue), (ULONG)le16(req->setup.wIndex),
 				(ULONG)le16(req->setup.wLength));
 }
+#endif /* DEBUG (xhci_dump_request) */
 
 /*
  * xHCI 4.11.2.3: compute TBC and TLBPC for an ISO TD.

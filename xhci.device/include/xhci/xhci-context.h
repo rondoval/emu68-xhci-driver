@@ -238,7 +238,13 @@ void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size);
 s8 xhci_set_configuration(struct usb_device *udev, u32 config_value);
 s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting);
 
+/* Context dumps are debug-only; compiled out (calls included) without DEBUG. */
+#ifdef DEBUG
 void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, u8 ep_index);
 void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx);
+#else
+#define xhci_dump_ep_ctx(tag, udev, ep_index) ((void)0)
+#define xhci_dump_slot_ctx(tag, udev, in_ctx) ((void)0)
+#endif
 
 #endif /* __XHCI_CONTEXT_H */

@@ -244,7 +244,7 @@ static void xhci_cleanup(struct xhci_ctrl *ctrl)
 	xhci_scratchpad_free(ctrl);
 	dma_free(ctrl->dmaPool, ctrl->erst.entries);
 	dma_free(ctrl->dmaPool, ctrl->dcbaa);
-	mem_zero(ctrl, sizeof(struct xhci_ctrl));
+	memset(ctrl, 0, sizeof(struct xhci_ctrl));
 }
 
 /**
@@ -448,6 +448,7 @@ struct xhci_protocol_caps xhci_get_protocol_caps(u32 *base_address)
 	return caps;
 }
 
+#ifdef DEBUG
 static void xhci_dump_caps(struct xhci_ctrl *ctrl)
 {
 	struct xhci_hccr *hccr = ctrl->hccr;
@@ -495,6 +496,7 @@ static void xhci_dump_caps(struct xhci_ctrl *ctrl)
 	if (HCC_VTC(reg))
 		Kprintf("Host controller supports Virtualization Based Trusted I/O Capability\n");
 }
+#endif /* DEBUG (xhci_dump_caps) */
 
 static s32 xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 {
@@ -558,7 +560,9 @@ static s32 xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	ctrl->u1_host_exit_lat = HCS_U1_LATENCY(hcsp3);
 	ctrl->u2_host_exit_lat = (u16)HCS_U2_LATENCY(hcsp3);
 
+#ifdef DEBUG
 	xhci_dump_caps(ctrl);
+#endif
 
 	return 0;
 }

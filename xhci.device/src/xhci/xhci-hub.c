@@ -123,7 +123,7 @@ static u32 xhci_hub_build_usb2_hub_descriptor(struct usb_device *udev, u8 *buf, 
         return 0;
 
     struct usb_hub_descriptor hub;
-    mem_zero(&hub, sizeof(hub));
+    memset(&hub, 0, sizeof(hub));
 
     const u8 ports = udev->hub_num_ports;
     u32 needed_words = ((u32)ports + 1U + 7U) / 8U;
@@ -232,7 +232,7 @@ void xhci_hub_filter_ss_ep_companion_desc(struct USBIORequest *io)
     }
 
     if (write < end)
-        mem_zero(write, (ULONG)(end - write));
+        memset(write, 0, (ULONG)(end - write));
 
     u16 new_total = (u16)(write - (u8 *)io->data_buffer);
     if (new_total != total_len)

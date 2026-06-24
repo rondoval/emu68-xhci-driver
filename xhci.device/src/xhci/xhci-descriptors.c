@@ -13,6 +13,7 @@
 #include <xhci/xhci-context.h>
 
 #include <debug.h>
+#include <minlist.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -353,6 +354,8 @@ u32 xhci_get_max_esit_payload(struct usb_device *udev,
     return max_packet * max_burst;
 }
 
+#ifdef DEBUG
+
 static void xhci_dump_interface(const char *tag, u8 index, const struct usb_interface *iface)
 {
     if (!iface)
@@ -426,6 +429,8 @@ void xhci_dump_config(const char *tag, const struct usb_config *cfg, u16 addr)
         xhci_dump_interface(pfx, i, &cfg->if_desc[i]);
 }
 
+#endif /* DEBUG (xhci_dump_config / xhci_dump_interface) */
+
 /* Running state while walking a configuration descriptor's sub-descriptors. */
 struct cfg_parse_state
 {
@@ -464,7 +469,7 @@ static BOOL parse_interface_descriptor(struct cfg_parse_state *st, struct usb_in
         }
         st->interface_map[iface_number] = st->if_index;
         st->current_if = &st->conf->if_desc[st->if_index];
-        mem_zero(st->current_if, sizeof(struct usb_interface));
+        memset(st->current_if, 0, sizeof(struct usb_interface));
         st->current_if->interface_number = (u8)iface_number;
         st->current_if->num_altsetting = 0;
         st->current_if->active_altsetting = NULL;
@@ -488,7 +493,7 @@ static BOOL parse_interface_descriptor(struct cfg_parse_state *st, struct usb_in
 
     st->current_alt_index = st->current_if->num_altsetting++;
     st->current_alt = &st->current_if->altsetting[st->current_alt_index];
-    mem_zero(st->current_alt, sizeof(struct usb_interface_altsetting));
+    memset(st->current_alt, 0, sizeof(struct usb_interface_altsetting));
 
     CopyMem(ifd, &st->current_alt->desc, sizeof(struct usb_interface_descriptor));
     st->current_alt->no_of_ep = 0;

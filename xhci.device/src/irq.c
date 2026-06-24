@@ -17,6 +17,7 @@
 #include <config.h>
 #include <debug.h>
 #include <libraries/openpci.h>
+#include <libraries/pci_constants.h> /* PCI_IRQ_* flags */
 #include <xhci/xhci.h>
 #include <xhci/xhci-events.h>
 #include <device.h>
@@ -52,9 +53,10 @@ static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *
 	(void)vector;
 
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	struct Library *pcielibBase = unit->device->pcieBase;
 	ULONG status = mmio_read32(&ctrl->hcor->or_usbsts) & XHCI_IRQ_ACK_MASK;
 
+	/* USBSTS.EINT is the "is this interrupt ours?" check for a shared INTx line:
+	 * when it isn't set we return 0 and let the next interrupt server run. */
 	if (!status)
 		return 0;
 
@@ -63,20 +65,11 @@ static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *
 		Kprintf("[xhci] %s: fatal status interrupt (USBSTS=0x%08lx)\n", __func__, status);
 	}
 
+	/* Acking USBSTS.EINT and gating the interrupter (IMAN) deasserts the xHC's
+	 * interrupt for MSI/MSI-X and INTx alike, so no PCIe-config
+	 * PCI_COMMAND.INTX_DISABLE masking is needed. */
 	mmio_write32(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
 	xhci_irq_disable_runtime(ctrl);
-
-	if (ctrl->pci_dev)
-	{
-		if (ctrl->msi_enabled)
-		{
-			MaskMSI(ctrl->pci_dev);
-		}
-		else if (!CheckSetINTxMask(ctrl->pci_dev, TRUE))
-		{
-			KprintfH("[xhci] %s: failed to mask INTx line\n", __func__);
-		}
-	}
 
 	Signal(unit->task, 1UL << unit->irq_signal);
 
@@ -105,20 +98,9 @@ static inline void xhci_irq_stop(struct xhci_ctrl *ctrl)
 
 void xhci_int_rearm(struct XHCIUnit *unit)
 {
-	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-	struct Library *pcielibBase = unit->device->pcieBase;
-
-	if (ctrl->pci_dev && ctrl->msi_enabled)
-	{
-		UnmaskMSI(ctrl->pci_dev);
-	}
-	else if (ctrl->pci_dev && !CheckSetINTxMask(ctrl->pci_dev, FALSE))
-	{
-		Signal(unit->task, 1UL << unit->irq_signal);
-		return;
-	}
-
-	xhci_irq_enable_runtime(ctrl);
+	/* Re-enabling the xHC interrupter (IMAN) rearms the source for MSI/MSI-X and
+	 * INTx alike; events that arrived while masked re-raise the interrupt. */
+	xhci_irq_enable_runtime(unit->xhci_ctrl);
 }
 
 static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
@@ -126,19 +108,33 @@ static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
 	struct Library *pcielibBase = unit->device->pcieBase;
 
-	if (DEVICE_USE_MSI && EnableMSI(ctrl->pci_dev)!=0)
+	ULONG flags = PCI_IRQ_INTX;
+	if (DEVICE_USE_MSI)
+		flags |= PCI_IRQ_MSI;
+	if (DEVICE_USE_MSIX)
+		flags |= PCI_IRQ_MSIX;
+
+	LONG nvec = AllocIntVectors(ctrl->pci_dev, 1, 1, flags);
+	if (nvec < 1)
 	{
-		Kprintf("[xhci] %s: MSI not supported, falling back to INTx\n", __func__);
-	}
-	else
-	{
-		Kprintf("[xhci] %s: MSI enabled successfully\n", __func__);
-		ctrl->msi_enabled = TRUE;
+		Kprintf("[xhci] %s: AllocIntVectors failed: %s (%ld)\n", __func__,
+				pcie_strerror(nvec), (LONG)nvec);
+		return -1;
 	}
 
-	if (!pci_add_intserver(&unit->irq_isr, ctrl->pci_dev))
+#ifdef DEBUG
+	ULONG itype = GetIntVectorType(ctrl->pci_dev);
+	Kprintf("[xhci] %s: using %s\n", __func__,
+			itype == PCI_IRQ_MSIX ? "MSI-X" : itype == PCI_IRQ_MSI ? "MSI"
+																   : "INTx");
+#endif
+
+	LONG rc = AddIntVectorServer(ctrl->pci_dev, 0, &unit->irq_isr);
+	if (rc != 0)
 	{
-		Kprintf("[xhci] %s: pci_add_intserver failed\n", __func__);
+		Kprintf("[xhci] %s: AddIntVectorServer failed: %s (%ld)\n", __func__,
+				pcie_strerror(rc), rc);
+		FreeIntVectors(ctrl->pci_dev);
 		return -1;
 	}
 
@@ -172,5 +168,8 @@ void xhci_int_shutdown(struct XHCIUnit *unit)
 	if (!unit->xhci_ctrl->pci_dev)
 		RemIntServerEx((ULONG)unit->irq_line, &unit->irq_isr);
 	else
-		pci_rem_intserver(&unit->irq_isr, unit->xhci_ctrl->pci_dev);
+	{
+		RemIntVectorServer(unit->xhci_ctrl->pci_dev, 0, &unit->irq_isr);
+		FreeIntVectors(unit->xhci_ctrl->pci_dev);
+	}
 }

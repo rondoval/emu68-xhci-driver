@@ -46,6 +46,11 @@ u8 xhci_get_endpoint_mult(struct usb_device *udev, struct usb_endpoint_descripto
 u8 xhci_get_endpoint_max_burst(struct usb_device *udev, struct usb_endpoint_descriptor *endpt_desc, struct usb_ss_ep_comp_descriptor *ss_ep_comp_desc);
 u32 xhci_get_max_esit_payload(struct usb_device *udev, struct usb_endpoint_descriptor *endpt_desc, struct usb_ss_ep_comp_descriptor *ss_ep_comp_desc);
 
+/* Debug-only; compiled out (call included) without DEBUG. */
+#ifdef DEBUG
 void xhci_dump_config(const char *tag, const struct usb_config *cfg, u16 addr);
+#else
+#define xhci_dump_config(tag, cfg, addr) ((void)0)
+#endif
 
 #endif /* __XHCI_DESCRIPTORS_H__ */

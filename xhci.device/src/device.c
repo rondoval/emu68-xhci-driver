@@ -102,7 +102,11 @@ static const APTR funcTable[] = {
 
 s32 xhci_open_pcie_library(struct XHCIDevice *base)
 {
-    base->pcieBase = OpenLibrary((CONST_STRPTR) "bcmpcie.library", 1);
+    /* v2: the typed multi-vector interrupt API (AllocIntVectors, LVO -342…) is
+     * only present in bcmpcie.library 2.0.  Requesting v2 makes the open fail
+     * cleanly against an older 1.x library rather than crashing on a call that
+     * lands past its function table. */
+    base->pcieBase = OpenLibrary((CONST_STRPTR) "bcmpcie.library", 2);
     if (base->pcieBase == NULL)
     {
         Kprintf("[xhci] %s: Failed to open %s\n", __func__, "bcmpcie.library");
