@@ -1,3 +1,73 @@
+# Release notes — xhci.device 5.1
+
+Changes since v5.0.
+
+---
+
+## Breaking changes
+
+None to the driver's interfaces — unit numbering and the Poseidon-compatible HCD
+interface are unchanged.
+
+The runtime dependency moves forward, though: 5.1 uses the typed, multi-vector
+interrupt API and therefore **requires `bcmpcie.library` 2.0 or later** (it calls
+`AllocIntVectors` and friends at LVOs -342…).  The driver now opens the library
+requesting version 2, so it fails to start cleanly — rather than crashing — if
+only an older 1.x library is installed.
+
+---
+
+## New features
+
+### MSI-X interrupts
+
+The driver now allocates its interrupt through `bcmpcie.library` 2.0's typed,
+multi-vector API (`AllocIntVectors` → `AddIntVectorServer`), choosing the best
+available type in the order **MSI-X → MSI → INTx**.  MSI-X is used whenever the
+controller and the XHCI device support it; the old single-vector `EnableMSI` /
+`pci_add_intserver` path has been replaced.  A new `DEVICE_USE_MSIX` build option
+(default on) can forbid MSI-X, just as `DEVICE_USE_MSI` already could forbid MSI.
+
+Interrupt acknowledgement was simplified to match.  The ISR acks `USBSTS.EINT`
+and gates the interrupter (`IMAN`), which deasserts the source for MSI/MSI-X and
+INTx alike, so the driver no longer performs any PCIe-config-level masking
+(`MaskMSI` / `CheckSetINTxMask` are gone from the hot path).  The obsolete
+`msi_enabled` controller field was removed, and interrupt-setup failures are now
+logged with `pcie_strerror()` for a readable reason.
+
+---
+
+## Improvements
+
+### Release builds drop all diagnostics
+
+Every diagnostic helper is now gated behind `DEBUG`, so release builds compile it
+out entirely: the slot / endpoint / config / caps / request dumps, the
+endpoint default-state handler, the command- and state-name string helpers, and
+the verbose PCI-config probe in device detection.  This shrinks the non-debug
+binary and keeps it free of the unused-symbol warnings those helpers would
+otherwise raise.  The stack-wide debug backend is selectable at build time
+(`-DEMU68_DEBUG_BACKEND=pistorm|serial|off`, via `emu68-common`).
+
+### NDK 3.9 / -O3 build portability
+
+The driver builds cleanly under NDK 3.9 at `-O3` with `-Wconversion` /
+`-Wsign-conversion`: the cache-flush helpers take `ULONG` lengths to match
+`CachePreDMA` / `CachePostDMA`, the root-hub reply callback's actual-length
+argument is `u32`, the stopped-ring dequeue pointer is carried as `dma_addr_t`,
+`<exec/execbase.h>` is included explicitly for `DMA_ReadFromRAM`, and the
+internal `mem_zero()` helper was replaced by `memset()` throughout.  No
+functional change.
+
+---
+
+## Build & tooling
+
+* The embedded `$VER:` string is now stamped `MAJOR.MINOR` (the patch component
+  is dropped).
+* A CI versioning / release-check workflow was added.
+
+
 # Release notes — xhci.device 5.0
 
 Changes since v4.4.
