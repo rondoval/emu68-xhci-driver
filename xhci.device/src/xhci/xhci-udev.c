@@ -1124,8 +1124,8 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct USBIORe
     if (le16(dev_desc->bcdUSB) >= 0x0300)
     {
         KprintfH("Device at addr=%lu is USB 3.0 capable, bcdUSB=0x%04lx\n", (ULONG)udev->virtual_address, (ULONG)le16(dev_desc->bcdUSB));
-        KprintfH("Clamping bcdUSB to 0x0200 for compatibility\n");
-        dev_desc->bcdUSB = le16(0x0200);
+        KprintfH("Clamping bcdUSB to 0x0210 for compatibility\n");
+        dev_desc->bcdUSB = le16(0x0210);
     }
 }
 
