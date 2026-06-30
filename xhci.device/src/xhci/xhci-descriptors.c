@@ -13,7 +13,6 @@
 #include <xhci/xhci-context.h>
 
 #include <debug.h>
-#include <minlist.h>
 
 #ifdef DEBUG
 #undef Kprintf

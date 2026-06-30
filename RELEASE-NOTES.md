@@ -1,3 +1,33 @@
+# Release notes — xhci.device 5.2
+
+Changes since v5.1.
+
+---
+
+## Compatibility
+
+### Returned device descriptors report USB 2.0 to match the presented speed
+
+`xhci.device` presents SuperSpeed devices to the USB stack as high-speed and
+handles the SuperSpeed specifics internally through its USB 3.0 ↔ USB 2.0
+translation layer.  The device descriptor returned to the stack now has its
+`bcdUSB` field clamped to `0x0210` whenever a device reports USB 3.0 or later
+(`bcdUSB >= 0x0300`), so the advertised USB revision is consistent with that
+high-speed presentation.
+
+This matters for USB 3.0-aware stacks: one that reads `bcdUSB` would otherwise
+see a SuperSpeed revision that contradicts the high-speed device it is handed,
+and could mis-handle it.  Clamping the field keeps the translation transparent
+to the stack above.
+
+---
+
+## Build & tooling
+
+* The explicit `<exec/execbase.h>` and `<minlist.h>` includes added in 5.1 for
+  older NDK headers have been dropped; the driver targets the NDK 3.2 headers.
+
+
 # Release notes — xhci.device 5.1
 
 Changes since v5.0.

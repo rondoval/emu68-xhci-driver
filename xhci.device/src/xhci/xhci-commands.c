@@ -15,7 +15,6 @@
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
 #include <devices/hcd_api.h>
-#include <minlist.h>
 
 #ifdef DEBUG
 #undef Kprintf
