@@ -169,58 +169,6 @@ void xhci_udev_free(struct usb_device *udev)
     pool_free(ctrl->metaPool, udev);
 }
 
-static u8 xhci_udev_find_epaddr_by_num(struct usb_device *udev, u8 epnum)
-{
-    if (!udev || !udev->active_config || epnum == 0)
-        return 0;
-
-    struct usb_config *cfg = udev->active_config;
-
-    for (int i = 0; i < cfg->no_of_if; ++i)
-    {
-        struct usb_interface *iface = &cfg->if_desc[i];
-        struct usb_interface_altsetting *alt = iface->active_altsetting;
-        if (!alt)
-            continue;
-
-        for (int e = 0; e < alt->no_of_ep; ++e)
-        {
-            u8 addr = alt->ep_desc[e].bEndpointAddress;
-            if ((addr & 0x0F) == epnum)
-                return addr;
-        }
-    }
-
-    return 0;
-}
-
-static void xhci_udev_patch_endpoint_address(struct usb_device *udev, struct USBIORequest *io)
-{
-    struct USBSetupPacket *setup = &io->setup;
-
-    /* Only patch class+endpoint recipient control requests. */
-    if ((setup->bmRequestType & (USB_TYPE_MASK | USB_RECIP_MASK)) != (USB_TYPE_CLASS | USB_RECIP_ENDPOINT))
-        return;
-
-    /* If direction bit is already present, leave untouched. */
-    u16 wIndex = le16(setup->wIndex);
-    if (wIndex & 0x0080)
-        return;
-
-    u8 epnum = wIndex & 0x0F;
-    if (epnum == 0)
-        return;
-
-    u8 fixed = xhci_udev_find_epaddr_by_num(udev, epnum);
-    if (!fixed || fixed == (u8)wIndex)
-        return;
-
-    setup->wIndex = le16(fixed);
-
-    KprintfH("Patched endpoint address wIndex from %02lx to %02lx for epnum %lu\n",
-             (ULONG)wIndex, (ULONG)fixed, (ULONG)epnum);
-}
-
 s8 xhci_udev_send_ctrl(struct usb_device *udev, struct USBIORequest *io)
 {
     if (!udev || !io)
@@ -976,41 +924,6 @@ s32 xhci_ep_type_for_index(struct usb_device *udev, u8 ep_index)
     return -1;
 }
 
-static BOOL xhci_udev_iface_has_active_rt_iso(struct usb_device *udev, u8 iface_number)
-{
-    if (!udev || !udev->active_config)
-        return FALSE;
-
-    struct usb_config *cfg = udev->active_config;
-    for (int i = 0; i < cfg->no_of_if; ++i)
-    {
-        struct usb_interface *iface = &cfg->if_desc[i];
-        if (iface->interface_number != iface_number)
-            continue;
-
-        struct usb_interface_altsetting *alt = iface->active_altsetting;
-        if (!alt)
-            return FALSE;
-
-        for (int e = 0; e < alt->no_of_ep; ++e)
-        {
-            u8 ep_index = xhci_address_to_ep_index(&alt->ep_desc[e]);
-
-            struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-            if (!ep_ctx)
-                continue;
-            enum ep_state state = xhci_ep_get_state(ep_ctx);
-            if (state == USB_DEV_EP_STATE_RT_ISO_RUNNING ||
-                state == USB_DEV_EP_STATE_RT_ISO_STOPPING)
-                return TRUE;
-        }
-
-        return FALSE;
-    }
-
-    return FALSE;
-}
-
 void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive)
 {
     if (!udev || !udev->slot_id)
@@ -1211,25 +1124,12 @@ static void handle_set_interface(struct usb_device *udev, struct USBIORequest *i
 {
     u8 iface = le16(io->setup.wIndex) & 0xFFU;
     u8 alt = le16(io->setup.wValue) & 0xFFU;
-    /*
-     * This is a workaround for Poseidon issue.
-     * Poseidon issues SET_INTERFACE for all devices after connecting a new one.
-     * Thing is, it first sets the alternate setting to 0, then to the desired setting.
-     * This causes issues with active RT ISO endpoints, as they get disabled on alt=0.
-     */
-    if (!xhci_udev_iface_has_active_rt_iso(udev, iface))
+
+    s8 err = xhci_set_interface(udev, iface, alt);
+    if (err != ERR_NO_ERROR)
     {
-        s8 err = xhci_set_interface(udev, iface, alt);
-        if (err != ERR_NO_ERROR)
-        {
-            Kprintf("SET_INTERFACE iface=%lu alt=%lu failed err=%ld\n",
-                    (ULONG)iface, (ULONG)alt, (LONG)err);
-        }
-    }
-    else
-    {
-        KprintfH("SET_INTERFACE iface=%lu alt=%lu ignored (RT ISO active)\n",
-                 (ULONG)iface, (ULONG)alt);
+        Kprintf("SET_INTERFACE iface=%lu alt=%lu failed err=%ld\n",
+                (ULONG)iface, (ULONG)alt, (LONG)err);
     }
 }
 
@@ -1450,9 +1350,6 @@ static BOOL xhci_udev_ctrl_hub_suspend(struct usb_device *udev, struct USBIORequ
 
 static s8 xhci_udev_send_ctrl_first(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms)
 {
-    /* Work around class drivers that omit the direction bit in endpoint-recipient requests (e.g., UAC1 SET_CUR). */
-    xhci_udev_patch_endpoint_address(udev, io);
-
     KprintfH("bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx\n",
              (ULONG)io->setup.bmRequestType,
              (ULONG)io->setup.bRequest,
