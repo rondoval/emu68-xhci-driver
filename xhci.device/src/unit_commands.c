@@ -362,39 +362,6 @@ static inline u32 Do_CMD_START(struct USBIORequest *io)
  */
 static inline u32 Do_CMD_XFER(struct USBIORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    struct xhci_ctrl *ctrl = unit ? unit->xhci_ctrl : NULL;
-
-    if (io->req.io_Command == CMD_REQUEST_INTERRUPT && ctrl && io->virtual_address <= USB_MAX_ADDRESS)
-    {
-        struct usb_device *udev = ctrl->devices_by_virtual_address[io->virtual_address];
-        if (udev)
-        {
-            u8 ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
-            struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-            if (ep_ctx && xhci_ep_has_request(ep_ctx, io))
-            {
-                /* Work around the Poseidon hub resume path re-submitting the
-                 * same interrupt IORequest while the original request is still
-                 * active on this endpoint. Treat that second send as a safe
-                 * no-op only when the exact same request object is still
-                 * tracked here; a legitimately re-used request after ReplyMsg()
-                 * must still be accepted as a fresh transfer.
-                 *
-                 * This avoids queueing the same IORequest twice or replying the
-                 * same message twice. It does not fix Poseidon's pending-count
-                 * accounting for the duplicate send. */
-                KprintfH("[xhci] %s: ignoring duplicate hub resume re-send for tracked request %08lx state=%lu flags=%lx dflags=%lx\n",
-                         __func__,
-                         (ULONG)io,
-                         (ULONG)xhci_ep_get_state(ep_ctx),
-                         (ULONG)io->req.io_Flags,
-                         (ULONG)io->driver_private_flags);
-                return COMMAND_SCHEDULED;
-            }
-        }
-    }
-
     io->driver_private_flags = 0;
     io->driver_private_dma_address = NULL;
 

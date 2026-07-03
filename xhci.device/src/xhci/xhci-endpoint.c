@@ -258,22 +258,6 @@ void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io)
              (ULONG)(io->endpoint & 0x0F));
 }
 
-BOOL xhci_ep_has_request(struct ep_context *ep_ctx, struct USBIORequest *io)
-{
-    if (!ep_ctx || !io)
-        return FALSE;
-
-    struct MinNode *node = ep_ctx->pending_reqs.mlh_Head;
-    while (node && node->mln_Succ)
-    {
-        if ((struct USBIORequest *)node == io)
-            return TRUE;
-        node = node->mln_Succ;
-    }
-
-    return xhci_td_has_request(ep_ctx->active_tds, io);
-}
-
 static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
 {
     struct MinNode *node;

@@ -60,7 +60,6 @@ struct xhci_ring *xhci_ep_get_ring(struct ep_context *ep_ctx);
 BOOL xhci_ep_complete_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr,
                              u32 residue, BOOL short_packet,
                              struct xhci_td_completion *out, BOOL *deferred);
-BOOL xhci_ep_has_request(struct ep_context *ep_ctx, struct USBIORequest *io);
 void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io);
 void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code);
 
