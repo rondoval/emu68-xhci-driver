@@ -33,9 +33,13 @@ stack are released as a pair.
 
 **Staying on classic Poseidon 4.x?**  Use the driver's **5.x** line, which
 speaks the classic Poseidon HCD ABI and is maintained on the
-[`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main).  The
-two lines are alternatives rather than a sequence, so there is nothing to miss
-by staying on 5.x with a 4.x stack.
+[`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main).  There
+is nothing to miss by staying on 5.x with a 4.x stack.
+
+Poseidon 6.x keeps the classic ABI alongside its own, so it can drive the 5.x
+line too — useful if you want to fall back.  You lose what this release is for,
+though: SuperSpeed devices go back through the USB 2.0 emulation and bulk
+streams are unavailable.
 
 ## Real USB 3.0 — the emulation layer is gone
 
