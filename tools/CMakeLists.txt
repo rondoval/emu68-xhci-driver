@@ -30,4 +30,5 @@ target_compile_definitions(diskbench PRIVATE
 
 target_link_options(diskbench PRIVATE ${XHCI_TOOL_LINK_OPTIONS})
 
-install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/diskbench DESTINATION C)
+# diskbench is a developer benchmark — built for local HW testing but deliberately
+# not installed, so it stays out of the shipped package.
