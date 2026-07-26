@@ -41,9 +41,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 #define CACHELINE_SIZE 64
@@ -308,7 +308,7 @@ static s32 xhci_start(struct xhci_hcor *hcor)
  */
 static s32 xhci_halt(struct xhci_hcor *hcor)
 {
-	KprintfH("// Halt the HC: %lx\n", hcor);
+	KprintfT("// Halt the HC: %lx\n", hcor);
 	u32 state = mmio_read32(&hcor->or_usbsts) & STS_HALT;
 	if (!state)
 	{
@@ -349,7 +349,7 @@ static s32 xhci_reset(struct xhci_hcor *hcor)
 		return -EBUSY;
 	}
 
-	KprintfH("// Reset the HC\n");
+	KprintfT("// Reset the HC\n");
 	cmd = mmio_read32(&hcor->or_usbcmd);
 	cmd |= CMD_RESET_USB;
 	mmio_write32(cmd, &hcor->or_usbcmd);
@@ -571,7 +571,7 @@ static void xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 {
 	xhci_reset(ctrl->hcor);
 
-	KprintfH("// Disabling event ring interrupts\n");
+	KprintfT("// Disabling event ring interrupts\n");
 	u32 temp = mmio_read32(&ctrl->hcor->or_usbsts);
 	mmio_write32(temp & ~STS_EINT, &ctrl->hcor->or_usbsts);
 	temp = mmio_read32(&ctrl->ir_set->irq_pending);
@@ -583,7 +583,7 @@ static void xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 
 s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
-	KprintfH("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
+	KprintfT("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
 
 	s32 ret = xhci_reset(hcor);
 	if (ret)
@@ -601,7 +601,7 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 		ret = -ENOMEM;
 		goto err_pool;
 	}
-	KprintfH("memory pools created: dma=%lx meta=%lx\n", (ULONG)ctrl->dmaPool, (ULONG)ctrl->metaPool);
+	KprintfT("memory pools created: dma=%lx meta=%lx\n", (ULONG)ctrl->dmaPool, (ULONG)ctrl->metaPool);
 
 	xhci_td_slab_init(ctrl);
 	slab_cache_init(&ctrl->trb_addr_slab, ctrl->metaPool, NULL,

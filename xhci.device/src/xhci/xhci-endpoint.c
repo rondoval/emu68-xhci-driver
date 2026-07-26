@@ -31,9 +31,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-endpoint] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-endpoint] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-endpoint] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 struct ep_context
@@ -106,7 +106,7 @@ static void xhci_ep_transition(struct ep_context *ep_ctx, enum ep_state new_stat
 {
     if (ep_ctx->state != new_state)
     {
-        KprintfH("EP %lu state %lu -> %lu\n", (ULONG)ep_ctx->ep_index,
+        KprintfT("EP %lu state %lu -> %lu\n", (ULONG)ep_ctx->ep_index,
                  (ULONG)ep_ctx->state, (ULONG)new_state);
     }
     ep_ctx->state = new_state;
@@ -161,7 +161,7 @@ void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code)
         struct ep_context *ep_ctx = udev->ep_context[i];
         if (ep_ctx)
         {
-            KprintfH("tearing down addr %lu EP %lu context, state %lu\n", (ULONG)udev->virtual_address, (ULONG)i, (ULONG)ep_ctx->state);
+            KprintfT("tearing down addr %lu EP %lu context, state %lu\n", (ULONG)udev->virtual_address, (ULONG)i, (ULONG)ep_ctx->state);
             struct MinNode *node;
             while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
             {
@@ -253,7 +253,7 @@ void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io)
         AddTailMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
     }
 
-    KprintfH("Ring busy, queued request cmd=%lu ep=%lu\n",
+    KprintfT("Ring busy, queued request cmd=%lu ep=%lu\n",
              (ULONG)io->req.io_Command,
              (ULONG)(io->endpoint & 0x0F));
 }
@@ -265,7 +265,7 @@ static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
     {
         struct USBIORequest *req = (struct USBIORequest *)node;
 
-        KprintfH("starting queued request cmd=%lu ep=%lu\n",
+        KprintfT("starting queued request cmd=%lu ep=%lu\n",
                  (ULONG)req->req.io_Command,
                  (ULONG)(req->endpoint & 0x0F));
 
@@ -447,7 +447,7 @@ void xhci_ep_request_stop(struct ep_context *ep_ctx)
         state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
         return;
 
-    KprintfH("EP %lu state %lu -> ABORTING (stop requested)\n", (ULONG)ep_ctx->ep_index, (ULONG)state);
+    KprintfT("EP %lu state %lu -> ABORTING (stop requested)\n", (ULONG)ep_ctx->ep_index, (ULONG)state);
     xhci_ep_set_aborting(ep_ctx);
     xhci_stop_ring(ep_ctx->udev, ep_ctx->ep_index);
 }
@@ -693,15 +693,15 @@ s8 xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *re
     ep_ctx->rt->hooks = (struct USBRealtimeHooks *)req->data_buffer;
     ep_ctx->rt->direction = req->direction;
 
-#ifdef DEBUG_HIGH
+#ifdef TRACE
     struct USBRealtimeHooks *rt = (struct USBRealtimeHooks *)req->data_buffer;
     if (req->direction == DIRECTION_IN)
     {
-        KprintfH("Added ISO handler: EP %lu in req hook: %lx, in done hook: %lx, prefetch: %lu\n", (ULONG)ep_ctx->ep_index, (ULONG)rt->input_request_hook, (ULONG)rt->input_done_hook, (ULONG)rt->max_output_prefetch);
+        KprintfT("Added ISO handler: EP %lu in req hook: %lx, in done hook: %lx, prefetch: %lu\n", (ULONG)ep_ctx->ep_index, (ULONG)rt->input_request_hook, (ULONG)rt->input_done_hook, (ULONG)rt->max_output_prefetch);
     }
     else
     {
-        KprintfH("Added ISO handler: EP %lu out req hook: %lx, out done hook: %lx, prefetch: %lu\n", (ULONG)ep_ctx->ep_index, (ULONG)rt->output_request_hook, (ULONG)rt->output_done_hook, (ULONG)rt->max_output_prefetch);
+        KprintfT("Added ISO handler: EP %lu out req hook: %lx, out done hook: %lx, prefetch: %lu\n", (ULONG)ep_ctx->ep_index, (ULONG)rt->output_request_hook, (ULONG)rt->output_done_hook, (ULONG)rt->max_output_prefetch);
     }
 #endif
     return ERR_NO_ERROR;
@@ -731,7 +731,7 @@ s8 xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *re
     pool_free(ep_ctx->udev->controller->metaPool, ep_ctx->rt);
     ep_ctx->rt = NULL;
     xhci_ep_set_idle(ep_ctx);
-    KprintfH("Successfully removed ISO handler (state reset to IDLE)\n");
+    KprintfT("Successfully removed ISO handler (state reset to IDLE)\n");
     return ERR_NO_ERROR;
 }
 
@@ -803,7 +803,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         rt_buffer_req.flags = 0;
         rt_buffer_req.frame = frame; /* monotonic frame counter to avoid jumps */
 
-        KprintfH("RT ISO OUT sched frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+        KprintfT("RT ISO OUT sched frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
                  (ULONG)rt_buffer_req.length,
                  (ULONG)ep_ctx->rt->inflight_bytes,
@@ -813,7 +813,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
         if (!rt_buffer_req.data || rt_buffer_req.length == 0)
         {
-            KprintfH("RT ISO hook provided no buffer/length\n");
+            KprintfT("RT ISO hook provided no buffer/length\n");
             break;
         }
 
@@ -841,7 +841,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
         ep_ctx->rt->next_uframe = (u16)(((u32)ep_ctx->rt->next_uframe + ep_ctx->rt_uframes_per_esit) & RT_ISO_UF_MASK);
         ep_ctx->rt->inflight_bytes += length;
-        KprintfH("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+        KprintfT("RT ISO OUT queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
                  (ULONG)length,
                  (ULONG)ep_ctx->rt->inflight_bytes,
@@ -878,7 +878,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
             break;
         }
 
-        KprintfH("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+        KprintfT("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
                  (ULONG)packet_size,
                  (ULONG)ep_ctx->rt->inflight_bytes,
@@ -898,7 +898,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 
         ep_ctx->rt->next_uframe = (u16)(((u32)ep_ctx->rt->next_uframe + ep_ctx->rt_uframes_per_esit) & RT_ISO_UF_MASK);
         ep_ctx->rt->inflight_bytes += packet_size;
-        KprintfH("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+        KprintfT("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
                  (ULONG)packet_size,
                  (ULONG)ep_ctx->rt->inflight_bytes,
@@ -985,7 +985,7 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
         ep_ctx->rt->in_staging_active = TRUE;
     }
 
-    KprintfH("Starting RT ISO stream: IST=%lu uframes rt_next_uframe=%lu target_ms=%lu target_uframes=%lu uframes_per_td=%lu target_tds=%lu\n",
+    KprintfT("Starting RT ISO stream: IST=%lu uframes rt_next_uframe=%lu target_ms=%lu target_uframes=%lu uframes_per_td=%lu target_tds=%lu\n",
              (ULONG)ep_ctx->rt->ist,
              (ULONG)ep_ctx->rt->next_uframe,
              (ULONG)RT_ISO_IN_TARGET_FRAMES,
@@ -1026,7 +1026,7 @@ s8 xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIORequest *req)
     }
     else
     {
-        KprintfH("RT ISO stopping addr=%lu ep=%lu inflight_tds=%lu inflight_bytes=%lu\n",
+        KprintfT("RT ISO stopping addr=%lu ep=%lu inflight_tds=%lu inflight_bytes=%lu\n",
                  (ULONG)req->virtual_address,
                  (ULONG)ep_ctx->ep_index,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx),

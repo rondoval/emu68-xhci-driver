@@ -35,9 +35,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-udev] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-udev] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-udev] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 /* Move udev to a new virtual address.  The sole writer of the migration, so
@@ -79,7 +79,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address)
         Kprintf("Failed to allocate out context for addr %lu\n", (ULONG)virtual_address);
         goto free_udev;
     }
-    KprintfH("out_ctx bytes=%lx size=%lu\n",
+    KprintfT("out_ctx bytes=%lx size=%lu\n",
              (ULONG)udev->out_ctx->bytes, (ULONG)udev->out_ctx->size);
 
     /* Allocate the (input) device context for address device command */
@@ -89,7 +89,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address)
         Kprintf("Failed to allocate in context for addr %lu\n", (ULONG)virtual_address);
         goto destroy_out_ctx;
     }
-    KprintfH("in_ctx bytes=%lx size=%lu\n",
+    KprintfT("in_ctx bytes=%lx size=%lu\n",
              (ULONG)udev->in_ctx->bytes, (ULONG)udev->in_ctx->size);
 
     ctrl->devices_by_virtual_address[virtual_address] = udev;
@@ -115,7 +115,7 @@ struct usb_device *xhci_udev_get(struct XHCIUnit *unit, u16 virtual_address)
         // We'll be only creating contexts for newly detected devices
         if (virtual_address != 0 && virtual_address != xhci_roothub_get_address(ctrl->root_hub))
             return NULL;
-        KprintfH("new device addr=%lu\n", (ULONG)virtual_address);
+        KprintfT("new device addr=%lu\n", (ULONG)virtual_address);
         udev = xhci_udev_alloc(ctrl, virtual_address);
     }
 
@@ -130,7 +130,7 @@ static void xhci_udev_flush(struct usb_device *udev, s8 reply_code)
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
         return;
-    KprintfH("flushing device addr=%lu slot=%lu\n", (ULONG)udev->virtual_address, (ULONG)udev->slot_id);
+    KprintfT("flushing device addr=%lu slot=%lu\n", (ULONG)udev->virtual_address, (ULONG)udev->slot_id);
 
     if (udev->virtual_address == xhci_roothub_get_address(ctrl->root_hub))
     {
@@ -229,7 +229,7 @@ static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
     io->data_buffer_length = desc_len;
     io->direction = DIRECTION_IN;
 
-    KprintfH("Fetching hub descriptor (type=0x%02lx len=%lu) for addr=%lu before CONFIG_EP\n",
+    KprintfT("Fetching hub descriptor (type=0x%02lx len=%lu) for addr=%lu before CONFIG_EP\n",
              (ULONG)desc_type, (ULONG)desc_len, (ULONG)udev->virtual_address);
 
     /* Submit directly to the transfer ring — xhci_ep_enqueue only queues
@@ -288,7 +288,7 @@ static BOOL xhci_udev_fetch_bos(struct usb_device *udev)
     io->data_buffer_length = (u32)sizeof(struct usb_bos_descriptor);
     io->direction = DIRECTION_IN;
 
-    KprintfH("Fetching BOS header for addr=%lu before CONFIG_EP\n",
+    KprintfT("Fetching BOS header for addr=%lu before CONFIG_EP\n",
              (ULONG)udev->virtual_address);
 
     s8 ring_ret = xhci_ring_enqueue_td(udev, io, 1000, FALSE);
@@ -329,7 +329,7 @@ void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, 
              * those at debug level; a genuine device-level reject (STALL /
              * Request Error) never reports timeout/aborted, so it stays loud. */
             if (err == ERR_TIMEOUT || err == IOERR_ABORTED)
-                KprintfH("internal EP0 request retired (device gone): addr %lu bmReqType=%02lx bReq=%02lx wValue=%lu err=%ld\n",
+                KprintfT("internal EP0 request retired (device gone): addr %lu bmReqType=%02lx bReq=%02lx wValue=%lu err=%ld\n",
                          (ULONG)io->virtual_address, (ULONG)io->setup.bmRequestType,
                          (ULONG)io->setup.bRequest, (ULONG)le16(io->setup.wValue), (LONG)err);
             else
@@ -352,7 +352,7 @@ void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, 
             return;
         }
 
-        KprintfH("addr %lu EP %lu err=%ld\n", (ULONG)io->virtual_address, (ULONG)io->endpoint, (LONG)err);
+        KprintfT("addr %lu EP %lu err=%ld\n", (ULONG)io->virtual_address, (ULONG)io->endpoint, (LONG)err);
         ReplyMsg((struct Message *)io);
     }
 }
@@ -366,7 +366,7 @@ static void xhci_udev_handle_hub_prefetch(struct usb_device *udev, struct USBIOR
      * SS hubs, the chained BOS fetch below). */
     udev->hub_desc_fetched = TRUE;
 
-    KprintfH("Hub descriptor pre-fetch done for addr=%lu (ports=%lu tt=%lu)\n",
+    KprintfT("Hub descriptor pre-fetch done for addr=%lu (ports=%lu tt=%lu)\n",
              (ULONG)udev->virtual_address,
              (ULONG)udev->ss_hub_desc.bNbrPorts,
              (ULONG)udev->tt_think_time);
@@ -447,7 +447,7 @@ static BOOL xhci_udev_bos_prefetch_phase1(struct usb_device *udev, u8 **pbuf)
     struct xhci_ctrl *ctrl = udev->controller;
     u8 *buf = *pbuf;
 
-    KprintfH("HUB descriptor pre-fetch phase 1: total length field is %lu\n",
+    KprintfT("HUB descriptor pre-fetch phase 1: total length field is %lu\n",
              (ULONG)le16(((struct usb_bos_descriptor *)buf)->wTotalLength));
     const struct usb_bos_descriptor *hdr = (const struct usb_bos_descriptor *)buf;
     if (hdr->bDescriptorType != USB_DT_BOS || hdr->bNumDeviceCaps == 0)
@@ -507,7 +507,7 @@ static void xhci_udev_handle_bos_prefetch(struct usb_device *udev, struct USBIOR
 {
     struct xhci_ctrl *ctrl = udev->controller;
     u8 *buf = io->data_buffer;
-    KprintfH("BOS descriptor pre-fetch done for addr=%lu\n", (ULONG)udev->virtual_address);
+    KprintfT("BOS descriptor pre-fetch done for addr=%lu\n", (ULONG)udev->virtual_address);
 
     io->data_buffer = NULL;
 
@@ -574,14 +574,14 @@ static void xhci_udev_complete_internal(struct usb_device *udev, struct USBIOReq
         xhci_udev_op_advance(udev, UDEV_OP_EVENT_SET_SEL_DONE);
     }
 
-#ifdef DEBUG_HIGH
+#ifdef TRACE
     /* Confirm the device actually accepted the LPM feature enables (rejects
      * land in xhci_udev_io_reply_failed instead). */
     if (io->setup.bRequest == USB_REQ_SET_FEATURE &&
         io->setup.bmRequestType == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE) &&
         (le16(io->setup.wValue) == USB_DEVICE_U1_ENABLE ||
          le16(io->setup.wValue) == USB_DEVICE_U2_ENABLE))
-        KprintfH("SET_FEATURE U%lu_ENABLE accepted by addr %lu\n",
+        KprintfT("SET_FEATURE U%lu_ENABLE accepted by addr %lu\n",
                 (ULONG)(le16(io->setup.wValue) - USB_DEVICE_U1_ENABLE + 1),
                 (ULONG)io->virtual_address);
 #endif
@@ -653,7 +653,7 @@ void xhci_udev_op_cancel(struct usb_device *udev, enum udev_op which, s8 err)
     if (which != UDEV_OP_NONE && udev->op.op != which)
         return;
 
-    KprintfH("addr %lu: cancelling op %lu (step %lu)\n",
+    KprintfT("addr %lu: cancelling op %lu (step %lu)\n",
              (ULONG)udev->virtual_address, (ULONG)udev->op.op, (ULONG)udev->op.step);
 
     struct USBIORequest *stash = udev->op.stash;
@@ -756,7 +756,7 @@ static BOOL xhci_udev_suspend_device(struct usb_device *udev, u8 root_port, stru
 
     udev->op.waits = stops;
     udev->op.arg = root_port;
-    KprintfH("suspending addr %lu: %lu endpoint stops pending\n",
+    KprintfT("suspending addr %lu: %lu endpoint stops pending\n",
              (ULONG)udev->virtual_address, (ULONG)stops);
     return TRUE;
 }
@@ -819,7 +819,7 @@ void xhci_udev_op_advance(struct usb_device *udev, enum udev_op_event event)
         return;
 
     default:
-        KprintfH("addr %lu: event %lu with no op in flight\n",
+        KprintfT("addr %lu: event %lu with no op in flight\n",
                  (ULONG)udev->virtual_address, (ULONG)event);
         return;
     }
@@ -945,7 +945,7 @@ void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive)
         }
     }
 
-    KprintfH("disconnect device addr=%lu slot=%lu port=%lu\n",
+    KprintfT("disconnect device addr=%lu slot=%lu port=%lu\n",
              (ULONG)udev->virtual_address,
              (ULONG)udev->slot_id,
              (ULONG)udev->parent_port);
@@ -989,7 +989,7 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct USBIORe
         return;
 
     struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)io->data_buffer;
-    KprintfH("Device Descriptor: bLength=%lu bDescriptorType=%lu bcdUSB=0x%04lx bDeviceClass=0x%02lx bDeviceSubClass=0x%02lx bDeviceProtocol=0x%02lx bMaxPacketSize0=%lu idVendor=0x%04lx idProduct=0x%04lx bcdDevice=0x%04lx iManufacturer=%lu iProduct=%lu iSerialNumber=%lu bNumConfigurations=%lu\n",
+    KprintfT("Device Descriptor: bLength=%lu bDescriptorType=%lu bcdUSB=0x%04lx bDeviceClass=0x%02lx bDeviceSubClass=0x%02lx bDeviceProtocol=0x%02lx bMaxPacketSize0=%lu idVendor=0x%04lx idProduct=0x%04lx bcdDevice=0x%04lx iManufacturer=%lu iProduct=%lu iSerialNumber=%lu bNumConfigurations=%lu\n",
              (ULONG)dev_desc->bLength,
              (ULONG)dev_desc->bDescriptorType,
              (ULONG)le16(dev_desc->bcdUSB),
@@ -1013,7 +1013,7 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct USBIORe
 
     if (udev->speed == USB_SPEED_SUPER && dev_desc->bMaxPacketSize0 != 64)
     {
-        KprintfH("clamping SS bMaxPacketSize0 from %lu to 64\n", (ULONG)dev_desc->bMaxPacketSize0);
+        KprintfT("clamping SS bMaxPacketSize0 from %lu to 64\n", (ULONG)dev_desc->bMaxPacketSize0);
         dev_desc->bMaxPacketSize0 = 64;
     }
 
@@ -1022,22 +1022,22 @@ static void handle_get_device_descriptor(struct usb_device *udev, struct USBIORe
 
     if (dev_desc->bDeviceClass == USB_CLASS_HUB && (!udev->is_hub || !udev->ss_hub_emulation))
     {
-        KprintfH("Device at addr=%lu is a hub\n", (ULONG)udev->virtual_address);
+        KprintfT("Device at addr=%lu is a hub\n", (ULONG)udev->virtual_address);
         udev->is_hub = TRUE;
 
         /* Only enable SS hub emulation for real external hubs, not the virtual root hub.
          * Root hub (parent == NULL) already provides port status in USB 2.0 format. */
         if (udev->speed >= USB_SPEED_SUPER && !udev->ss_hub_emulation)
         {
-            KprintfH("Detected USB 3.0 hub at addr=%lu, enabling translation mode\n", (ULONG)udev->virtual_address);
+            KprintfT("Detected USB 3.0 hub at addr=%lu, enabling translation mode\n", (ULONG)udev->virtual_address);
             udev->ss_hub_emulation = TRUE;
         }
     }
 
     if (le16(dev_desc->bcdUSB) >= 0x0300)
     {
-        KprintfH("Device at addr=%lu is USB 3.0 capable, bcdUSB=0x%04lx\n", (ULONG)udev->virtual_address, (ULONG)le16(dev_desc->bcdUSB));
-        KprintfH("Clamping bcdUSB to 0x0210 for compatibility\n");
+        KprintfT("Device at addr=%lu is USB 3.0 capable, bcdUSB=0x%04lx\n", (ULONG)udev->virtual_address, (ULONG)le16(dev_desc->bcdUSB));
+        KprintfT("Clamping bcdUSB to 0x0210 for compatibility\n");
         dev_desc->bcdUSB = le16(0x0210);
     }
 }
@@ -1117,7 +1117,7 @@ static void handle_set_address(struct usb_device *udev, struct USBIORequest *io)
 
     xhci_udev_remap(ctrl, current, new_addr);
 
-    KprintfH("migrated ctx from addr %lu to %lu\n", (ULONG)old_addr, (ULONG)new_addr);
+    KprintfT("migrated ctx from addr %lu to %lu\n", (ULONG)old_addr, (ULONG)new_addr);
 }
 
 static void handle_set_interface(struct usb_device *udev, struct USBIORequest *io)
@@ -1135,7 +1135,7 @@ static void handle_set_interface(struct usb_device *udev, struct USBIORequest *i
 
 static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBIORequest *io)
 {
-    KprintfH("dev=%lx addr=%lu bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx actual=%lu\n",
+    KprintfT("dev=%lx addr=%lu bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx actual=%lu\n",
              (ULONG)udev, (ULONG)udev->virtual_address,
              (ULONG)io->setup.bmRequestType,
              (ULONG)io->setup.bRequest,
@@ -1231,7 +1231,7 @@ void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, s
     if (io->req.io_Command == CMD_REQUEST_CONTROL && err == ERR_NO_ERROR && io->endpoint == 0)
         xhci_udev_parse_control_message(udev, io);
 
-    KprintfH("err=%ld actual=%lu\n", (LONG)err, (ULONG)actual);
+    KprintfT("err=%ld actual=%lu\n", (LONG)err, (ULONG)actual);
 
     /* Internal, reply-less requests (IOF_QUICK + magic tag) */
     if (io->driver_private_flags & REQ_INTERNAL)
@@ -1317,7 +1317,7 @@ static BOOL xhci_udev_ctrl_clear_ep_halt(struct usb_device *udev, struct USBIORe
     BOOL synced = xhci_ep_consume_halt_synced(halt_ep_ctx);
     if (!synced && xhci_read_hw_ep_state(udev, halt_ep_index) == EP_STATE_HALTED)
     {
-        KprintfH("stack clear-halt on halted EP %lu: running recovery\n", (ULONG)halt_ep_index);
+        KprintfT("stack clear-halt on halted EP %lu: running recovery\n", (ULONG)halt_ep_index);
         xhci_reset_ep(udev, halt_ep_index);
         synced = TRUE;
     }
@@ -1350,7 +1350,7 @@ static BOOL xhci_udev_ctrl_hub_suspend(struct usb_device *udev, struct USBIORequ
 
 static s8 xhci_udev_send_ctrl_first(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms)
 {
-    KprintfH("bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx\n",
+    KprintfT("bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx\n",
              (ULONG)io->setup.bmRequestType,
              (ULONG)io->setup.bRequest,
              le16(io->setup.wValue),
@@ -1416,7 +1416,7 @@ s8 xhci_udev_send(struct USBIORequest *req)
     struct usb_device *udev = xhci_udev_get(unit, req->virtual_address);
     if (!udev)
     {
-        KprintfH("Device does not exist for addr %lu\n", (ULONG)req->virtual_address);
+        KprintfT("Device does not exist for addr %lu\n", (ULONG)req->virtual_address);
         return ERR_TIMEOUT;
     }
 
@@ -1424,7 +1424,7 @@ s8 xhci_udev_send(struct USBIORequest *req)
     if ((req->flags & DRIVER_FLAG_TIMEOUT_DEFINED))
         timeout_ms = req->timeout;
 
-    KprintfH("dev=%lx addr=%lu slot=%lu ep=%lu dir=%s len=%lu flags=%lx tmo=%lu\n",
+    KprintfT("dev=%lx addr=%lu slot=%lu ep=%lu dir=%s len=%lu flags=%lx tmo=%lu\n",
              (ULONG)udev, (ULONG)udev->virtual_address, (ULONG)udev->slot_id,
              (ULONG)(req->endpoint & 0x0F), (req->direction == DIRECTION_IN) ? "IN" : "OUT",
              (ULONG)req->data_buffer_length, (ULONG)req->flags,

@@ -1,3 +1,57 @@
+# Upgrade notes
+
+Configuration-relevant changes across all releases, newest first:
+
+* **5.x is the compatibility line.**  It speaks the classic Poseidon HCD ABI, so
+  it drives **classic Poseidon 4.x** and also works with **Poseidon for AmigaOS
+  6.x**, which retains that ABI.  On Poseidon 6.x prefer the driver's **6.x**
+  line — it is faster there — maintained on the
+  [`context_release` branch](https://github.com/rondoval/emu68-xhci-driver/tree/context_release).
+* **From 4.4 or later:** no configuration changes are required.
+* **From 3.x:** `bcmpcie.library` must be installed in `LIBS:` for PCIe-based
+  units (unit 1+, VL805 on Pi 4B) to work.
+* **From pre-3.x:** unit numbering differs.  Unit 0 was the VL805 (PCIe) and
+  is now the onboard OTG port; unit 1 is now the VL805.  Update your USB
+  stack configuration accordingly.
+
+
+# Release notes — xhci.device 5.3
+
+Changes since v5.2.
+
+---
+
+## The 5.x line now ships alongside a 6.x line
+
+`xhci.device` is released in two lines — only one can be installed at a time, and
+the Emu68 driver stack installer asks which — differing in the USB stack ABI they
+speak:
+
+* **5.x — this line.**  Speaks the classic Poseidon HCD ABI.  Required on
+  **classic Poseidon 4.x**, and usable on **Poseidon for AmigaOS 6.x** too, since
+  that stack keeps the classic ABI alongside its own.  SuperSpeed devices go
+  through the driver's internal USB 3.0 ↔ USB 2.0 translation either way.
+* **6.x** — speaks only the newer context HCD ABI, so it needs Poseidon for
+  AmigaOS 6.x.  It hands the stack real USB 3.0 devices with no emulation and
+  adds USB 3.0 bulk streams for mass storage.
+
+If you run classic Poseidon nothing changes: stay on this line.  If you run
+Poseidon 6.x, this line still works, but the 6.x line is the faster choice.  In
+the stack archive the 5.x driver rides under `Storage/` and is copied to
+`DEVS:USBHardware/` only when you pick it.
+
+---
+
+## Maintenance
+
+No functional changes to the driver.  It is built against the current
+`emu68-common` debug API so the 5.x line compiles in the present driver stack
+again: the old two-level `DEBUG` / `DEBUG_HIGH` scheme becomes the cumulative
+tier ladder (`off` / `profile` / `debug` / `trace`), and one switch fall-through
+is now spelled with the attribute the current compiler expects.  The emitted
+code and runtime behaviour are unchanged.
+
+
 # Release notes — xhci.device 5.2
 
 Changes since v5.1.

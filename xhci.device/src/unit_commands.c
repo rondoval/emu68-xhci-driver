@@ -48,7 +48,7 @@ static const UWORD SupportedCommands[] = {
 
 static u32 Do_NSCMD_DEVICEQUERY(struct IOStdReq *io)
 {
-    KprintfH("[xhci] %s: NSCMD_DEVICEQUERY\n", __func__);
+    KprintfT("[xhci] %s: NSCMD_DEVICEQUERY\n", __func__);
     struct NSDeviceQueryResult *dq = io->io_Data;
 
     /* Fill out structure */
@@ -86,7 +86,7 @@ static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct USBIO
 static u32 Do_CMD_FLUSH(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_FLUSH\n", __func__);
+    KprintfT("[xhci] %s: CMD_FLUSH\n", __func__);
 
     struct USBIORequest *req;
     /* Flush and cancel all requests */
@@ -115,7 +115,7 @@ static u32 Do_CMD_FLUSH(struct USBIORequest *io)
         }
     }
 
-    KprintfH("[xhci] %s: Flush completed\n", __func__);
+    KprintfT("[xhci] %s: Flush completed\n", __func__);
     return COMMAND_PROCESSED;
 }
 
@@ -131,7 +131,7 @@ static void uword_to_hex(UWORD value, UBYTE *buf)
 
 static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
 {
-    KprintfH("[xhci] %s: CMD_DEVICE_QUERY\n", __func__);
+    KprintfT("[xhci] %s: CMD_DEVICE_QUERY\n", __func__);
 
     if (!io->data_buffer)
     {
@@ -143,7 +143,7 @@ static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
 
     struct TagItem *tag, *tagList = (struct TagItem *)io->data_buffer;
     u32 filled = 0;
-    KprintfH("[xhci] %s: Processing tag list at 0x%lx\n", __func__, tagList);
+    KprintfT("[xhci] %s: Processing tag list at 0x%lx\n", __func__, tagList);
     while ((tag = NextTagItem(&tagList)))
     {
         if (!tag->ti_Data)
@@ -215,13 +215,13 @@ static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
             break;
         default:
             // Unknown tag: leave untouched
-            KprintfH("[xhci] %s: Unknown tag 0x%lx, skipping\n", __func__, tag->ti_Tag);
+            KprintfT("[xhci] %s: Unknown tag 0x%lx, skipping\n", __func__, tag->ti_Tag);
             break;
         }
-        KprintfH("[xhci] %s: Processed tag 0x%lx\n", __func__, tag->ti_Tag);
+        KprintfT("[xhci] %s: Processed tag 0x%lx\n", __func__, tag->ti_Tag);
     }
 
-    KprintfH("[xhci] %s: Completed UHCMD_QUERYDEVICE\n", __func__);
+    KprintfT("[xhci] %s: Completed UHCMD_QUERYDEVICE\n", __func__);
     io->req.io_Error = ERR_NO_ERROR;
     io->actual_length = filled;
     return COMMAND_PROCESSED;
@@ -233,7 +233,7 @@ static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
 static inline u32 Do_CMD_DEVICE_RESET(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_DEVICE_RESET\n", __func__);
+    KprintfT("[xhci] %s: CMD_DEVICE_RESET\n", __func__);
 
     /* Issue SET_FEATURE(RESET) on all root hub ports */
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
@@ -262,7 +262,7 @@ static inline u32 Do_CMD_DEVICE_RESET(struct USBIORequest *io)
 static u32 Do_CMD_RESET(struct USBIORequest *io)
 {
     // struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_RESET\n", __func__);
+    KprintfT("[xhci] %s: CMD_RESET\n", __func__);
     // TODO should reset entire controller...
     return Do_CMD_DEVICE_RESET(io);
 }
@@ -392,7 +392,7 @@ static inline u32 Do_CMD_INTERNAL_ABORT(struct USBIORequest *io)
 static inline u32 Do_CMD_REGISTER_ISO_HANDLER(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_REGISTER_ISO_HANDLER\n", __func__);
+    KprintfT("[xhci] %s: CMD_REGISTER_ISO_HANDLER\n", __func__);
 
     // TODO check if state is operational
     if (!io->data_buffer)
@@ -423,7 +423,7 @@ badparams:
 static inline u32 Do_CMD_UNREGISTER_ISO_HANDLER(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_UNREGISTER_ISO_HANDLER\n", __func__);
+    KprintfT("[xhci] %s: CMD_UNREGISTER_ISO_HANDLER\n", __func__);
 
     if (!io->data_buffer)
         goto badparams;
@@ -451,9 +451,9 @@ badparams:
 static inline u32 Do_CMD_STARTRTISO(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_START_REALTIME_ISOCHRONOUS\n", __func__);
+    KprintfT("[xhci] %s: CMD_START_REALTIME_ISOCHRONOUS\n", __func__);
 
-    KprintfH("RT ISO start addr=%lu ep=%lu dir=%s len=%lu\n",
+    KprintfT("RT ISO start addr=%lu ep=%lu dir=%s len=%lu\n",
              (ULONG)io->virtual_address,
              (ULONG)(io->endpoint & 0x0F),
              (io->direction == DIRECTION_IN) ? "IN" : "OUT",
@@ -482,9 +482,9 @@ badparams:
 static inline u32 Do_CMD_STOPRTISO(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_STOP_REALTIME_ISOCHRONOUS\n", __func__);
+    KprintfT("[xhci] %s: CMD_STOP_REALTIME_ISOCHRONOUS\n", __func__);
 
-    KprintfH("RT ISO stop requested addr=%lu ep=%lu\n",
+    KprintfT("RT ISO stop requested addr=%lu ep=%lu\n",
              (ULONG)io->virtual_address, (ULONG)(io->endpoint & 0x0F));
     struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
     if (!udev)

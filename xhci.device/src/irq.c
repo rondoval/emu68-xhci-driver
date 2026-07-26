@@ -38,7 +38,7 @@ static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 
 static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
 {
-	KprintfH("[xhci] %s: %s CMD_EIE | CMD_HSEIE\n", __func__, enable ? "enabling" : "disabling");
+	KprintfT("[xhci] %s: %s CMD_EIE | CMD_HSEIE\n", __func__, enable ? "enabling" : "disabling");
 	u32 cmd = mmio_read32(&ctrl->hcor->or_usbcmd);
 	if (enable)
 		cmd |= (CMD_EIE | CMD_HSEIE);

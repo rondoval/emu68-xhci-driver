@@ -41,9 +41,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-event] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-event] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-event] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 typedef void (*ep_state_handler)(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
@@ -82,14 +82,14 @@ static void dispatch_ep_event(struct usb_device *udev, union xhci_trb *event)
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
     {
-        KprintfH("No ep context for addr %lu ep %lu\n", (ULONG)udev->virtual_address, (ULONG)ep_index);
+        KprintfT("No ep context for addr %lu ep %lu\n", (ULONG)udev->virtual_address, (ULONG)ep_index);
         return;
     }
     enum ep_state state = xhci_ep_get_state(ep_ctx);
 
     if (ep_state_dispatch[state])
     {
-        KprintfH("addr %lu EP %lu state %lu -> handling event\n", (ULONG)udev->virtual_address, (ULONG)ep_index, (ULONG)state);
+        KprintfT("addr %lu EP %lu state %lu -> handling event\n", (ULONG)udev->virtual_address, (ULONG)ep_index, (ULONG)state);
         ep_state_handler handler = ep_state_dispatch[state];
         handler(udev, ep_ctx, event);
     }
@@ -114,7 +114,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
         {
             const u32 flags = le32(event->trans_event.flags);
             const u32 slot = TRB_TO_SLOT_ID(flags);
-            KprintfH("Transfer Event TRB detected: slot %lu ep %lu (%08lx %08lx %08lx %08lx)\n",
+            KprintfT("Transfer Event TRB detected: slot %lu ep %lu (%08lx %08lx %08lx %08lx)\n",
                      (ULONG)slot,
                      (ULONG)TRB_TO_EP_INDEX(flags),
                      (ULONG)le32(event->generic.field[0]),
@@ -128,7 +128,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
                 Kprintf("No usb_device for slot %lu\n", (ULONG)slot);
                 break;
             }
-            KprintfH("USB device addr %lu on slot %lu\n", (ULONG)udev->virtual_address, (ULONG)slot);
+            KprintfT("USB device addr %lu on slot %lu\n", (ULONG)udev->virtual_address, (ULONG)slot);
 
             dispatch_ep_event(udev, event);
         }
@@ -140,7 +140,7 @@ BOOL xhci_process_event_trb(struct xhci_ctrl *ctrl)
 
         case TRB_PORT_STATUS:
         {
-#ifdef DEBUG_HIGH
+#ifdef TRACE
             const u32 port_field = le32(event->generic.field[0]);
             const u32 field1 = le32(event->generic.field[1]);
             const u32 field2 = le32(event->generic.field[2]);
@@ -194,7 +194,7 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
             if (ep_ctx && xhci_ep_is_expired(ep_ctx))
             {
-                KprintfH("XHCI TD timeout on slot %lu ep %lu\n", (ULONG)udev->slot_id, (ULONG)ep_index);
+                KprintfT("XHCI TD timeout on slot %lu ep %lu\n", (ULONG)udev->slot_id, (ULONG)ep_index);
                 xhci_ep_request_timeout_recovery(ep_ctx);
             }
         }
@@ -218,7 +218,7 @@ inline static s8 translate_status(xhci_comp_code comp)
         status = ERR_NO_ERROR;
         break;
     case COMP_STALL:
-        KprintfH("Device stalled\n");
+        KprintfT("Device stalled\n");
         status = ERR_DEVICE_STALL;
         break;
     case COMP_TX_ERR:
@@ -235,19 +235,19 @@ inline static s8 translate_status(xhci_comp_code comp)
         status = ERR_HCI_ERROR;
         break;
     case COMP_BABBLE:
-        KprintfH("Babble detected\n");
+        KprintfT("Babble detected\n");
         status = ERR_DEVICE_BABBLE;
         break;
     case COMP_BUFF_OVER:
-        KprintfH("Isoc buffer overrun\n");
+        KprintfT("Isoc buffer overrun\n");
         status = ERR_ISOC_OVERRUN;
         break;
     case COMP_BW_OVER:
-        KprintfH("Bandwidth overrun\n");
+        KprintfT("Bandwidth overrun\n");
         status = ERR_HCI_ERROR;
         break;
     case COMP_SPLIT_ERR:
-        KprintfH("Split transaction error\n");
+        KprintfT("Split transaction error\n");
         status = ERR_TIMEOUT;
         break;
     default:
@@ -273,7 +273,7 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
     const u8 ep_index = xhci_ep_get_ep_index(ep_ctx);
 
     Kprintf("No handler for addr %lu endpoint %lu state %lu\n", (ULONG)udev->virtual_address, (ULONG)ep_index, (ULONG)state);
-    KprintfH("Event TRB: (%08lx %08lx %08lx %08lx)\n",
+    KprintfT("Event TRB: (%08lx %08lx %08lx %08lx)\n",
              (ULONG)le32(event->generic.field[0]),
              (ULONG)le32(event->generic.field[1]),
              (ULONG)le32(event->generic.field[2]),
@@ -291,7 +291,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     const xhci_comp_code comp = GET_COMP_CODE(transfer_len);
 
 #ifdef DEBUG_CONTEXT
-    KprintfH("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
+    KprintfT("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
              (ULONG)flags,
              (ULONG)transfer_len,
              (ULONG)u64_hi32(trb_addr),
@@ -352,7 +352,7 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     u32 act_len = done.act_len;
 
     s8 status = translate_status(comp);
-    KprintfH("result status=%ld act_len=%lu comp=%lu\n", (LONG)status, (ULONG)act_len, (ULONG)comp);
+    KprintfT("result status=%ld act_len=%lu comp=%lu\n", (LONG)status, (ULONG)act_len, (ULONG)comp);
 
     /* Flag short IN transfers as runts unless explicitly allowed or expected (control). */
     if (status == ERR_NO_ERROR && act_len < req->data_buffer_length &&
@@ -402,7 +402,7 @@ static void ep_handle_suspended(struct usb_device *udev, struct ep_context *ep_c
 
     if (comp == COMP_STOP || comp == COMP_STOP_INVAL || comp == COMP_STOP_SHORT)
     {
-        KprintfH("addr %lu EP %lu stopped for suspend (comp=%lu)\n",
+        KprintfT("addr %lu EP %lu stopped for suspend (comp=%lu)\n",
                  (ULONG)udev->virtual_address,
                  (ULONG)xhci_ep_get_ep_index(ep_ctx), (ULONG)comp);
         return;
@@ -426,13 +426,13 @@ static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ct
     switch(comp)
     {
         case COMP_STOP:
-            KprintfH("Transfer stopped successfully\n");
+            KprintfT("Transfer stopped successfully\n");
             break;
         case COMP_STOP_INVAL:
-            KprintfH("Transfer stopped with invalid length\n");
+            KprintfT("Transfer stopped with invalid length\n");
             break;
         case COMP_STOP_SHORT:
-            KprintfH("Transfer stopped after short packet\n");
+            KprintfT("Transfer stopped after short packet\n");
             break;
         default:
             Kprintf("Expected a TRB with STOP, got %lu\n", (ULONG)comp);

@@ -42,9 +42,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-context] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-context] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-context] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 /**
@@ -290,7 +290,7 @@ static BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub)
 void xhci_setup_addressable_virt_dev(struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    KprintfH("Setting up addressable virtual device addr=%lu parent_addr=%lu parent_port=%lu\n",
+    KprintfT("Setting up addressable virtual device addr=%lu parent_addr=%lu parent_port=%lu\n",
              (ULONG)udev->virtual_address,
              (ULONG)(udev->parent ? udev->parent->virtual_address : 0),
              (ULONG)udev->parent_port);
@@ -299,7 +299,7 @@ void xhci_setup_addressable_virt_dev(struct usb_device *udev)
     /* Extract the EP0 and Slot Ctrl */
     struct xhci_ep_ctx *ep0_ctx = xhci_get_ep_ctx(ctrl, udev->in_ctx, 0);
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(ctrl, udev->in_ctx);
-    KprintfH("slot=%lu in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
+    KprintfT("slot=%lu in_ctx=%lx out_ctx=%lx ep0_ctx=%lx slot_ctx=%lx\n",
              (ULONG)udev->slot_id, (ULONG)udev->in_ctx, (ULONG)udev->out_ctx,
              (ULONG)ep0_ctx, (ULONG)slot_ctx);
 
@@ -334,7 +334,7 @@ void xhci_setup_addressable_virt_dev(struct usb_device *udev)
     // Find root hub port number
     u32 root_port = xhci_find_root_port(udev);
 
-    KprintfH("xhci_setup_addressable_virt_dev: parent_addr=%lu port_num=%lu root_port_num=%lu speed=%lu route=%lx route_depth=%lu\n",
+    KprintfT("xhci_setup_addressable_virt_dev: parent_addr=%lu port_num=%lu root_port_num=%lu speed=%lu route=%lx route_depth=%lu\n",
              (ULONG)udev->parent->virtual_address, (ULONG)udev->parent_port, (ULONG)root_port, (ULONG)udev->speed, (ULONG)udev->route, (ULONG)udev->route_depth);
 
     u32 dev_info2 = le32(slot_ctx->dev_info2);
@@ -363,7 +363,7 @@ void xhci_setup_addressable_virt_dev(struct usb_device *udev)
                     slot_ctx->dev_info = le32(dev_info);
                 }
 
-                KprintfH("xhci_setup_addressable_virt_dev: tt_slot=%lu tt_port=%lu tt_info=%08lx mtt=%ld\n",
+                KprintfT("xhci_setup_addressable_virt_dev: tt_slot=%lu tt_port=%lu tt_info=%08lx mtt=%ld\n",
                          (ULONG)tt_hub->slot_id, (ULONG)parent_port, (ULONG)tt_info,
                          (LONG)((dev_info & DEV_MTT) != 0));
                 break;
@@ -386,7 +386,7 @@ void xhci_setup_addressable_virt_dev(struct usb_device *udev)
     /* Step 4 - ring already allocated */
     /* Step 5 */
     ep0_ctx->ep_info2 = le32(EP_TYPE(CTRL_EP));
-    KprintfH("xhci_setup_addressable_virt_dev: SPEED=%lu\n", (ULONG)udev->speed);
+    KprintfT("xhci_setup_addressable_virt_dev: SPEED=%lu\n", (ULONG)udev->speed);
 
     u32 max_packet_size = 0;
     switch (udev->speed)
@@ -395,19 +395,19 @@ void xhci_setup_addressable_virt_dev(struct usb_device *udev)
     case USB_SPEED_SUPER_PLUS:
         ep0_ctx->ep_info2 |= le32(MAX_PACKET(512));
         max_packet_size = 512;
-        KprintfH("xhci_setup_addressable_virt_dev: MPS=512\n");
+        KprintfT("xhci_setup_addressable_virt_dev: MPS=512\n");
         break;
     case USB_SPEED_HIGH:
     /* USB core guesses at a 64-byte max packet first for FS devices */
     case USB_SPEED_FULL:
         ep0_ctx->ep_info2 |= le32(MAX_PACKET(64));
         max_packet_size = 64;
-        KprintfH("xhci_setup_addressable_virt_dev: MPS=64\n");
+        KprintfT("xhci_setup_addressable_virt_dev: MPS=64\n");
         break;
     case USB_SPEED_LOW:
         ep0_ctx->ep_info2 |= le32(MAX_PACKET(8));
         max_packet_size = 8;
-        KprintfH("xhci_setup_addressable_virt_dev: MPS=8\n");
+        KprintfT("xhci_setup_addressable_virt_dev: MPS=8\n");
         break;
     default:
         /* New speed? */
@@ -435,7 +435,7 @@ void xhci_setup_addressable_virt_dev(struct usb_device *udev)
 
     xhci_flush_cache(ep0_ctx, sizeof(struct xhci_ep_ctx), 0);
     xhci_flush_cache(slot_ctx, sizeof(struct xhci_slot_ctx), 0);
-    KprintfH("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
+    KprintfT("xhci_setup_addressable_virt_dev: ep0 deq=%lx tx_info=%08lx dev_info=%08lx dev_info2=%08lx\n",
              (ULONG)le64(ep0_ctx->deq), (ULONG)le32(ep0_ctx->tx_info),
              (ULONG)le32(slot_ctx->dev_info), (ULONG)le32(slot_ctx->dev_info2));
 
@@ -504,19 +504,19 @@ void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size)
     u8 ep_index = 0; /* control endpoint */
 
     xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
-    KprintfH("Checking max packet size for ep 0 of address %lu (slot %lu)\n", (ULONG)udev->virtual_address, (ULONG)udev->slot_id);
+    KprintfT("Checking max packet size for ep 0 of address %lu (slot %lu)\n", (ULONG)udev->virtual_address, (ULONG)udev->slot_id);
 
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, ep_index);
     u16 hw_max_packet_size = (u16)MAX_PACKET_DECODED(le32(ep_ctx->ep_info2));
 
     if (hw_max_packet_size == max_packet_size)
     {
-        KprintfH("Max Packet Size for ep 0 is already correct at %lu.\n", (ULONG)max_packet_size);
+        KprintfT("Max Packet Size for ep 0 is already correct at %lu.\n", (ULONG)max_packet_size);
         return;
     }
 
-    KprintfH("Max Packet Size for ep 0 changed to %lu.\n", (ULONG)max_packet_size);
-    KprintfH("Max packet size in xHCI HW = %lu\n", (ULONG)hw_max_packet_size);
+    KprintfT("Max Packet Size for ep 0 changed to %lu.\n", (ULONG)max_packet_size);
+    KprintfT("Max packet size in xHCI HW = %lu\n", (ULONG)hw_max_packet_size);
 
     // Update the EP context's max packet size as well
     struct ep_context *ep_context = xhci_ep_get_context_for_index(udev, ep_index);
@@ -553,7 +553,7 @@ void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size)
 static s8 xhci_init_ep_contexts_if(struct usb_device *udev, struct usb_interface *ifdesc)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    KprintfH("xhci_init_ep_contexts_if: enter\n");
+    KprintfT("xhci_init_ep_contexts_if: enter\n");
     struct xhci_ep_ctx *ep_ctx[USB_MAX_ENDPOINT_CONTEXTS];
     u8 cur_ep;
     u8 ep_index;
@@ -647,7 +647,7 @@ static s8 xhci_init_ep_contexts_if(struct usb_device *udev, struct usb_interface
             avg_trb_len = 8;
         ep_ctx[ep_index]->tx_info = le32(EP_MAX_ESIT_PAYLOAD_LO(max_esit_payload) | EP_AVG_TRB_LENGTH(avg_trb_len));
 
-        KprintfH("EP%lu %s: type=%lu maxp=%lu maxesit=%lu "
+        KprintfT("EP%lu %s: type=%lu maxp=%lu maxesit=%lu "
                  "interval=%lu mult=%lu maxburst=%lu\n",
                  (ULONG)usb_endpoint_num(endpt_desc),
                  dir ? "IN" : "OUT",
@@ -717,7 +717,7 @@ static void xhci_compute_and_apply_mel(struct usb_device *udev)
  */
 s8 xhci_set_configuration(struct usb_device *udev, u32 config_value)
 {
-    KprintfH("xhci_set_configuration: config_val=%lu\n", (ULONG)config_value);
+    KprintfT("xhci_set_configuration: config_val=%lu\n", (ULONG)config_value);
 
     struct usb_config *cfg = xhci_find_config(udev, (int)config_value);
     if (!cfg)
@@ -730,7 +730,7 @@ s8 xhci_set_configuration(struct usb_device *udev, u32 config_value)
     for (u8 i = 0; i < cfg->no_of_if; ++i)
         xhci_select_active_alt(&cfg->if_desc[i]);
 
-#ifdef DEBUG_HIGH
+#ifdef TRACE
     /* Dump entire cfg using kprintf (all fields and all interfaces and endpoints) */
     xhci_dump_config("[xhci] xhci_set_configuration:", cfg, udev->virtual_address);
 #endif
@@ -801,7 +801,7 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
 
     if (current_alt && current_alt->desc.bAlternateSetting == alt_setting)
     {
-        KprintfH("xhci_set_interface: iface %lu already at alt %lu\n",
+        KprintfT("xhci_set_interface: iface %lu already at alt %lu\n",
                  (ULONG)iface_number, (ULONG)alt_setting);
         return ERR_NO_ERROR;
     }
@@ -857,7 +857,7 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
     u32 max_ep_flag = compute_max_ep_flag(cfg);
     xhci_update_slot_last_ctx(ctrl, udev, max_ep_flag);
 
-    KprintfH("xhci_set_interface: updating device context for addr=%lu iface=%lu alt=%lu drop=0x%lx add=0x%lx\n",
+    KprintfT("xhci_set_interface: updating device context for addr=%lu iface=%lu alt=%lu drop=0x%lx add=0x%lx\n",
              (ULONG)udev->virtual_address,
              (ULONG)iface_number,
              (ULONG)alt_setting,
@@ -1033,7 +1033,7 @@ void xhci_evaluate_mel(struct usb_device *udev)
     struct xhci_slot_ctx *slot = xhci_get_slot_ctx(ctrl, udev->in_ctx);
     slot->dev_state = 0;
 
-    KprintfH("Evaluate Context: MEL=%lu us for addr %lu (slot %lu)\n",
+    KprintfT("Evaluate Context: MEL=%lu us for addr %lu (slot %lu)\n",
              (ULONG)udev->max_exit_latency_us, (ULONG)udev->virtual_address,
              (ULONG)udev->slot_id);
     xhci_configure_endpoints(udev, TRUE, NULL);

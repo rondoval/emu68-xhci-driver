@@ -29,9 +29,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-td] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-td] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-td] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 struct xhci_td
@@ -129,7 +129,7 @@ BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
         struct xhci_td *td = (struct xhci_td *)n;
         if (td->deadline_active && (int32_t)(now - td->deadline_us) >= 0)
         {
-            KprintfH("Found expired TD req=%lx deadline=%lu now=%lu\n",
+            KprintfT("Found expired TD req=%lx deadline=%lu now=%lu\n",
                      td->is_rt_iso ? NULL : td->u.req,
                      (ULONG)td->deadline_us,
                      (ULONG)now);
@@ -538,7 +538,7 @@ BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_add
                             ((trb_len > residue) ? trb_len - residue : 0);
         td->short_seen = TRUE;
         *deferred = TRUE;
-        KprintfH("mid-TD short at TRB %ld/%lu: act_len=%lu\n",
+        KprintfT("mid-TD short at TRB %ld/%lu: act_len=%lu\n",
                  (LONG)idx, (ULONG)td->trb_count, (ULONG)td->short_act_len);
         return FALSE;
     }
