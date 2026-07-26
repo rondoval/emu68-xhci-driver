@@ -16,29 +16,33 @@
 #include <iomem.h>
 #include <config.h>
 #include <debug.h>
+#ifdef PROFILE
+#include <timing.h>
+#endif
 #include <libraries/openpci.h>
 #include <libraries/pci_constants.h> /* PCI_IRQ_* flags */
+#include <libraries/pci_irq.h>
 #include <xhci/xhci.h>
-#include <xhci/xhci-events.h>
 #include <device.h>
 
 #define XHCI_IRQ_ACK_MASK (STS_EINT | STS_FATAL | STS_PORT)
 
+/* IMAN writes use the RsvdP bits captured at xhci_irq_start (iman_base has
+ * IP/IE cleared).  IP is W1C: writing 1 always is a no-op when not pending,
+ * a clear when it is — so both writes need no prior PCIe read. */
 static inline void xhci_irq_disable_runtime(struct xhci_ctrl *ctrl)
 {
-	u32 iman = mmio_read32(&ctrl->ir_set->irq_pending);
-	mmio_write32(ER_IRQ_DISABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
+	mmio_write32(ctrl->iman_base | IMAN_IP, &ctrl->ir_set->irq_pending); /* IE=0, clear IP */
 }
 
 static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 {
-	u32 iman = mmio_read32(&ctrl->ir_set->irq_pending);
-	mmio_write32(ER_IRQ_ENABLE(iman) | ER_IRQ_PENDING(iman), &ctrl->ir_set->irq_pending);
+	mmio_write32(ctrl->iman_base | IMAN_IP | IMAN_IE, &ctrl->ir_set->irq_pending); /* IE=1, clear IP */
 }
 
 static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
 {
-	KprintfH("[xhci] %s: %s CMD_EIE | CMD_HSEIE\n", __func__, enable ? "enabling" : "disabling");
+	KprintfT("[xhci] %s: %s CMD_EIE | CMD_HSEIE\n", __func__, enable ? "enabling" : "disabling");
 	u32 cmd = mmio_read32(&ctrl->hcor->or_usbcmd);
 	if (enable)
 		cmd |= (CMD_EIE | CMD_HSEIE);
@@ -71,6 +75,11 @@ static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *
 	mmio_write32(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
 	xhci_irq_disable_runtime(ctrl);
 
+#ifdef PROFILE
+	/* XP_IRQ_TO_TASK start: overwritten (not accumulated) on coalesced IRQs,
+	 * so the sample measures the LAST signal-to-pickup gap. */
+	ctrl->irq_t0 = get_time();
+#endif
 	Signal(unit->task, 1UL << unit->irq_signal);
 
 	return 1;
@@ -86,6 +95,7 @@ static inline void xhci_setup_isr(struct XHCIUnit *unit)
 
 static inline void xhci_irq_start(struct xhci_ctrl *ctrl)
 {
+	ctrl->iman_base = mmio_read32(&ctrl->ir_set->irq_pending) & ~(IMAN_IP | IMAN_IE);
 	xhci_irq_update_cmd(ctrl, TRUE);
 	xhci_irq_enable_runtime(ctrl);
 }
@@ -114,29 +124,18 @@ static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
 	if (DEVICE_USE_MSIX)
 		flags |= PCI_IRQ_MSIX;
 
-	LONG nvec = AllocIntVectors(ctrl->pci_dev, 1, 1, flags);
-	if (nvec < 1)
+	ULONG itype = 0;
+	LONG rc = pci_irq_attach(pcielibBase, ctrl->pci_dev, &unit->irq_isr, flags, &itype);
+	if (rc != 0)
 	{
-		Kprintf("[xhci] %s: AllocIntVectors failed: %s (%ld)\n", __func__,
-				pcie_strerror(nvec), (LONG)nvec);
+		Kprintf("[xhci] %s: interrupt attach failed: %s (%ld)\n", __func__,
+				pcie_strerror(rc), rc);
 		return -1;
 	}
 
-#ifdef DEBUG
-	ULONG itype = GetIntVectorType(ctrl->pci_dev);
 	Kprintf("[xhci] %s: using %s\n", __func__,
 			itype == PCI_IRQ_MSIX ? "MSI-X" : itype == PCI_IRQ_MSI ? "MSI"
 																   : "INTx");
-#endif
-
-	LONG rc = AddIntVectorServer(ctrl->pci_dev, 0, &unit->irq_isr);
-	if (rc != 0)
-	{
-		Kprintf("[xhci] %s: AddIntVectorServer failed: %s (%ld)\n", __func__,
-				pcie_strerror(rc), rc);
-		FreeIntVectors(ctrl->pci_dev);
-		return -1;
-	}
 
 	return 0;
 }
@@ -168,8 +167,5 @@ void xhci_int_shutdown(struct XHCIUnit *unit)
 	if (!unit->xhci_ctrl->pci_dev)
 		RemIntServerEx((ULONG)unit->irq_line, &unit->irq_isr);
 	else
-	{
-		RemIntVectorServer(unit->xhci_ctrl->pci_dev, 0, &unit->irq_isr);
-		FreeIntVectors(unit->xhci_ctrl->pci_dev);
-	}
+		pci_irq_detach(pcielibBase, unit->xhci_ctrl->pci_dev, &unit->irq_isr);
 }

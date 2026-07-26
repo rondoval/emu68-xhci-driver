@@ -14,42 +14,80 @@
 #include <utility/tagitem.h>
 
 #include <devices/newstyle.h>
-#include <devices/hcd_api.h>
 
 #include <config.h>
 #include <device.h>
 #include <debug.h>
 #include <memory.h>
+#include <format.h>
 #include <libraries/openpci.h>
 #include <xhci/usb_defs.h>
 #include <xhci/xhci.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-endpoint.h>
-#include <xhci/xhci-commands.h>
-#include <xhci/xhci-descriptors.h>
-#include <xhci/xhci-td.h>
 #include <xhci/xhci-udev.h>
+#include <xhci/xhci-ctx-ops.h>
+#include <xhci/xhci-direct.h>
+
+/* The NSD list is the per-op discovery mechanism, so ONLY implemented ops may
+ * appear in it.  The stream ops depend on controller support (HCCPARAMS1
+ * MaxPSASize > 0), so two tables exist: the base list and the streams-capable
+ * superset — NSCMD_DEVICEQUERY picks at query time. */
+#define XHCI_NSD_COMMON_COMMANDS                                              \
+    CMD_FLUSH,                                                                \
+    UHCMD_QUERYDEVICE,                                                         \
+    UHCMD_USBRESET,                                                         \
+                                                                              \
+    NSCMD_DEVICEQUERY,                                                        \
+                                                                              \
+    /* Context HCD ABI lifecycle ops (usbhcd_context.h) */                    \
+    NSCMD_USB_CREATE_DEVICE,                                                  \
+    NSCMD_USB_DESTROY_DEVICE,                                                 \
+    NSCMD_USB_UPDATE_EP0,                                                     \
+    NSCMD_USB_CONFIGURE_ENDPOINTS,                                            \
+    NSCMD_USB_DECONFIGURE,                                                    \
+    NSCMD_USB_UPDATE_HUB,                                                     \
+    NSCMD_USB_SET_SUSPEND,                                                    \
+    NSCMD_USB_SET_LINK_POWER,                                                 \
+                                                                              \
+    /* the direct transfer path's attach handshake (xhci-direct.c) +          \
+     * clock-driven iso hooks (ABI doc §10) */                                \
+    NSCMD_USB_ATTACH,                                                         \
+    NSCMD_USB_REGISTER_HOOKS,                                                 \
+    NSCMD_USB_UNREGISTER_HOOKS,                                               \
+    NSCMD_USB_START_STREAM,                                                   \
+    NSCMD_USB_STOP_STREAM
 
 static const UWORD SupportedCommands[] = {
-    CMD_FLUSH,
-    CMD_RESET,
-    CMD_DEVICE_QUERY,
-    CMD_DEVICE_RESET,
-    CMD_DEVICE_RESUME,
-    CMD_STOP,
-    CMD_START,
-    CMD_REQUEST_CONTROL,
-    CMD_REQUEST_ISOCHRONOUS,
-    CMD_REQUEST_INTERRUPT,
-    CMD_REQUEST_BULK,
-
-    NSCMD_DEVICEQUERY,
+    XHCI_NSD_COMMON_COMMANDS,
     0};
+
+static const UWORD SupportedCommandsStreams[] = {
+    XHCI_NSD_COMMON_COMMANDS,
+    /* SS bulk streams (UAS) — only when HCCPARAMS1 MaxPSASize > 0 */
+    NSCMD_USB_ALLOC_STREAMS,
+    NSCMD_USB_FREE_STREAMS,
+    0};
+
+#pragma pack(2)
+/* Read-only overlay for the incoming UHCMD_QUERYDEVICE request.  The stack sends
+ * the legacy struct IOUsbHWReq even to a context HCD; the driver reads only the
+ * taglist at the frozen iouh_Data offset (52), so it needs no legacy struct. */
+struct xhci_device_query
+{
+    struct IORequest dq_Req;    /* 0..31 */
+    UWORD dq_Pad[6];            /* 32..43: iouh_Flags..iouh_MaxPktSize */
+    ULONG dq_Actual;            /* 44: OUT filled-tag count (iouh_Actual) */
+    ULONG dq_Length;            /* 48: iouh_Length */
+    APTR  dq_TagList;           /* 52: iouh_Data -> query taglist */
+};
+#pragma pack()
 
 static u32 Do_NSCMD_DEVICEQUERY(struct IOStdReq *io)
 {
-    KprintfH("[xhci] %s: NSCMD_DEVICEQUERY\n", __func__);
+    KprintfT("[xhci] %s: NSCMD_DEVICEQUERY\n", __func__);
     struct NSDeviceQueryResult *dq = io->io_Data;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
 
     /* Fill out structure */
     dq->nsdqr_SizeAvailable = sizeof(struct NSDeviceQueryResult);
@@ -61,36 +99,49 @@ static u32 Do_NSCMD_DEVICEQUERY(struct IOStdReq *io)
     dq->nsdqr_DeviceType = NSDEVTYPE_UNKNOWN;
     dq->nsdqr_DeviceSubType = 0;
     dq->nsdqr_SupportedCommands = (UWORD *)SupportedCommands;
+    if (unit && unit->xhci_ctrl &&
+        HCC_MAX_PSA_SIZE(mmio_read32(&unit->xhci_ctrl->hccr->cr_hccparams1)) > 0)
+    {
+        Kprintf("[xhci] %s: controller supports streams; returning stream-capable NSD\n", __func__);
+        dq->nsdqr_SupportedCommands = (UWORD *)SupportedCommandsStreams;
+    }
     io->io_Actual = dq->nsdqr_SizeAvailable;
     io->io_Error = 0;
 
     return COMMAND_PROCESSED;
 }
 
-static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct USBIORequest *req)
+static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct IORequest *req)
 {
-    if ((req->driver_private_flags & REQ_INTERNAL) && req->req.io_Command == CMD_INTERNAL_ABORT_REQUEST)
+    (void)unit;
+
+    /* A driver-owned root-hub submit still queued: complete it through its
+     * embedded xfer (which frees the message); nothing to reply. */
+    if (req->io_Command == CMD_INTERNAL_RH_SUBMIT)
     {
-        if (unit && unit->memoryPool)
-            pool_free(unit->memoryPool, req);
+        struct xhci_xfer *io = &((struct xhci_rh_submit_msg *)req)->rs_Xfer;
+        io->error = IOERR_ABORTED;
+        xhci_xfer_reply(io);
         return;
     }
 
-    req->req.io_Error = IOERR_ABORTED;
+    /* An unprocessed client request (never became a shadow): reply it directly. */
+    req->io_Error = IOERR_ABORTED;
     ReplyMsg((struct Message *)req);
 }
 
 /*
- * Abort all UHCMD_CONTROLXFER, UHCMD_ISOXFER, UHCMD_INTXFER and UHCMD_BULKXFER requests in progress or queued
+ * Abort all transfer requests in progress or queued (context transfers and
+ * the root-hub views' pending interrupt requests alike)
  */
-static u32 Do_CMD_FLUSH(struct USBIORequest *io)
+static u32 Do_CMD_FLUSH(struct IORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_FLUSH\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
+    KprintfT("[xhci] %s: CMD_FLUSH\n", __func__);
 
-    struct USBIORequest *req;
+    struct IORequest *req;
     /* Flush and cancel all requests */
-    while ((req = (struct USBIORequest *)GetMsg(&unit->unit.unit_MsgPort)))
+    while ((req = (struct IORequest *)GetMsg(&unit->unit.unit_MsgPort)))
         flush_queued_unit_request(unit, req);
 
     /* go through all devices and endpoints and flush their queues */
@@ -98,10 +149,13 @@ static u32 Do_CMD_FLUSH(struct USBIORequest *io)
 
     xhci_roothub_abort_int_request(ctrl->root_hub);
 
-    for (u32 addr = 0; addr <= USB_MAX_ADDRESS; ++addr)
+    /* Sweep the slot map: it holds every ring-bearing device, and CMD_FLUSH
+     * must reply *everything*.  The root hub has no slot; its interrupt
+     * request was aborted above. */
+    for (u32 slot = 1; slot < MAX_HC_SLOTS; ++slot)
     {
-        struct usb_device *udev = ctrl->devices_by_virtual_address[addr];
-        if (!udev || addr == xhci_roothub_get_address(ctrl->root_hub))
+        struct usb_device *udev = ctrl->devices_by_slot_id[slot];
+        if (!udev)
             continue;
 
         for (u8 ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ++ep_index)
@@ -115,35 +169,28 @@ static u32 Do_CMD_FLUSH(struct USBIORequest *io)
         }
     }
 
-    KprintfH("[xhci] %s: Flush completed\n", __func__);
+    KprintfT("[xhci] %s: Flush completed\n", __func__);
     return COMMAND_PROCESSED;
 }
 
-static void uword_to_hex(UWORD value, UBYTE *buf)
+static inline u32 Do_CMD_DEVICE_QUERY(struct IORequest *io)
 {
-    static const char hex[] = "0123456789abcdef";
-    buf[0] = (UBYTE)hex[(value >> 12) & 0xF];
-    buf[1] = (UBYTE)hex[(value >> 8) & 0xF];
-    buf[2] = (UBYTE)hex[(value >> 4) & 0xF];
-    buf[3] = (UBYTE)hex[value & 0xF];
-    buf[4] = '\0';
-}
+    KprintfT("[xhci] %s: UHCMD_QUERYDEVICE\n", __func__);
 
-static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
-{
-    KprintfH("[xhci] %s: CMD_DEVICE_QUERY\n", __func__);
-
-    if (!io->data_buffer)
+    /* UHCMD_QUERYDEVICE arrives as a legacy IOUsbHWReq; the taglist rides its
+     * iouh_Data slot (see struct xhci_device_query). */
+    struct xhci_device_query *q = (struct xhci_device_query *)io;
+    if (!q->dq_TagList)
     {
-        io->req.io_Error = ERR_BAD_PARAMETERS;
+        io->io_Error = UHIOERR_BADPARAMS;
         return COMMAND_PROCESSED;
     }
 
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
 
-    struct TagItem *tag, *tagList = (struct TagItem *)io->data_buffer;
+    struct TagItem *tag, *tagList = (struct TagItem *)q->dq_TagList;
     u32 filled = 0;
-    KprintfH("[xhci] %s: Processing tag list at 0x%lx\n", __func__, tagList);
+    KprintfT("[xhci] %s: Processing tag list at 0x%lx\n", __func__, tagList);
     while ((tag = NextTagItem(&tagList)))
     {
         if (!tag->ti_Data)
@@ -153,365 +200,143 @@ static inline u32 Do_CMD_DEVICE_QUERY(struct USBIORequest *io)
         ULONG *out = (ULONG *)tag->ti_Data;
         switch (tag->ti_Tag)
         {
-        case TAG_DRIVER_STATE:
-            *out = unit->driver_state;
-            io->state = unit->driver_state;
-            filled++;
-            break;
-        case TAG_DEVICE_VENDOR:
+        case UHA_Manufacturer:
             if (!unit->xhci_ctrl->pci_dev)
                 *out = (ULONG)(APTR) "Broadcom";
             else if (unit->xhci_ctrl->pci_dev->vendor == 0x1106)
                 *out = (ULONG)(APTR) "VIA Labs";
             else
             {
-                uword_to_hex(unit->xhci_ctrl->pci_dev->vendor, (UBYTE *)unit->vendor_str);
+                _SNPrintf((STRPTR)unit->vendor_str, sizeof(unit->vendor_str),
+                          (CONST_STRPTR)"%04lx", (ULONG)unit->xhci_ctrl->pci_dev->vendor);
                 *out = (ULONG)(APTR)unit->vendor_str;
             }
             filled++;
             break;
-        case TAG_DEVICE_PRODUCT:
+        case UHA_ProductName:
             if (!unit->xhci_ctrl->pci_dev)
                 *out = (ULONG)(APTR) "BCM2711 xHCI";
             else if (unit->xhci_ctrl->pci_dev->device == 0x3483)
                 *out = (ULONG)(APTR) "VL805 xHCI";
             else
             {
-                uword_to_hex(unit->xhci_ctrl->pci_dev->device, (UBYTE *)unit->device_str);
+                _SNPrintf((STRPTR)unit->device_str, sizeof(unit->device_str),
+                          (CONST_STRPTR)"%04lx", (ULONG)unit->xhci_ctrl->pci_dev->device);
                 *out = (ULONG)(APTR)unit->device_str;
             }
             filled++;
             break;
-        case TAG_DEVICE_VERSION:
+        case UHA_Version:
             *out = DEVICE_VERSION;
             filled++;
             break;
-        case TAG_DEVICE_REVISION:
+        case UHA_Revision:
             *out = DEVICE_REVISION;
             filled++;
             break;
-        case TAG_DRIVER_DESCRIPTION:
+        case UHA_Description:
             *out = (ULONG)(APTR) "Generic xHCI USB Controller Driver";
             filled++;
             break;
-        case TAG_DRIVER_LICENSE:
+        case UHA_Copyright:
             *out = (ULONG)(APTR) "GPLv2";
             filled++;
             break;
-        case TAG_DRIVER_VERSION:
+        case UHA_DriverVersion:
             // BCD of IO request structure version: support V2
             *out = 0x0200;
             filled++;
             break;
-        case TAG_DRIVER_FEATURES:
-            /* No QUICK_IO: Poseidon's RT-ISO setup path (psdAllocRTIsoHandler)
-             * sends ADDISOHANDLER/STARTRTISO via DoIO on a pipe with a NULL
-             * reply port and relies on QuickIO drivers completing those
-             * requests *synchronously* in BeginIO ("hardware must support
-             * quick IO for this to work").  Our BeginIO always defers to the
-             * unit task, so advertising QUICK_IO hangs RT ISO registration. */
-            *out = DRIVER_FEAT_USB2 | DRIVER_FEAT_USB3 | DRIVER_FEAT_ISOCHRONOUS | DRIVER_FEAT_ISOCHRONOUS_HOOKS;
+        case UHA_Capabilities:
+            /* No QUICK_IO: BeginIO always defers to the unit task, so a
+             * caller relying on synchronous IOF_QUICK completion would hang. */
+            *out = UHCF_USB20 | UHCF_ISO | UHCF_RT_ISO |
+                   UHCF_CONTEXT;  /* lifecycle-op ABI; optional ops via the NSD list */
+            /* USB3 only when USB3-protocol root ports actually exist — the
+             * stack's SuperSpeed root-hub attempt keys on this bit */
+            if (unit->xhci_ctrl && xhci_roothub_has_usb3_ports(unit->xhci_ctrl->root_hub))
+                *out |= UHCF_USB30;
+            filled++;
+            break;
+        case UHA_NumRootHubs:
+            /* context path: protocol-split root hubs (see usbhcd_context.h) */
+            *out = 1;
+            if (unit->xhci_ctrl &&
+                xhci_roothub_has_usb3_ports(unit->xhci_ctrl->root_hub) &&
+                xhci_roothub_has_usb2_ports(unit->xhci_ctrl->root_hub))
+                *out = 2;
+            filled++;
+            break;
+        case UHA_DMAAlignment:
+            /* Cache-line granularity a data buffer must meet to be DMA'd
+             * directly (else xhci_dma_span_map bounces it); lets the stack
+             * place filesystem buffers to avoid the copy. */
+            *out = DMA_ALIGN_MIN;
             filled++;
             break;
         default:
             // Unknown tag: leave untouched
-            KprintfH("[xhci] %s: Unknown tag 0x%lx, skipping\n", __func__, tag->ti_Tag);
+            KprintfT("[xhci] %s: Unknown tag 0x%lx, skipping\n", __func__, tag->ti_Tag);
             break;
         }
-        KprintfH("[xhci] %s: Processed tag 0x%lx\n", __func__, tag->ti_Tag);
+        KprintfT("[xhci] %s: Processed tag 0x%lx\n", __func__, tag->ti_Tag);
     }
 
-    KprintfH("[xhci] %s: Completed UHCMD_QUERYDEVICE\n", __func__);
-    io->req.io_Error = ERR_NO_ERROR;
-    io->actual_length = filled;
+    KprintfT("[xhci] %s: Completed UHCMD_QUERYDEVICE\n", __func__);
+    io->io_Error = UHIOERR_NO_ERROR;
+    q->dq_Actual = filled; /* iouh_Actual: number of tags answered */
     return COMMAND_PROCESSED;
+}
+
+/*
+ * Apply one hub-class port request to every root port, iterating the SS and
+ * USB2 protocol views.  Driver-owned synthetic requests: view-local port
+ * numbers, translated to controller-global at dispatch; the handlers
+ * complete them in place.  Devices on the ports get the shared port
+ * handlers' treatment — notably the xHCI 4.15.1 ring quiesce before a port
+ * suspend and the ring restart on resume.
+ */
+static void roothub_all_ports_request(struct xhci_ctrl *ctrl, u8 bRequest, u16 feature)
+{
+    static const u8 view_ids[] = {RH_VIEW_SS, RH_VIEW_USB2};
+
+    for (u8 i = 0; i < sizeof(view_ids); ++i)
+    {
+        struct xhci_root_hub_view *v = xhci_roothub_view(ctrl->root_hub, view_ids[i]);
+        if (!v)
+            continue;
+
+        for (u8 p = 1; xhci_roothub_view_global_port(v, p) != 0; ++p)
+        {
+            struct xhci_xfer req;
+            memset(&req, 0, sizeof(req));
+            req.setup.usd_RequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
+            req.setup.usd_Request = bRequest;
+            req.setup.usd_Value = le16(feature);
+            req.setup.usd_Index = le16(p);
+
+            xhci_roothub_view_submit_ctrl_request(v, &req);
+        }
+    }
 }
 
 /*
  * reset USB bus
  */
-static inline u32 Do_CMD_DEVICE_RESET(struct USBIORequest *io)
+static inline u32 Do_CMD_DEVICE_RESET(struct IORequest *io)
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_DEVICE_RESET\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
+    KprintfT("[xhci] %s: UHCMD_USBRESET\n", __func__);
 
     /* Issue SET_FEATURE(RESET) on all root hub ports */
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    const u8 maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
-    for (u8 p = 1; p <= maxp; ++p)
-    {
-        struct USBIORequest req;
-        memset(&req, 0, sizeof(req));
-        req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT; /* class=hub, recipient=other */
-        req.setup.bRequest = USB_REQ_SET_FEATURE;
-        req.setup.wValue = le16(USB_PORT_FEAT_RESET);
-        req.setup.wIndex = le16(p);
-        req.setup.wLength = le16(0);
-        req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
+    roothub_all_ports_request(unit->xhci_ctrl, USB_REQ_SET_FEATURE, USB_PORT_FEAT_RESET);
 
-        xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
-    }
-
-    io->req.io_Error = ERR_NO_ERROR;
-    unit->driver_state = DRIVER_STATE_RESETING;
-    io->state = unit->driver_state;
+    io->io_Error = UHIOERR_NO_ERROR;
 
     return COMMAND_PROCESSED;
 }
 
-static u32 Do_CMD_RESET(struct USBIORequest *io)
-{
-    // struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_RESET\n", __func__);
-    // TODO should reset entire controller...
-    return Do_CMD_DEVICE_RESET(io);
-}
-
-/*
- * resume from sleep mode
- */
-static inline u32 Do_CMD_DEVICE_RESUME(struct USBIORequest *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    Kprintf("[xhci] %s: CMD_DEVICE_RESUME - resuming USB\n", __func__);
-
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    const u8 maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
-    for (u8 p = 1; p <= maxp; ++p)
-    {
-        struct USBIORequest req;
-        memset(&req, 0, sizeof(req));
-        req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.setup.bRequest = USB_REQ_CLEAR_FEATURE;
-        req.setup.wValue = le16(USB_PORT_FEAT_SUSPEND);
-        req.setup.wIndex = le16(p);
-        req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
-
-        xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
-    }
-
-    io->req.io_Error = ERR_NO_ERROR;
-    unit->driver_state = DRIVER_STATE_OPERATIONAL;
-    io->state = unit->driver_state;
-    return COMMAND_PROCESSED;
-}
-
-/*
- * enter sleep mode
- */
-static inline u32 Do_CMD_STOP(struct USBIORequest *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    Kprintf("[xhci] %s: CMD_STOP - suspending USB\n", __func__);
-
-    // TODO check if there is a controller level suspend/resume
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    const u8 maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
-    for (u8 p = 1; p <= maxp; ++p)
-    {
-        struct USBIORequest req;
-        memset(&req, 0, sizeof(req));
-        req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.setup.bRequest = USB_REQ_SET_FEATURE;
-        req.setup.wValue = le16(USB_PORT_FEAT_SUSPEND);
-        req.setup.wIndex = le16(p);
-        req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
-
-        xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
-    }
-
-    io->req.io_Error = ERR_NO_ERROR;
-    unit->driver_state = DRIVER_STATE_SUSPENDED;
-    io->state = unit->driver_state;
-    return COMMAND_PROCESSED;
-}
-
-/*
- * enter operational state
- */
-static inline u32 Do_CMD_START(struct USBIORequest *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    Kprintf("[xhci] %s: CMD_START - making USB operational\n", __func__);
-
-    // TODO should likely also resume and perhaps reset the ports
-    /* Ensure port power is on for all ports */
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    const u8 maxp = xhci_roothub_get_num_ports(ctrl->root_hub);
-    for (u8 p = 1; p <= maxp; ++p)
-    {
-        struct USBIORequest req;
-        memset(&req, 0, sizeof(req));
-        req.setup.bmRequestType = USB_DIR_OUT | USB_RT_PORT;
-        req.setup.bRequest = USB_REQ_SET_FEATURE;
-        req.setup.wValue = le16(USB_PORT_FEAT_POWER);
-        req.setup.wIndex = le16(p);
-        req.virtual_address = xhci_roothub_get_address(ctrl->root_hub);
-
-        xhci_roothub_submit_ctrl_request(ctrl->root_hub, &req);
-    }
-
-    io->req.io_Error = ERR_NO_ERROR;
-    unit->driver_state = DRIVER_STATE_OPERATIONAL;
-    io->state = unit->driver_state;
-    return COMMAND_PROCESSED;
-}
-
-/*
- * start a generic transfer
- */
-static inline u32 Do_CMD_XFER(struct USBIORequest *io)
-{
-    io->driver_private_flags = 0;
-    io->driver_private_dma_address = NULL;
-
-    s8 result = xhci_udev_send(io);
-    if (result != ERR_NO_ERROR)
-    {
-        io->req.io_Error = result;
-        return COMMAND_PROCESSED;
-    }
-    return COMMAND_SCHEDULED;
-}
-
-static inline u32 Do_CMD_INTERNAL_ABORT(struct USBIORequest *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    struct xhci_ctrl *ctrl = unit->xhci_ctrl;
-    struct USBIORequest *orig_req = (struct USBIORequest *)io->data_buffer;
-
-    if (ctrl && orig_req)
-        xhci_td_abort_req(orig_req);
-
-    if (unit && unit->memoryPool)
-        pool_free(unit->memoryPool, io);
-
-    return COMMAND_PROCESSED;
-}
-
-static inline u32 Do_CMD_REGISTER_ISO_HANDLER(struct USBIORequest *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_REGISTER_ISO_HANDLER\n", __func__);
-
-    // TODO check if state is operational
-    if (!io->data_buffer)
-        goto badparams;
-
-    struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
-    if (!udev)
-        goto badparams;
-
-    u8 ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
-
-    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-    if (!ep_ctx)
-        goto badparams;
-
-    s8 result = xhci_ep_rt_iso_add_handler(ep_ctx, io);
-
-    io->actual_length = 0;
-    io->req.io_Error = result;
-    return COMMAND_PROCESSED;
-
-badparams:
-    Kprintf("Bad params\n");
-    io->req.io_Error = ERR_BAD_PARAMETERS;
-    return COMMAND_PROCESSED;
-}
-
-static inline u32 Do_CMD_UNREGISTER_ISO_HANDLER(struct USBIORequest *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_UNREGISTER_ISO_HANDLER\n", __func__);
-
-    if (!io->data_buffer)
-        goto badparams;
-
-    struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
-    if (!udev)
-        goto badparams;
-
-    u8 ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
-
-    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-    if (!ep_ctx)
-        goto badparams;
-
-    s8 result = xhci_ep_rt_iso_rem_handler(ep_ctx, io);
-    io->req.io_Error = result;
-    return COMMAND_PROCESSED;
-
-badparams:
-    Kprintf("Bad parameters while removing ISO handler\n");
-    io->req.io_Error = ERR_BAD_PARAMETERS;
-    return COMMAND_PROCESSED;
-}
-
-static inline u32 Do_CMD_STARTRTISO(struct USBIORequest *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_START_REALTIME_ISOCHRONOUS\n", __func__);
-
-    KprintfH("RT ISO start addr=%lu ep=%lu dir=%s len=%lu\n",
-             (ULONG)io->virtual_address,
-             (ULONG)(io->endpoint & 0x0F),
-             (io->direction == DIRECTION_IN) ? "IN" : "OUT",
-             (ULONG)io->data_buffer_length);
-    struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
-    if (!udev)
-        goto badparams;
-
-    u8 ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
-    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-    if (!ep_ctx)
-        goto badparams;
-
-    s8 result = xhci_ep_rt_iso_start(ep_ctx);
-
-    io->actual_length = 0;
-    io->req.io_Error = result;
-    return COMMAND_PROCESSED;
-
-badparams:
-    Kprintf("Bad params\n");
-    io->req.io_Error = ERR_BAD_PARAMETERS;
-    return COMMAND_PROCESSED;
-}
-
-static inline u32 Do_CMD_STOPRTISO(struct USBIORequest *io)
-{
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: CMD_STOP_REALTIME_ISOCHRONOUS\n", __func__);
-
-    KprintfH("RT ISO stop requested addr=%lu ep=%lu\n",
-             (ULONG)io->virtual_address, (ULONG)(io->endpoint & 0x0F));
-    struct usb_device *udev = xhci_udev_get(unit, io->virtual_address);
-    if (!udev)
-        goto badparams;
-
-    u8 ep_index = xhci_ep_index_from_parts(io->endpoint, io->direction);
-    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-    if (!ep_ctx)
-        goto badparams;
-
-    s8 result = xhci_ep_rt_iso_stop(ep_ctx, io);
-    io->req.io_Error = result;
-    if (result != ERR_NO_ERROR)
-    {
-        io->actual_length = 0;
-        return COMMAND_PROCESSED;
-    }
-
-    return COMMAND_SCHEDULED;
-
-badparams:
-    Kprintf("Bad params\n");
-    io->req.io_Error = ERR_BAD_PARAMETERS;
-    return COMMAND_PROCESSED;
-}
-
-void ProcessCommand(struct USBIORequest *io)
+void ProcessCommand(struct IORequest *io)
 {
     u32 complete = COMMAND_SCHEDULED;
 
@@ -519,88 +344,58 @@ void ProcessCommand(struct USBIORequest *io)
         Only NSCMD_DEVICEQUERY can use standard sized request. All other must be of
         size IORequest
     */
-    if (io->req.io_Message.mn_Length < sizeof(struct IORequest) &&
-        io->req.io_Command != NSCMD_DEVICEQUERY)
+    if (io->io_Message.mn_Length < sizeof(struct IORequest) &&
+        io->io_Command != NSCMD_DEVICEQUERY)
     {
-        io->req.io_Error = IOERR_BADLENGTH;
+        io->io_Error = IOERR_BADLENGTH;
         complete = COMMAND_PROCESSED;
+    }
+    else if (UHCD_IS_CTXCMD(io->io_Command))
+    {
+        /* The whole context-op block (NSCMD_USBHCD_BASE + 0x00..0x1f) routes
+         * to the ctx-ops descriptor table; unimplemented slots (RESET_DEVICE,
+         * reserved ops) reply IOERR_NOCMD there, matching their absence from
+         * the NSD list. */
+        io->io_Error = UHIOERR_NO_ERROR;
+        complete = xhci_ctxops_process((struct IOStdReq *)io);
     }
     else
     {
-        io->req.io_Error = ERR_NO_ERROR;
+        io->io_Error = UHIOERR_NO_ERROR;
 
-        switch (io->req.io_Command)
+        switch (io->io_Command)
         {
         case CMD_FLUSH:
             complete = Do_CMD_FLUSH(io);
             break;
 
-        case CMD_RESET:
-            complete = Do_CMD_RESET(io);
-            break;
-
-        case CMD_DEVICE_QUERY:
+        case UHCMD_QUERYDEVICE:
             complete = Do_CMD_DEVICE_QUERY(io);
             break;
 
-        case CMD_DEVICE_RESET:
+        case UHCMD_USBRESET:
             complete = Do_CMD_DEVICE_RESET(io);
             break;
 
-        case CMD_DEVICE_RESUME:
-            complete = Do_CMD_DEVICE_RESUME(io);
-            break;
-
-        case CMD_STOP:
-            complete = Do_CMD_STOP(io);
-            break;
-
-        case CMD_START:
-            complete = Do_CMD_START(io);
-            break;
-
-        case CMD_REQUEST_CONTROL:
-        case CMD_REQUEST_ISOCHRONOUS:
-        case CMD_REQUEST_INTERRUPT:
-        case CMD_REQUEST_BULK:
-            complete = Do_CMD_XFER(io);
-            break;
-
-        case CMD_INTERNAL_ABORT_REQUEST:
-            complete = Do_CMD_INTERNAL_ABORT(io);
+        case CMD_INTERNAL_RH_SUBMIT:
+            complete = xhci_direct_rh_submit(io);
             break;
 
         case NSCMD_DEVICEQUERY:
             complete = Do_NSCMD_DEVICEQUERY((struct IOStdReq *)io);
             break;
 
-        case CMD_REGISTER_ISOCHRONOUS_HOOKS:
-            complete = Do_CMD_REGISTER_ISO_HANDLER(io);
-            break;
-
-        case CMD_UNREGISTER_ISOCHRONOUS_HOOKS:
-            complete = Do_CMD_UNREGISTER_ISO_HANDLER(io);
-            break;
-
-        case CMD_START_REALTIME_ISOCHRONOUS:
-            complete = Do_CMD_STARTRTISO(io);
-            break;
-
-        case CMD_STOP_REALTIME_ISOCHRONOUS:
-            complete = Do_CMD_STOPRTISO(io);
-            break;
-
         default:
-            Kprintf("[xhci] %s: Unsupported command %lu\n", __func__, (ULONG)io->req.io_Command);
-            io->req.io_Error = IOERR_NOCMD;
+            Kprintf("[xhci] %s: Unsupported command %lu\n", __func__, (ULONG)io->io_Command);
+            io->io_Error = IOERR_NOCMD;
             complete = COMMAND_PROCESSED;
             break;
         }
     }
 
-    // If command is complete and not quick, reply it now
-    if (complete == COMMAND_PROCESSED && !(io->req.io_Flags & IOF_QUICK))
-    {
+    /* Reply completed commands now.  IOF_QUICK never survives to this point:
+     * beginIO strips it from every client request, and driver-internal
+     * messages (CMD_INTERNAL_RH_SUBMIT) return COMMAND_SCHEDULED. */
+    if (complete == COMMAND_PROCESSED)
         ReplyMsg((struct Message *)io);
-    }
 }

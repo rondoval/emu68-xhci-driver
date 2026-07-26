@@ -4,7 +4,7 @@
 #define __XHCI_RING_H
 
 #include <exec/types.h>
-#include <devices/hcd_api.h>
+#include <types.h>
 #include <bits.h>
 #include <byteorder.h>
 
@@ -21,12 +21,8 @@ struct xhci_transfer_event
 /* bits 0:23 */
 #define EVENT_TRB_LEN(p) ((p) & 0xffffffU)
 
-/** Transfer Event bit fields **/
-#define TRB_TO_EP_ID(p) (((p) >> 16) & 0x1fU)
-
 /* Completion Code - only applicable for some types of TRBs */
 #define COMP_CODE_MASK (0xffU << 24)
-#define COMP_CODE_SHIFT (24)
 #define GET_COMP_CODE(p) (((p) & COMP_CODE_MASK) >> 24)
 
 typedef enum
@@ -108,20 +104,11 @@ typedef enum
 /* bits 16:23 are the virtual function ID */
 /* bits 24:31 are the slot ID */
 #define TRB_TO_SLOT_ID(p) (((p) & (0xffU << 24)) >> 24)
-#define TRB_TO_SLOT_ID_SHIFT (24)
-#define TRB_TO_SLOT_ID_MASK (0xffU << TRB_TO_SLOT_ID_SHIFT)
 #define SLOT_ID_FOR_TRB(p) (((u32)(p) & 0xffU) << 24)
-#define SLOT_ID_FOR_TRB_MASK (0xffU)
-#define SLOT_ID_FOR_TRB_SHIFT (24)
 
 /* Stop Endpoint TRB - ep_index to endpoint ID for this TRB */
 #define TRB_TO_EP_INDEX(p) (u8)((((p) & (0x1fU << 16)) >> 16) - 1U)
-#define TRB_TO_ENDPOINT(p) ((((p) & (0x1fU << 16)) >> 17))
 #define EP_ID_FOR_TRB(p) ((((u32)(p) + 1U) & 0x1fU) << 16)
-
-#define SUSPEND_PORT_FOR_TRB(p) (((u32)(p) & 1U) << 23)
-#define TRB_TO_SUSPEND_PORT(p) (((p) & BIT(23)) >> 23)
-#define LAST_EP_INDEX 30
 
 /* Set TR Dequeue Pointer command TRB fields */
 #define TRB_TO_STREAM_ID(p) ((((p) & (0xffffU << 16)) >> 16))
@@ -130,8 +117,6 @@ typedef enum
 /* Port Status Change Event TRB fields */
 /* Port ID - bits 31:24 */
 #define GET_PORT_ID(p) (((p) & (0xffU << 24)) >> 24)
-#define PORT_ID_SHIFT (24)
-#define PORT_ID_MASK (0xffU << PORT_ID_SHIFT)
 
 /* Normal TRB fields */
 /* transfer_len bitmasks - bits 0:16 */
@@ -140,30 +125,19 @@ typedef enum
 #define TRB_TD_SIZE(p) (((p) > 31U ? 31U : (u32)(p)) << 17)
 /* Interrupter Target - which MSI-X vector to target the completion event at */
 #define TRB_INTR_TARGET(p) (((p) & 0x3ffU) << 22)
-#define GET_INTR_TARGET(p) (((p) >> 22) & 0x3ff)
 #define TRB_TBC(p) (((p) & 0x3) << 7)
 #define TRB_TLBPC(p) (((p) & 0xf) << 16)
 
 /* Cycle bit - indicates TRB ownership by HC or HCD */
 #define TRB_CYCLE BIT(0)
-/*
- * Force next event data TRB to be evaluated before task switch.
- * Used to pass OS data back after a TD completes.
- */
-#define TRB_ENT BIT(1)
 /* Interrupt on short packet */
 #define TRB_ISP BIT(2)
-/* Set PCIe no snoop attribute */
-#define TRB_NO_SNOOP BIT(3)
 /* Chain multiple TRBs into a TD */
 #define TRB_CHAIN BIT(4)
 /* Interrupt on completion */
 #define TRB_IOC BIT(5)
 /* The buffer pointer contains immediate data */
 #define TRB_IDT BIT(6)
-
-/* Block Event Interrupt */
-#define TRB_BEI BIT(9)
 
 /* Control transfer TRB specific fields */
 #define TRB_DIR_IN BIT(16)
@@ -173,7 +147,6 @@ typedef enum
 
 /* Isochronous TRB specific fields */
 #define TRB_FRAME_ID(p) (((u32)(p) & 0x7ffU) << 20)
-#define GET_TRB_FRAME_ID(p) ((u16)(((p) >> 20) & 0x7ffU))
 #define TRB_SIA BIT(31)
 
 struct xhci_link_trb
@@ -291,12 +264,9 @@ typedef enum
 	TRB_NEC_GET_FW, /* 49 */
 } trb_type;
 
-#define TRB_TYPE_LINK(x) (((x) & TRB_TYPE_BITMASK) == TRB_TYPE(TRB_LINK))
-/* Above, but for __le32 types -- can avoid work by swapping constants: */
+/* Link-TRB test on a raw __le32 control word -- avoids work by swapping constants: */
 #define TRB_TYPE_LINK_LE32(x) (((x) & le32(TRB_TYPE_BITMASK)) == \
 							   le32(TRB_TYPE(TRB_LINK)))
-#define TRB_TYPE_NOOP_LE32(x) (((x) & le32(TRB_TYPE_BITMASK)) == \
-							   le32(TRB_TYPE(TRB_TR_NOOP)))
 
 struct xhci_ctrl;
 struct xhci_erst;
@@ -310,41 +280,22 @@ void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring);
 
 BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_segs);
 
-/* A mapped DMA buffer: either direct (bounce == NULL, cache-maintained) or
- * bounced through one of the controller's bounce slabs. */
-struct xhci_dma_span
-{
-	APTR cpu;        /* caller's buffer */
-	u32 length;
-	APTR bounce;     /* bounce buffer; NULL when mapped directly */
-	u8 bounce_class; /* REQ_BOUNCE_CLASS_* when bounced */
-};
+/* TD submission (DMA mapping, TRB emission, doorbells) lives in
+ * <xhci/xhci-submit.h>; this header is the ring/segment mechanics only. */
 
-void xhci_dma_span_unmap(struct xhci_ctrl *ctrl, struct xhci_dma_span *span, BOOL copy_back);
-void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct USBIORequest *req, BOOL copy);
+void xhci_ring_set_stream_id(struct xhci_ring *ring, u16 stream_id);
 
-s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell);
-
-/* RT ISO TD: no request object - the TD itself carries the payload.
- * staging_in marks an IN buffer owned by the endpoint's staging slab
- * (freed on completion/teardown). */
-s8 xhci_ring_enqueue_rt_td(struct usb_device *udev, u8 ep_index, APTR buffer, u32 length,
-                           u16 frame, u16 dir, BOOL staging_in, BOOL defer_doorbell);
-BOOL xhci_ring_has_room(struct ep_context *ep_ctx, u32 needed_trbs);
-void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
-void xhci_ring_kick_ep(struct usb_device *udev, u8 ep_index);
-
-void xhci_ring_acknowledge_event(struct xhci_ctrl *ctrl);
+void xhci_ring_consume_event(struct xhci_ctrl *ctrl);
+void xhci_ring_ack_events(struct xhci_ctrl *ctrl);
 union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring);
 
 u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring);
 u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr);
 
-u32 xhci_ring_get_max_packet_size(struct xhci_ring *ring);
 void xhci_ring_set_max_packet_size(struct xhci_ring *ring, u32 max_packet_size);
 void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, u32 trb_count, u32 start_index);
 
-dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u8 ep_index, trb_type cmd);
+dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u8 ep_index, u16 stream_id, trb_type cmd);
 void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct xhci_intr_reg *ir_set);
 
 #endif /* __XHCI_RING_H */

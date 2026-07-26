@@ -24,12 +24,19 @@
 #include <proto/exec.h>
 #endif
 
+#include <exec/semaphores.h>
+
 #include <bits.h>
+#include <cache_ops.h>
 #include <iomem.h>
+#include <memory.h>
+#include <perf.h>
 #include <slab.h>
 #include <dma_mem.h>
-#include <devices/hcd_api.h>
-#include <xhci/xhci-udev.h>
+#include <drv_timer.h>
+#include <devices/usbhcd_context.h>
+
+struct usb_device;
 
 struct pci_dev;
 
@@ -114,6 +121,20 @@ struct xhci_scratchpad
 #define XHCI_QUIRK_TRB_OVERFETCH BIT(0) /* VL805: HC prefetches past segment end; pad ring segment allocations */
 #define XHCI_QUIRK_SS_BULK_OUT   BIT(1) /* VL805: SS bulk OUT bursts corrupt for mass-storage behind a hub */
 
+/* Perf slots (emu68-common <perf.h>), reported as [xhci] every ~2 s from the
+ * unit-task tick (XHCI_PROF_REPORT_TICKS).  Order must match
+ * xhci_perf_names[] in xhci.c.  xfer_lock wait/hold rides the lock_prof
+ * instance alongside. */
+enum XhciProfSlot
+{
+	XP_SUBMIT_MAP,  /* DMA map: reachability test, bounce alloc+copy, payload clean */
+	XP_SUBMIT_EMIT, /* ring reserve + TRB emission + TD bookkeeping + giveback */
+	XP_EVT_DRAIN,   /* whole xhci_process_event_trb drain */
+	XP_EVT_HOOK,    /* done-hook CallHookPkt (the stack's completion work) */
+	XP_IRQ_TO_TASK, /* ISR signal -> unit-task pickup (IMOD + scheduling) */
+	XP_SLOT_COUNT
+};
+
 struct xhci_ctrl
 {
 	struct xhci_hccr *hccr; /* R/O registers, not need for volatile */
@@ -128,6 +149,7 @@ struct xhci_ctrl
 	struct xhci_scratchpad *scratchpad;
 	struct xhci_root_hub *root_hub;
 	u16 hci_version;
+	u16 ctx_size;		  /* CTX_SIZE(HCCPARAMS1) cached at register: 32 or 64 bytes */
 	u32 quirks;			  /* XHCI_QUIRK_* bitmask, set at probe */
 	u32 vl805_fw_version; /* VL805 MCU firmware version (PCI cfg 0x50); 0 for other controllers */
 	BOOL cfc_supported;	  /* HCC_CFC: per-TRB Frame ID is reliable */
@@ -140,7 +162,8 @@ struct xhci_ctrl
 	struct dma_mem_ctx dma_ctx; /* Emu68 (DMA-reachable) RAM regions; backs dmaPool */
 	struct dma_pool *dmaPool;	/* region-restricted DMA pool (Emu68 RAM) for DMA buffers */
 	APTR metaPool;				/* ordinary Exec pool for CPU-only metadata */
-#define XHCI_TD_SMALL_TRBS 8	   /* trb_addr_slab covers up to this many TRBs */
+#define XHCI_TD_SMALL_TRBS 34	   /* trb_addr_slab covers up to this many TRBs
+                                    * (a 2 MiB TD = 33 data TRBs stays off the Exec pool) */
 #define XHCI_BOUNCE_SMALL_SIZE 256 /* covers RT ISO 192 + tiny ctrl/desc */
 #define XHCI_BOUNCE_SMALL_CAP 256
 #define XHCI_BOUNCE_MED_SIZE (32 * 1024) /* covers ≤32KiB bulk reads */
@@ -148,6 +171,7 @@ struct xhci_ctrl
 #define XHCI_BOUNCE_LARGE_SIZE (2 * 1024 * 1024) /* mass storage 2MB transfers */
 #define XHCI_BOUNCE_LARGE_CAP 2					 /* Poseidon 1 bulk/EP */
 	struct slab_cache td_slab;					 /* one struct xhci_td per slot */
+	struct slab_cache xfer_slab;				 /* one struct xhci_xfer per slot (direct + internal xfers) */
 	struct slab_cache trb_addr_slab;			 /* XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t) per slot */
 	struct slab_cache seg_slab;					 /* one ring segment (seg_size bytes, self-aligned) per slot */
 	struct slab_cache bounce_small;				 /* XHCI_BOUNCE_SMALL_SIZE bytes per slot */
@@ -155,28 +179,64 @@ struct xhci_ctrl
 	struct slab_cache bounce_large;				 /* XHCI_BOUNCE_LARGE_SIZE bytes per slot */
 	struct Library *utilityBase;
 	struct pci_dev *pci_dev;
-	struct usb_device *devices_by_virtual_address[USB_MAX_ADDRESS + 1];
 	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];
-
-	struct usb_device *pending_parent; /* parent hub pending for next default-address child */
-	u8 pending_parent_port;
-	enum usb_device_speed pending_parent_speed;
 
 	struct MinList pending_commands; /* list of pending commands */
 	BOOL cmd_abort_pending;			 /* TRUE while CA bit is asserted; doorbell suppressed */
+
+	/* Transfer-plane lock: the unit task holds it around each of its work
+	 * blocks (event processing, command dispatch, timeout scans) and the
+	 * caller-context direct entries (xhci_direct_submit/ctrl_submit/abort)
+	 * hold it around theirs, so every ring/TD/pool touch is serialized.
+	 * Exec semaphores nest within one task, so lock-held paths may call each
+	 * other freely. */
+	struct SignalSemaphore xfer_lock;
+
+	/* IMAN with IP/IE masked out, captured once at interrupt start: the ISR
+	 * and the rearm write constants instead of read-modify-write over PCIe
+	 * (IMAN's reserved bits are RsvdP; IP is W1C). */
+	u32 iman_base;
+
+	/* The unit task's persistent sleep timer for the root-hub port waits
+	 * (rh_sleep_unlocked).  MsgPorts are task-bound, so the unit task alone
+	 * opens and closes it — every port handler runs on the unit task.  req ==
+	 * NULL (timer.device unavailable) degrades the waits to hot polls. */
+	struct drv_timer sleep_timer;
+
+	/* The direct transfer path (xhci-direct.c): the stack's completion hook
+	 * from NSCMD_USB_ATTACH and the per-create token generation counter. */
+	struct Hook *stack_done_hook;
+	APTR stack_done_obj;
+	u32 token_gen_counter;
+
+	/* Perf instance (emu68-common <perf.h>): probes write under PROFILE;
+	 * storage is unconditional so all tiers share one struct layout.  The
+	 * unit-task tick reports both instances every ~2 s. */
+	struct perf_counter perfSlots[XP_SLOT_COUNT];
+	struct perf perf;
+	struct lock_prof lockProf; /* xfer_lock wait/hold (outermost only) */
+	u32 profTicks;             /* tick divider for the report cadence */
+	u32 irq_t0;                /* ISR timestamp feeding XP_IRQ_TO_TASK */
 };
 
-/* Pre-DMA flush for a buffer.  @flags is passed straight to CachePreDMA: 0 for a
- * plain clean+invalidate, or DMA_ReadFromRAM for an OUT buffer (device reads RAM)
- * which only needs a clean. */
-inline void xhci_flush_cache(void *addr, ULONG len, ULONG flags)
+/* DMA cache maintenance comes straight from emu68-common's cache_ops.h
+ * (cache_pre_dma / cache_post_dma / DMAF_NoSync), included above. */
+
+/* A TD's TRB-address bookkeeping array: slab-backed for small TDs (the common
+ * case), metaPool otherwise.  Alloc and free must agree on the size class. */
+static inline dma_addr_t *xhci_td_trb_addrs_alloc(struct xhci_ctrl *ctrl, u32 num_trbs)
 {
-	CachePreDMA((APTR)addr, &len, flags);
+	if (likely(num_trbs <= XHCI_TD_SMALL_TRBS))
+		return slab_alloc(&ctrl->trb_addr_slab);
+	return pool_alloc(ctrl->metaPool, num_trbs * sizeof(dma_addr_t));
 }
 
-inline void xhci_inval_cache(void *addr, ULONG len)
+static inline void xhci_td_trb_addrs_free(struct xhci_ctrl *ctrl, dma_addr_t *trb_addrs, u32 num_trbs)
 {
-	CachePostDMA((APTR)addr, &len, 0);
+	if (likely(num_trbs <= XHCI_TD_SMALL_TRBS))
+		slab_free(&ctrl->trb_addr_slab, trb_addrs);
+	else
+		pool_free(ctrl->metaPool, trb_addrs);
 }
 
 static inline void *xhci_malloc_page_bounded(struct xhci_ctrl *ctrl, u32 size, u32 align)
@@ -192,7 +252,7 @@ static inline void *xhci_malloc_page_bounded(struct xhci_ctrl *ctrl, u32 size, u
 
 	void *ptr = dma_zalloc(ctrl->dmaPool, eff, size);
 	if (ptr)
-		xhci_flush_cache(ptr, size, 0);
+		cache_pre_dma(ptr, size, 0);
 	return ptr;
 }
 

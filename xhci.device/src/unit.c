@@ -25,12 +25,12 @@
 #define __NOLIBBASE__
 #include <devtree.h>
 
-#include <devices/hcd_api.h>
 #include <libraries/pci_constants.h>
 #include <libraries/openpci.h>
 #include <libraries/pcitags.h>
 #include <utility/tagitem.h>
 #include <xhci/xhci.h>
+#include <xhci/xhci-direct.h>
 #include <config.h>
 
 static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
@@ -152,12 +152,12 @@ static s32 pcie_xhci_init(struct Library *pcielibBase, struct pci_dev *pd,
 		Kprintf("[xhci] %s: BAR0 not mapped\n", __func__);
 		return -EIO;
 	}
-	KprintfH("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
+	KprintfT("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
 
 	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr +
 								 HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
-	KprintfH("[xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
+	KprintfT("[xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
 			__func__, *hccr, *hcor, (ULONG)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	pci_set_master(pd);
@@ -173,7 +173,7 @@ static s32 unit_init_pcie_xhci(LONG unitNumber, struct pci_dev **ret_pci_dev,
 	if (xhci_open_pcie_library(device) != 0)
 	{
 		Kprintf("[xhci] %s: No PCI library available for unit %ld\n", __func__, unitNumber);
-		return ERR_BAD_PARAMETERS;
+		return UHIOERR_BADPARAMS;
 	}
 
 	struct Library *pcielibBase = device->pcieBase;
@@ -190,19 +190,19 @@ static s32 unit_init_pcie_xhci(LONG unitNumber, struct pci_dev **ret_pci_dev,
 	if (!pd)
 	{
 		Kprintf("[xhci] %s: Failed to find XHCI PCI device (unit %ld)\n", __func__, unitNumber);
-		return ERR_BAD_PARAMETERS;
+		return UHIOERR_BADPARAMS;
 	}
 
 	if (!pcie_xhci_is_supported(pcielibBase, pd))
 	{
 		Kprintf("[xhci] %s: Unsupported XHCI controller\n", __func__);
-		return ERR_BAD_PARAMETERS;
+		return UHIOERR_BADPARAMS;
 	}
 
 	if (!SetBoardAttrs(pd, PRM_BoardOwner, (ULONG)FindTask(NULL), TAG_DONE))
 	{
 		Kprintf("[xhci] %s: PCI device already owned by another task\n", __func__);
-		return ERR_BAD_PARAMETERS;
+		return UHIOERR_BADPARAMS;
 	}
 
 	s32 result = pcie_xhci_init(pcielibBase, pd, ret_hccr, ret_hcor);
@@ -224,7 +224,7 @@ static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_dev *pci_dev,
 	if (!xhci_ctrl)
 	{
 		Kprintf("[xhci] %s: Failed to allocate memory for xhci_ctrl\n", __func__);
-		return ERR_ALLOC_ERROR;
+		return UHIOERR_OUTOFMEMORY;
 	}
 
 	xhci_ctrl->utilityBase = unit->device->utilityBase;
@@ -241,7 +241,7 @@ static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_dev *pci_dev,
 	unit->xhci_ctrl = xhci_ctrl;
 
 	result = UnitTaskStart(unit);
-	if (result != ERR_NO_ERROR)
+	if (result != UHIOERR_NO_ERROR)
 	{
 		Kprintf("[xhci] %s: Failed to start unit task: %ld\n", __func__, result);
 		goto err_deregister;
@@ -254,7 +254,7 @@ static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_dev *pci_dev,
 		goto err_shutdown_irq;
 	}
 
-	return ERR_NO_ERROR;
+	return UHIOERR_NO_ERROR;
 
 err_shutdown_irq:
 	xhci_int_shutdown(unit);
@@ -266,26 +266,18 @@ err_free_ctrl:
 	return result;
 }
 
-s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
+s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber)
 {
-	KprintfH("[xhci] %s: Opening unit %ld with flags %lx\n", __func__, unitNumber, flags);
-	if (unit->unit.unit_OpenCnt > 0)
-	{
-		unit->unit.unit_OpenCnt++;
-		Kprintf("[xhci] %s: Unit opened successfully, current open count: %lu\n", __func__, (ULONG)unit->unit.unit_OpenCnt);
-		return ERR_NO_ERROR;
-	}
-
-	unit->flags = flags;
+	/* openLib enforces exclusive access; a unit arrives here only unopened. */
+	KprintfT("[xhci] %s: Opening unit %ld\n", __func__, unitNumber);
 	unit->unit.unit_OpenCnt = 1;
 	unit->unitNumber = unitNumber;
-	unit->driver_state = DRIVER_STATE_OPERATIONAL;
 
 	unit->memoryPool = CreatePool(MEMF_FAST | MEMF_PUBLIC, 16384, 8192);
 	if (unit->memoryPool == NULL)
 	{
 		Kprintf("[xhci] %s: Failed to create memory pool\n", __func__);
-		return ERR_ALLOC_ERROR;
+		return UHIOERR_OUTOFMEMORY;
 	}
 
 	struct xhci_hccr *hccr;
@@ -294,14 +286,14 @@ s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 	s32 result = (unitNumber == 0)
 		? unit_init_onboard_xhci(unit, &hccr, &hcor)
 		: unit_init_pcie_xhci(unitNumber, &pci_dev, &hccr, &hcor, unit->device);
-	if (result != ERR_NO_ERROR)
+	if (result != UHIOERR_NO_ERROR)
 		goto err_del_pool;
 
 	result = unit_attach_xhci(unit, pci_dev, hccr, hcor);
-	if (result != ERR_NO_ERROR)
+	if (result != UHIOERR_NO_ERROR)
 		goto err_del_pool;
 
-	return ERR_NO_ERROR;
+	return UHIOERR_NO_ERROR;
 
 err_del_pool:
 	DeletePool(unit->memoryPool);
@@ -321,6 +313,7 @@ s32 UnitClose(struct XHCIUnit *unit)
 		if (pcielibBase && unit->xhci_ctrl->pci_dev)
 			SetBoardAttrs(unit->xhci_ctrl->pci_dev, PRM_BoardOwner, 0UL, TAG_DONE);
 		UnitTaskStop(unit);
+		xhci_direct_detach(unit); /* no direct call may land in a dying controller */
 		xhci_int_shutdown(unit);
 		xhci_deregister(unit->xhci_ctrl);
 		FreeMem(unit->xhci_ctrl, sizeof(*unit->xhci_ctrl));

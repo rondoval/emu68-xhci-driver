@@ -17,9 +17,11 @@
 #include <exec/errors.h>
 #include <dos/dosextens.h>
 
-#include <devices/hcd_api.h>
 
 #include <libraries/openpci.h>
+
+#include <devices/newstyle.h>
+#include <devices/usbhcd_context.h>
 
 #include <device.h>
 #include <config.h>
@@ -84,12 +86,12 @@ static const APTR initTable[4] = {
     NULL,
     (APTR)initFunction};
 
-void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"), ULONG flags asm("d1"), struct XHCIDevice *base asm("a6"));
-ULONG closeLib(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+void openLib(struct IORequest *io asm("a1"), LONG unitNumber asm("d0"), ULONG flags asm("d1"), struct XHCIDevice *base asm("a6"));
+ULONG closeLib(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
 ULONG expungeLib(struct XHCIDevice *base asm("a6"));
 APTR extFunc(struct XHCIDevice *base asm("a6"));
-void beginIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
-LONG abortIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+void beginIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+LONG abortIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
 
 static const APTR funcTable[] = {
     (APTR)openLib,
@@ -190,7 +192,7 @@ static void xhci_reset_prepare(APTR user)
 APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *_SysBase asm("a6"))
 {
     (void)_SysBase;
-    KprintfH("[xhci] %s: Initializing device\n", __func__);
+    KprintfT("[xhci] %s: Initializing device\n", __func__);
     base->segList = segList;
     base->device.dd_Library.lib_Revision = DEVICE_REVISION;
     _NewMinList(&base->units);
@@ -205,18 +207,18 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
     return base;
 }
 
-void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
-             ULONG flags asm("d1"), struct XHCIDevice *base asm("a6"))
+void openLib(struct IORequest *io asm("a1"), LONG unitNumber asm("d0"),
+             ULONG flags asm("d1") __attribute__((unused)), struct XHCIDevice *base asm("a6"))
 {
     BOOL firstOpen = FALSE;
     BOOL createdUnit = FALSE;
 
-    KprintfH("[xhci] %s: Opening device with unit number %ld and flags %lx\n", __func__, unitNumber, flags);
+    KprintfT("[xhci] %s: Opening device with unit number %ld and flags %lx\n", __func__, unitNumber, flags);
 
-    if (io->req.io_Message.mn_Length < sizeof(struct IOStdReq))
+    if (io->io_Message.mn_Length < sizeof(struct IOStdReq))
     {
-        Kprintf("[xhci] %s: Invalid request length %lu\n", __func__, (ULONG)io->req.io_Message.mn_Length);
-        io->req.io_Error = IOERR_OPENFAIL;
+        Kprintf("[xhci] %s: Invalid request length %lu\n", __func__, (ULONG)io->io_Message.mn_Length);
+        io->io_Error = IOERR_OPENFAIL;
         return;
     }
 
@@ -234,12 +236,12 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
 
     if (unit == NULL)
     {
-        KprintfH("[xhci] %s: Allocating unit structure\n", __func__);
+        KprintfT("[xhci] %s: Allocating unit structure\n", __func__);
         unit = AllocMem(sizeof(struct XHCIUnit), MEMF_FAST | MEMF_PUBLIC | MEMF_CLEAR);
         if (unit == NULL)
         {
             Kprintf("[xhci]%s: Failed to allocate unit\n", __func__);
-            io->req.io_Error = IOERR_OPENFAIL;
+            io->io_Error = IOERR_OPENFAIL;
             return;
         }
         unit->device = base;
@@ -249,58 +251,54 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
 
     if (unit->unit.unit_OpenCnt > 0)
     {
-        KprintfH("[xhci] %s: Unit is already open, we only support exclusive access\n", __func__);
-        io->req.io_Error = IOERR_UNITBUSY;
+        KprintfT("[xhci] %s: Unit is already open, we only support exclusive access\n", __func__);
+        io->io_Error = IOERR_UNITBUSY;
         return;
     }
 
     firstOpen = (base->device.dd_Library.lib_OpenCnt == 0);
     if (firstOpen && xhci_open_libraries(base) != 0)
-    {
-        io->req.io_Error = IOERR_OPENFAIL;
-        if (createdUnit)
-        {
-            RemoveMinNode((struct MinNode *)unit);
-            FreeMem(unit, sizeof(struct XHCIUnit));
-        }
-        return;
-    }
+        goto err_free_unit;
 
-    int result = UnitOpen(unit, unitNumber, (LONG)flags);
-
-    if (result == ERR_NO_ERROR)
-    {
-        KprintfH("[xhci] %s: Unit opened successfully\n", __func__);
-        io->req.io_Unit = (struct Unit *)unit;
-        base->device.dd_Library.lib_OpenCnt++;
-        base->device.dd_Library.lib_Flags &= (UBYTE)~LIBF_DELEXP;
-        io->req.io_Message.mn_Node.ln_Type = NT_REPLYMSG;
-    }
-    else
+    int result = UnitOpen(unit, unitNumber);
+    if (result != UHIOERR_NO_ERROR)
     {
         Kprintf("[xhci] %s: Failed to open unit, error code %ld\n", __func__, result);
-        io->req.io_Error = IOERR_OPENFAIL;
-
-        RemoveMinNode((struct MinNode *)unit);
-        FreeMem(unit, sizeof(struct XHCIUnit));
-
-        if (firstOpen)
-            xhci_close_libraries(base);
+        goto err_close_libs;
     }
+
+    KprintfT("[xhci] %s: Unit opened successfully\n", __func__);
+    io->io_Unit = (struct Unit *)unit;
+    base->device.dd_Library.lib_OpenCnt++;
+    base->device.dd_Library.lib_Flags &= (UBYTE)~LIBF_DELEXP;
+    io->io_Message.mn_Node.ln_Type = NT_REPLYMSG;
 
     /* In contrast to normal library there is no need to return anything */
     return;
+
+err_close_libs:
+    if (firstOpen)
+        xhci_close_libraries(base);
+err_free_unit:
+    io->io_Error = IOERR_OPENFAIL;
+    /* closeLib frees a unit on its last close, so a unit that failed to open
+     * here can only be the one created above. */
+    if (createdUnit)
+    {
+        RemoveMinNode((struct MinNode *)unit);
+        FreeMem(unit, sizeof(struct XHCIUnit));
+    }
 }
 
-ULONG closeLib(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"))
+ULONG closeLib(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"))
 {
-    struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
-    KprintfH("[xhci] %s: Closing device\n", __func__);
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
+    KprintfT("[xhci] %s: Closing device\n", __func__);
 
     int result = UnitClose(unit);
     if (result == 0) // last user of Unit disappeared
     {
-        KprintfH("[xhci] %s: Unit closed successfully, freeing resources\n", __func__);
+        KprintfT("[xhci] %s: Unit closed successfully, freeing resources\n", __func__);
         RemoveMinNode((struct MinNode *)unit);
         FreeMem(unit, sizeof(struct XHCIUnit));
     }
@@ -321,10 +319,10 @@ ULONG closeLib(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a
 
 ULONG expungeLib(struct XHCIDevice *base asm("a6"))
 {
-    KprintfH("[xhci] %s: Expunging device\n", __func__);
+    KprintfT("[xhci] %s: Expunging device\n", __func__);
     if (base->device.dd_Library.lib_OpenCnt > 0)
     {
-        KprintfH("[xhci] %s: Device is still open, cannot expunge\n", __func__);
+        KprintfT("[xhci] %s: Device is still open, cannot expunge\n", __func__);
         base->device.dd_Library.lib_Flags |= LIBF_DELEXP;
         return 0;
     }
@@ -334,7 +332,7 @@ ULONG expungeLib(struct XHCIDevice *base asm("a6"))
          * stub — then the code must stay resident. */
         if (!reset_guard_remove(&base->resetGuard))
         {
-            KprintfH("[xhci] %s: reset guard not removable, staying resident\n", __func__);
+            KprintfT("[xhci] %s: reset guard not removable, staying resident\n", __func__);
             return 0;
         }
 
@@ -357,4 +355,77 @@ ULONG expungeLib(struct XHCIDevice *base asm("a6"))
 APTR extFunc(struct XHCIDevice *base asm("a6"))
 {
     return base;
+}
+
+/* Transfers are direct calls through the entries exchanged at NSCMD_USB_ATTACH,
+ * so no data-path command reaches BeginIO.  The context lifecycle ops and the
+ * unit commands are serialized by the unit task (io_Error is (re)initialized by
+ * ProcessCommand before any handler runs); everything else is IOERR_NOCMD.
+ * No QUICK_IO: every accepted request completes asynchronously. */
+void beginIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6") __attribute__((unused)))
+{
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
+    const UWORD cmd = io->io_Command;
+
+    if (unit == NULL)
+    {
+        Kprintf("[xhci] %s: request has no unit\n", __func__);
+        io->io_Error = IOERR_OPENFAIL;
+        if (!(io->io_Flags & IOF_QUICK))
+            ReplyMsg(&io->io_Message);
+        return;
+    }
+
+    if (UHCD_IS_CTXCMD(cmd) || cmd == CMD_FLUSH || cmd == UHCMD_QUERYDEVICE ||
+        cmd == UHCMD_USBRESET || cmd == NSCMD_DEVICEQUERY)
+    {
+        KprintfT("[xhci] %s: Queuing %04lx\n", __func__, (ULONG)cmd);
+        io->io_Error = 0;
+        io->io_Flags &= (UBYTE)~IOF_QUICK;
+        PutMsg(&unit->unit.unit_MsgPort, &io->io_Message);
+        return;
+    }
+
+    KprintfT("[xhci] %s: Unsupported command %04lx\n", __func__, (ULONG)cmd);
+    io->io_Error = IOERR_NOCMD;
+    if (!(io->io_Flags & IOF_QUICK))
+        ReplyMsg(&io->io_Message);
+}
+
+/* The only queued requests are the commands waiting at the unit port;
+ * transfers never travel as messages (the direct path aborts via the
+ * UhcdAbortFunc entry, xhci-direct.c) and a command already picked up by the
+ * unit task completes naturally.  Best-effort: pull a still-queued message off
+ * the port, otherwise decline.  AbortIO is a wish. */
+LONG abortIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6") __attribute__((unused)))
+{
+    KprintfT("[xhci] %s: Aborting IO request %lx\n", __func__, io);
+
+    struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
+    if (unit == NULL)
+        return 0;
+
+    BOOL pulled = FALSE;
+    Disable();
+    for (struct Node *node = unit->unit.unit_MsgPort.mp_MsgList.lh_Head;
+         node->ln_Succ != NULL; node = node->ln_Succ)
+    {
+        if (node == &io->io_Message.mn_Node)
+        {
+            Remove(node);
+            pulled = TRUE;
+            break;
+        }
+    }
+    Enable();
+
+    if (pulled)
+    {
+        /* Removed from the port: the request is ours alone, reply it outside
+         * the critical section. */
+        io->io_Error = IOERR_ABORTED;
+        ReplyMsg(&io->io_Message);
+    }
+
+    return 0;
 }

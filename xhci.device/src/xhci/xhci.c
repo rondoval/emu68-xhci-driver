@@ -30,24 +30,33 @@
 
 #include <config.h>
 #include <xhci/xhci.h>
+#include <xhci/xhci-xfer.h>
 #include <xhci/xhci-td.h>
 #include <xhci/xhci-root-hub.h>
 #include <xhci/xhci-udev.h>
 #include <xhci/xhci-ring.h>
-#include <devices/hcd_api.h>
 
 #ifdef DEBUG
 #undef Kprintf
 #define Kprintf(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 #define CACHELINE_SIZE 64
 #define XHCI_EXT_CAPS_SEARCH_DONE ((u32)~0U)
+
+/* [xhci] perf slot names — rodata; order matches enum XhciProfSlot. */
+static const char *const xhci_perf_names[XP_SLOT_COUNT] = {
+	[XP_SUBMIT_MAP] = "submit_map",
+	[XP_SUBMIT_EMIT] = "submit_emit",
+	[XP_EVT_DRAIN] = "evt_drain",
+	[XP_EVT_HOOK] = "evt_hook",
+	[XP_IRQ_TO_TASK] = "irq_to_task",
+};
 
 static u32 xhci_get_page_size(struct xhci_ctrl *ctrl)
 {
@@ -89,13 +98,15 @@ static s32 xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 		goto fail_sp2;
 
 	ctrl->dcbaa->dev_context_ptrs[0] = le64(scratchpad->sp_array);
-	xhci_flush_cache(&ctrl->dcbaa->dev_context_ptrs[0], sizeof(ctrl->dcbaa->dev_context_ptrs[0]), 0);
+	cache_pre_dma(&ctrl->dcbaa->dev_context_ptrs[0], sizeof(ctrl->dcbaa->dev_context_ptrs[0]), DMA_ReadFromRAM);
 
 	const u32 page_size = ctrl->page_size;
 	void *buf = dma_zalloc(ctrl->dmaPool, page_size, num_sp * page_size);
 	if (!buf)
 		goto fail_sp3;
-	xhci_flush_cache(buf, num_sp * page_size, 0);
+	/* MUST stay clean+invalidate (flags 0): scratchpad pages are xHC-owned
+	 * scratch — the controller writes them; this is their pre-arm. */
+	cache_pre_dma(buf, num_sp * page_size, 0);
 
 	scratchpad->scratchpad = buf;
 	for (u32 i = 0; i < num_sp; i++)
@@ -104,7 +115,7 @@ static s32 xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 		buf += page_size;
 	}
 
-	xhci_flush_cache(scratchpad->sp_array, sizeof(u64) * num_sp, 0);
+	cache_pre_dma(scratchpad->sp_array, sizeof(u64) * num_sp, DMA_ReadFromRAM);
 	return 0;
 
 fail_sp3:
@@ -162,8 +173,15 @@ static s32 xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 	/* Set the pointer in DCBAA register */
 	xhci_writeq(&hcor->or_dcbaap, (dma_addr_t)ctrl->dcbaa);
 
-	/* Command ring control pointer register initialization */
+	/* Command ring control pointer register initialization.  This and the
+	 * allocations below leak nothing on failure: xhci_register's err_pool
+	 * unwind deletes the DMA and meta pools wholesale. */
 	ctrl->cmd_ring = xhci_ring_alloc(ctrl, 1, TRUE, FALSE, 0, 0);
+	if (!ctrl->cmd_ring)
+	{
+		Kprintf("unable to allocate command ring\n");
+		return -ENOMEM;
+	}
 
 	/* Set the address in the Command Ring Control register */
 	u64 trb_64 = xhci_ring_get_new_dequeue_ptr(ctrl->cmd_ring);
@@ -205,7 +223,7 @@ static s32 xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 		Kprintf("unable to allocate ERST entries\n");
 		return -ENOMEM;
 	}
-	xhci_flush_cache(ctrl->erst.entries, erst_bytes, 0);
+	cache_pre_dma(ctrl->erst.entries, erst_bytes, DMA_ReadFromRAM);
 
 	/* Event ring does not maintain link TRB */
 	ctrl->event_ring = xhci_ring_alloc(ctrl, event_ring_segs, FALSE, TRUE, 0, 0);
@@ -244,36 +262,16 @@ static void xhci_cleanup(struct xhci_ctrl *ctrl)
 	xhci_scratchpad_free(ctrl);
 	dma_free(ctrl->dmaPool, ctrl->erst.entries);
 	dma_free(ctrl->dmaPool, ctrl->dcbaa);
-	memset(ctrl, 0, sizeof(struct xhci_ctrl));
 }
 
-/**
- * Waits for as per specified amount of time
- * for the "result" to match with "done"
- *
- * @param ptr	pointer to the register to be read
- * @param mask	mask for the value read
- * @param done	value to be campared with result
- * @param usec	time to wait till
- * Return: 0 if handshake is success else < 0 on failure
- */
+/* Register handshake over mmio_poll_timeout: 0 on match, -ENODEV when the
+ * device reads as gone, -ETIMEDOUT otherwise. */
 static s32 handshake(volatile u32 *ptr, u32 mask, u32 done, u32 usec)
 {
-	u32 result;
-	u32 deadline = get_time() + usec;
-
-	for (;;)
-	{
-		result = mmio_read32(ptr);
-		if ((result & mask) == done)
-			return 0;
-		if (result == 0xffffffff)
-			return -ENODEV;
-		if (usec && time_deadline_passed(get_time(), deadline))
-			break;
-	}
-
-	return -ETIMEDOUT;
+	u32 result = mmio_poll_timeout(ptr, mask, done, usec);
+	if ((result & mask) == done)
+		return 0;
+	return (result == 0xffffffffU) ? -ENODEV : -ETIMEDOUT;
 }
 
 /**
@@ -308,7 +306,7 @@ static s32 xhci_start(struct xhci_hcor *hcor)
  */
 static s32 xhci_halt(struct xhci_hcor *hcor)
 {
-	KprintfH("// Halt the HC: %lx\n", hcor);
+	KprintfT("// Halt the HC: %lx\n", hcor);
 	u32 state = mmio_read32(&hcor->or_usbsts) & STS_HALT;
 	if (!state)
 	{
@@ -349,7 +347,7 @@ static s32 xhci_reset(struct xhci_hcor *hcor)
 		return -EBUSY;
 	}
 
-	KprintfH("// Reset the HC\n");
+	KprintfT("// Reset the HC\n");
 	cmd = mmio_read32(&hcor->or_usbcmd);
 	cmd |= CMD_RESET_USB;
 	mmio_write32(cmd, &hcor->or_usbcmd);
@@ -473,6 +471,8 @@ static void xhci_dump_caps(struct xhci_ctrl *ctrl)
 		Kprintf("Host controller supports Stopped EDTLA Capability\n");
 	if (HCC_CFC(reg))
 		Kprintf("Host controller supports Contiguous Frame ID Capability\n");
+	Kprintf("Host controller supports %lu streams\n", (ULONG)HCC_MAX_PSA_SIZE(reg));
+
 
 	reg = mmio_read32(&hccr->cr_hccparams2);
 	if (HCC_U3C(reg))
@@ -525,8 +525,10 @@ static s32 xhci_lowlevel_init(struct xhci_ctrl *ctrl)
 	if (xhci_mem_init(ctrl, hccr, hcor) < 0)
 		return -ENOMEM;
 
-	ctrl->devices_by_virtual_address[0] = xhci_udev_alloc(ctrl, 0);
-	ctrl->root_hub = xhci_roothub_create(ctrl->devices_by_virtual_address[0], xhci_udev_io_reply_data);
+	/* The root-hub udev is anchored by the emulation object only (it has no
+	 * hardware slot and never appears in the slot map). */
+	struct usb_device *rh_udev = xhci_udev_alloc_root(ctrl);
+	ctrl->root_hub = rh_udev ? xhci_roothub_create(rh_udev) : NULL;
 	if (!ctrl->root_hub)
 		return -ENOMEM;
 
@@ -571,7 +573,7 @@ static void xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 {
 	xhci_reset(ctrl->hcor);
 
-	KprintfH("// Disabling event ring interrupts\n");
+	KprintfT("// Disabling event ring interrupts\n");
 	u32 temp = mmio_read32(&ctrl->hcor->or_usbsts);
 	mmio_write32(temp & ~STS_EINT, &ctrl->hcor->or_usbsts);
 	temp = mmio_read32(&ctrl->ir_set->irq_pending);
@@ -581,9 +583,40 @@ static void xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 	ctrl->root_hub = NULL;
 }
 
+/* The uniform slab caches (fixed compile-time size/capacity, DMA_ALIGN_MIN
+ * alignment), created in table order and destroyed in reverse.  td_slab
+ * (element type private to xhci-td.c) and seg_slab (quirk-dependent size)
+ * are set up separately. */
+struct xhci_slab_spec
+{
+	u16 ctrl_offset; /* offsetof the slab_cache within struct xhci_ctrl */
+	BOOL dma;		 /* slots come from the DMA pool (else CPU-only metaPool) */
+	u32 size;
+	u32 capacity;
+};
+
+static const struct xhci_slab_spec xhci_slab_specs[] = {
+	{offsetof(struct xhci_ctrl, xfer_slab), FALSE, sizeof(struct xhci_xfer), 64},
+	{offsetof(struct xhci_ctrl, trb_addr_slab), FALSE, XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t), 256},
+	{offsetof(struct xhci_ctrl, bounce_small), TRUE, XHCI_BOUNCE_SMALL_SIZE, XHCI_BOUNCE_SMALL_CAP},
+	{offsetof(struct xhci_ctrl, bounce_med), TRUE, XHCI_BOUNCE_MED_SIZE, XHCI_BOUNCE_MED_CAP},
+	{offsetof(struct xhci_ctrl, bounce_large), TRUE, XHCI_BOUNCE_LARGE_SIZE, XHCI_BOUNCE_LARGE_CAP},
+};
+
+static inline struct slab_cache *slab_for_spec(struct xhci_ctrl *ctrl, const struct xhci_slab_spec *spec)
+{
+	return (struct slab_cache *)((u8 *)ctrl + spec->ctrl_offset);
+}
+
 s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
-	KprintfH("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
+	KprintfT("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
+
+	InitSemaphore(&ctrl->xfer_lock);
+
+	/* ctrl arrives MEMF_CLEAR, so the slot arrays start zeroed. */
+	ctrl->perf = (struct perf){"xhci", xhci_perf_names, ctrl->perfSlots, XP_SLOT_COUNT};
+	lock_prof_init(&ctrl->lockProf, "xhci");
 
 	s32 ret = xhci_reset(hcor);
 	if (ret)
@@ -601,28 +634,29 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 		ret = -ENOMEM;
 		goto err_pool;
 	}
-	KprintfH("memory pools created: dma=%lx meta=%lx\n", (ULONG)ctrl->dmaPool, (ULONG)ctrl->metaPool);
+	KprintfT("memory pools created: dma=%lx meta=%lx\n", (ULONG)ctrl->dmaPool, (ULONG)ctrl->metaPool);
 
 	xhci_td_slab_init(ctrl);
-	slab_cache_init(&ctrl->trb_addr_slab, ctrl->metaPool, NULL,
-					XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t), DMA_ALIGN_MIN, 256);
+	for (u32 i = 0; i < sizeof(xhci_slab_specs) / sizeof(xhci_slab_specs[0]); ++i)
+	{
+		const struct xhci_slab_spec *spec = &xhci_slab_specs[i];
+		slab_cache_init(slab_for_spec(ctrl, spec), ctrl->metaPool,
+						spec->dma ? ctrl->dmaPool : NULL,
+						spec->size, DMA_ALIGN_MIN, spec->capacity);
+	}
 
 	/* Ring segments: one slab, slot = obj_align = seg_size (a power of two), so every
 	 * slot is self-aligned and never crosses a 64 KB page boundary.  quirks are set
 	 * before xhci_register, so the size is known here. */
 	u32 seg_size = (ctrl->quirks & XHCI_QUIRK_TRB_OVERFETCH) ? 2U * SEGMENT_SIZE : SEGMENT_SIZE;
 	slab_cache_init(&ctrl->seg_slab, ctrl->metaPool, ctrl->dmaPool, seg_size, seg_size, 8);
-	slab_cache_init(&ctrl->bounce_small, ctrl->metaPool, ctrl->dmaPool,
-					XHCI_BOUNCE_SMALL_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_SMALL_CAP);
-	slab_cache_init(&ctrl->bounce_med, ctrl->metaPool, ctrl->dmaPool,
-					XHCI_BOUNCE_MED_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_MED_CAP);
-	slab_cache_init(&ctrl->bounce_large, ctrl->metaPool, ctrl->dmaPool,
-					XHCI_BOUNCE_LARGE_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_LARGE_CAP);
 
 	_NewMinList(&ctrl->pending_commands);
 
 	ctrl->hccr = hccr;
 	ctrl->hcor = hcor;
+	/* Cached once: the context accessors consult this on every slot/ep access */
+	ctrl->ctx_size = (u16)CTX_SIZE(mmio_read32(&hccr->cr_hccparams1));
 	ret = xhci_lowlevel_init(ctrl);
 	if (ret)
 		goto err_pool;
@@ -648,11 +682,9 @@ void xhci_deregister(struct xhci_ctrl *ctrl)
 	xhci_lowlevel_stop(ctrl);
 	xhci_cleanup(ctrl);
 
-	slab_cache_destroy(&ctrl->bounce_large);
-	slab_cache_destroy(&ctrl->bounce_med);
-	slab_cache_destroy(&ctrl->bounce_small);
 	slab_cache_destroy(&ctrl->seg_slab);
-	slab_cache_destroy(&ctrl->trb_addr_slab);
+	for (u32 i = sizeof(xhci_slab_specs) / sizeof(xhci_slab_specs[0]); i-- > 0;)
+		slab_cache_destroy(slab_for_spec(ctrl, &xhci_slab_specs[i]));
 	xhci_td_slab_destroy(ctrl);
 
 	if (ctrl->dmaPool)
@@ -665,4 +697,6 @@ void xhci_deregister(struct xhci_ctrl *ctrl)
 		DeletePool(ctrl->metaPool);
 		ctrl->metaPool = NULL;
 	}
+
+	memset(ctrl, 0, sizeof(struct xhci_ctrl));
 }

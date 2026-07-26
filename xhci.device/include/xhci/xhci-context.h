@@ -3,8 +3,12 @@
 #ifndef __XHCI_CONTEXT_H
 #define __XHCI_CONTEXT_H
 
+struct xhci_xfer;
+struct xhci_ctrl;
+
 #include <types.h>
 #include <bits.h>
+#include <xhci/ch9.h> /* enum usb_device_speed */
 
 /**
  * struct xhci_container_ctx
@@ -59,7 +63,6 @@ struct xhci_slot_ctx
 /* Index of the last valid endpoint context in this device context - 27:31 */
 #define LAST_CTX_MASK (0x1fU << 27)
 #define LAST_CTX(p) ((u32)(p) << 27)
-#define LAST_CTX_TO_EP_NUM(p) (((p) >> 27) - 1)
 #define SLOT_FLAG BIT(0)
 #define EP0_FLAG BIT(1)
 
@@ -153,7 +156,6 @@ struct xhci_ep_ctx
 /* bit 15 is Linear Stream Array */
 /* Interval - period between requests to an endpoint - 125u increments. */
 #define EP_INTERVAL(p) (((u32)(p) & 0xffU) << 16)
-#define EP_INTERVAL_TO_UFRAMES(p) (1 << (((p) >> 16) & 0xff))
 #define CTX_TO_EP_INTERVAL(p) (((p) >> 16) & 0xff)
 #define EP_MAXPSTREAMS_MASK (0x1fU << 10)
 #define EP_MAXPSTREAMS(p) (((u32)(p) << 10) & EP_MAXPSTREAMS_MASK)
@@ -184,23 +186,29 @@ struct xhci_ep_ctx
 #define MAX_PACKET_MASK (0xffff)
 #define MAX_PACKET_DECODED(p) (((p) >> 16) & 0xffff)
 
-/* Get max packet size from ep desc. Bit 10..0 specify the max packet size.
- * USB2.0 spec 9.6.6.
- */
-#define GET_MAX_PACKET(p) ((p) & 0x7ff)
-
 /* tx_info bitmasks */
 #define EP_AVG_TRB_LENGTH(p) ((p) & 0xffff)
 #define EP_MAX_ESIT_PAYLOAD_LO(p) (((p) & 0xffff) << 16)
 #define EP_MAX_ESIT_PAYLOAD_HI(p) ((((p) >> 16) & 0xff) << 24)
-#define CTX_TO_MAX_ESIT_PAYLOAD(p) (((p) >> 16) & 0xffff)
 
 /* deq bitmasks */
 #define EP_CTX_CYCLE_MASK BIT(0)
 
-/* reserved[0] bitmasks, MediaTek xHCI used */
-#define EP_BPKTS(p) (((p) & 0x7f) << 0)
-#define EP_BBM(p) (((p) & 0x1) << 11)
+/**
+ * struct xhci_stream_ctx - one entry of a Primary Stream Context Array
+ * (section 6.2.4.1; linear arrays only — secondary arrays are not used).
+ * @stream_ring: 64-bit stream ring dequeue pointer | SCT | DCS
+ */
+struct xhci_stream_ctx
+{
+	__le64 stream_ring;
+	__le32 reserved[2];
+};
+
+/* stream_ring bitmasks: SCT (bits 3:1) — 1 = entry points at a Primary
+ * Transfer Ring (the only type a linear stream array carries) */
+#define SCT_FOR_CTX(p) (((u32)(p) & 0x7U) << 1)
+#define SCT_PRI_TR 1
 
 struct usb_device;
 
@@ -223,6 +231,8 @@ void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *
 
 u32 xhci_get_hardware_address(struct usb_device *udev);
 u32 xhci_read_hw_ep_state(struct usb_device *udev, u8 ep_index);
+u32 xhci_read_hw_ep_type(struct usb_device *udev, u8 ep_index);
+u32 xhci_read_hw_ep_interval(struct usb_device *udev, u8 ep_index);
 u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, u8 ep_index);
 
 void xhci_setup_addressable_virt_dev(struct usb_device *udev);
@@ -231,12 +241,33 @@ void xhci_setup_addressable_virt_dev(struct usb_device *udev);
 u32 xhci_find_root_port(struct usb_device *udev);
 
 void xhci_update_mel_in_input_ctx(struct usb_device *udev);
-/* Build an input slot context and issue Evaluate Context to latch MAX_EXIT. */
-void xhci_evaluate_mel(struct usb_device *udev);
+/* Build an input slot context and issue Evaluate Context to latch MAX_EXIT.
+ * req (may be NULL) is the context-ABI op replied from the command completion. */
+void xhci_evaluate_mel(struct usb_device *udev, struct xhci_xfer *req);
 
-void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size);
-s8 xhci_set_configuration(struct usb_device *udev, u32 config_value);
-s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting);
+/* Returns TRUE when an Evaluate Context was issued (req then belongs to the
+ * completion path), FALSE when the hardware already matched. */
+BOOL xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size, struct xhci_xfer *req);
+
+/* Context-ABI (NSCMD_USB_*) entry points — input contexts built from the
+ * stack-supplied endpoint list, no descriptor model involved. */
+struct UhcdEndpointDesc;
+s8 xhci_configure_endpoints_from_list(struct usb_device *udev,
+                                      const struct UhcdEndpointDesc *add, u16 num_add,
+                                      const u8 *drop_addresses, u16 num_drop,
+                                      struct xhci_xfer *req);
+void xhci_deconfigure(struct usb_device *udev, struct xhci_xfer *req);
+void xhci_apply_hub_update(struct usb_device *udev, struct xhci_xfer *req);
+
+/* SS bulk streams (NSCMD_USB_ALLOC/FREE_STREAMS): issue the Configure Endpoint
+ * that switches the endpoint context into stream mode (enable: MaxPStreams +
+ * LSA, deq = the pre-built stream context array) or back to the default single
+ * ring.  The ep_context's stream state must already be built (alloc) or still
+ * present (free — destroyed by the op completion). */
+void xhci_configure_ep_stream_mode(struct usb_device *udev, u8 ep_index, BOOL enable, struct xhci_xfer *req);
+
+/* Default EP0 max packet size for a device speed; 0 = unknown speed. */
+u16 xhci_ep0_default_mps(enum usb_device_speed speed);
 
 /* Context dumps are debug-only; compiled out (calls included) without DEBUG. */
 #ifdef DEBUG

@@ -44,9 +44,12 @@
 /* Event ring sizing: fixed at startup */
 #define XHCI_INITIAL_SEGS_PER_EVENT_RING 8
 
-/* Minimum interval between interrupts (in 250ns intervals).  The interval
- * between interrupts will be longer if there are no events on the event ring.
- * Default is 4000 (1 ms). */
-#define IRQ_INTERVAL 4000
+/* Minimum interval between interrupts (IMOD, in 250 ns units).  The interval
+ * between interrupts is longer when the event ring is idle.  160 = 40 us,
+ * matching Linux's default interrupt moderation. */
+#define IRQ_INTERVAL 160
+
+/* Perf report cadence: unit-task ticks per [xhci] perf_report (~2 s). */
+#define XHCI_PROF_REPORT_TICKS 20
 
 #endif

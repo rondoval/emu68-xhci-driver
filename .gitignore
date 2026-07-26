@@ -1,3 +1,6 @@
 build/
 install/
 .vscode/
+
+# local working notes, never published
+README-internal.md

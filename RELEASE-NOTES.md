@@ -1,26 +1,160 @@
+# Upgrade notes
+
+Configuration-relevant changes across all releases, newest first:
+
+* **6.x requires Poseidon for AmigaOS 6.x**, whose context HCD ABI is the only
+  one this line implements.  **Still on classic Poseidon 4.x?  Do not upgrade
+  to 6.x** — use the driver's **5.x** line instead, which speaks the classic
+  Poseidon HCD ABI and is maintained on the
+  [`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main).
+  The two lines are alternatives, not a sequence: pick the one that matches
+  your USB stack.
+* **From 4.4 or later:** no configuration changes are required.
+* **From 3.x:** `bcmpcie.library` must be installed in `LIBS:` for PCIe-based
+  units (unit 1+, VL805 on Pi 4B) to work.
+* **From pre-3.x:** unit numbering differs.  Unit 0 was the VL805 (PCIe) and
+  is now the onboard OTG port; unit 1 is now the VL805.  Update your USB
+  stack configuration accordingly.
+
+
+# Release notes — xhci.device 6.0
+
+Changes since v5.2.
+
+---
+
+## Requires Poseidon for AmigaOS 6.x
+
+This release drives **Poseidon for AmigaOS 6.x** and nothing else.  It will
+**not** work with classic Poseidon **4.x** (Chris Hodges) or the AROS **5.x**
+line: those stacks move data with per-transfer device commands, which this
+driver answers with `IOERR_NOCMD`.  Install the matching Poseidon — driver and
+stack are released as a pair.
+
+**Staying on classic Poseidon 4.x?**  Use the driver's **5.x** line, which
+speaks the classic Poseidon HCD ABI and is maintained on the
+[`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main).  The
+two lines are alternatives rather than a sequence, so there is nothing to miss
+by staying on 5.x with a 4.x stack.
+
+## Real USB 3.0 — the emulation layer is gone
+
+The 5.x line presents every SuperSpeed device to the stack as a high-speed one
+and translates USB 3.0 into USB 2.0 behind its back: `bcdUSB` clamped to
+`0x0210`, SuperSpeed endpoint companions stripped, the SuperSpeed root hub
+dressed up as a USB 2.0 hub.  Poseidon for AmigaOS 6.x handles USB 3.0 itself,
+so none of that is left.  The stack is handed real SuperSpeed devices with
+their real descriptors and a real SuperSpeed root hub, and applies the USB 3.0
+rules — hub depth, port statuses, link power — directly.
+
+## USB 3.0 bulk streams
+
+SuperSpeed mass storage can now use bulk streams, where each queued command
+gets its own transfer ring instead of taking turns on one.  A UAS drive can
+keep several commands in flight at once, which is where the throughput of a
+modern USB 3.0 disk actually comes from.  Enabled on controllers that support
+streams; anything else keeps working as before.
+
+## Faster transfers
+
+Every transfer — control, bulk, interrupt and isochronous — is now handed to
+the driver as a direct call from the task that asked for it, rather than
+travelling as a message to the driver's port.
+
+
+
 # Release notes — xhci.device 5.2
 
 Changes since v5.1.
 
 ---
 
-## Compatibility
+## Breaking: legacy Poseidon HCD ABI removed — the driver is context-only
 
-### Returned device descriptors report USB 2.0 to match the presented speed
+The driver now speaks only the context HCD ABI of `devices/usbhcd_context.h`:
+explicit `NSCMD_USB_*` lifecycle ops (create/destroy device, update EP0,
+configure endpoints, deconfigure, update hub, set suspend, set link power),
+transfers as the ABI's own `struct UhcdXfer` under `NSCMD_USB_XFER_*`
+commands, and the fast data paths (demand-driven `NSCMD_USB_REGISTER_FASTPATH`,
+clock-driven iso `NSCMD_USB_REGISTER_HOOKS` + `START/STOP_STREAM`).  Capability
+discovery is `DRIVER_FEAT_CONTEXT` plus the NewStyle command list; devices are
+keyed by an opaque handle (the xHCI slot id).
 
-`xhci.device` presents SuperSpeed devices to the USB stack as high-speed and
-handles the SuperSpeed specifics internally through its USB 3.0 ↔ USB 2.0
-translation layer.  The device descriptor returned to the stack now has its
-`bcdUSB` field clamped to `0x0210` whenever a device reports USB 3.0 or later
-(`bcdUSB >= 0x0300`), so the advertised USB revision is consistent with that
-high-speed presentation.
+A stack that does not negotiate the context ABI cannot use this driver: the
+classic `CMD_REQUEST_*` transfers and RT-ISO commands left the NSD list and
+reply `IOERR_NOCMD` (with one clear debug-log line); `CMD_DEVICE_QUERY` /
+`NSCMD_DEVICEQUERY` keep answering so an old stack fails diagnosably rather
+than mysteriously.  Poseidon's context backend negotiates automatically;
+classic HCDs are unaffected (they keep Poseidon's frozen legacy backend).
 
-This matters for USB 3.0-aware stacks: one that reads `bcdUSB` would otherwise
-see a SuperSpeed revision that contradicts the high-speed device it is handed,
-and could mis-handle it.  Clamping the field keeps the translation transparent
-to the stack above.
+With the wire snoop went the whole compatibility layer it required:
 
----
+* SET_ADDRESS interception and virtual-address device keying (devices are
+  slot-keyed).
+* The config-descriptor cache/parse and the BOS / hub-descriptor prefetch —
+  topology facts arrive via `NSCMD_USB_UPDATE_HUB`, LPM facts via
+  `NSCMD_USB_SET_LINK_POWER`.
+* The SS-hub emulation (port-status/feature translation, `SET_HUB_DEPTH`,
+  hub-descriptor rewriting) — the stack's hub classes do all of this
+  natively now.
+* The mixed-view root hub.  The root hub is protocol-split: USB3-protocol
+  ports form a SuperSpeed root hub (`UHCD_HANDLE_ROOTHUB`) with USB3-spec
+  port statuses identical to an external SS hub, USB2-protocol ports a
+  classic USB2 root hub (`UHCD_HANDLE_ROOTHUB_USB2`);
+  `CREATE_DEVICE(parent=0)` selects by `cdo_Speed`, and the count is
+  reported via `TAG_DRIVER_NUM_ROOT_HUBS`.  `DRIVER_FEAT_USB3` is advertised
+  only when USB3-protocol root ports exist.
+* Descriptor doctoring: `bcdUSB` is no longer clamped to `0x0210`, SuperSpeed
+  endpoint companions are no longer stripped, product strings no longer get
+  an ` (SS)` suffix, and the NUL→space string trim moved into the stack —
+  the stack sees wire-truth descriptors and knows real device speeds.
+
+## New context ops
+
+* `NSCMD_USB_ALLOC_STREAMS` / `NSCMD_USB_FREE_STREAMS` — SS bulk streams
+  (UAS): per-stream transfer rings behind a linear stream context array;
+  bulk transfers select their ring by `uxf_StreamID` and doorbells carry the
+  stream id.  Advertised in the NSD list only when the controller supports
+  streams (`HCCPARAMS1.MaxPSASize` > 0); endpoints without an alloc stay
+  single-ring and ignore stream ids, preserving old-stack behavior.
+  Recovery on a streams endpoint stops the endpoint, fails all in-flight
+  transfers, and resets every stream ring with a per-stream Set TR Dequeue.
+* `NSCMD_USB_SET_SUSPEND` — pure endpoint-ring quiesce/restart around a port
+  suspend (xHCI 4.15.1 ordering); port link transitions remain the hub
+  classes' job.
+* `NSCMD_USB_SET_LINK_POWER` — the stack supplies BOS-parsed LPM facts and
+  policy; the driver keeps its validated SEL/PEL/MEL, HIRD/BESL and
+  timeout math and runs the arming sequence (SET_SEL → MEL via Evaluate
+  Context → U1/U2 enable → port timeouts; LTM; USB2 L1).
+* Device-initiated resume on USB2 root ports is now completed (Resume →
+  20 ms → U0) so remote wakeup reports `C_SUSPEND` as expected.
+
+## Fast data paths (§10)
+
+* **Demand-driven direct submit** (`NSCMD_USB_REGISTER_FASTPATH` /
+  `UNREGISTER_FASTPATH`, `DRIVER_FEAT_FASTPATH`): a caller registers a
+  per-endpoint done hook and receives the driver's direct `submit`/`abort`
+  entries + endpoint token, then submits bulk/interrupt transfers in its own
+  task — no IORequest, no message-port round trip.  Submissions ride the
+  ordinary rings/TDs/timeouts/recovery/bounce/stream machinery; completion
+  calls the done hook.  A per-controller `xfer_lock` serializes the transfer
+  plane (unit-task work blocks vs caller-context submit/abort).  This is the
+  fast path UAS uses per stream.
+* **Clock-driven iso hooks** (`NSCMD_USB_REGISTER_HOOKS` /
+  `UNREGISTER_HOOKS`, `START/STOP_STREAM`, `struct USBIsoHooks`): the general
+  form of the realtime-iso hook engine for isochronous endpoints, with a
+  caller-chosen hook object (so Poseidon runs the classic class hooks
+  unchanged), a release hook fired when a stream dies without a client stop,
+  and per-buffer wire status.  **These superseded the interim RT-ISO re-key
+  ops** (`*_RT_HOOKS`/`*_RT_STREAM`) — those numbers are retired and never
+  reused; the RT engine (rings, CFC frame pinning) is otherwise unchanged.
+
+## Tooling
+
+A `hcdtest` CLI (installed to `C:`) exercises the ABI against real hardware
+without Poseidon: hub-behind-hub enumeration, LS/FS behind a TT, SuperSpeed
+tier-2 devices, mass-storage bulk and interrupt IO, suspend and link-power
+ops.  Hardware-validated on a VL805 with a mixed park.
 
 ## Build & tooling
 

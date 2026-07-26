@@ -3,7 +3,6 @@ project(xhci.device VERSION ${CMAKE_PROJECT_VERSION})
 
 # Toolchain and compile options
 add_link_options(
-    -ffreestanding
     -nostdlib
     -nostartfiles
     -s
@@ -13,6 +12,8 @@ add_link_options(
 add_compile_options(
     -O3
     -m68040
+    -fomit-frame-pointer
+    -ffreestanding
     -Wall
     -Wextra
     -Wconversion
@@ -20,11 +21,13 @@ add_compile_options(
     -Wshadow
     -Wmissing-prototypes
     -Wstrict-prototypes
-    -fomit-frame-pointer
 )
 
 # Debug-output backend defines (EMU68_DEBUG_BACKEND, see emu68-common).
-emu68_debug_backend_definitions()
+emu68_debug_definitions()
+
+# cache_ops.h LVO-fallback define (EMU68_FORCE_LVO_CACHE_OPS, see emu68-common).
+emu68_cache_ops_definitions()
 
 add_compile_definitions(
     PRIVATE
@@ -38,24 +41,24 @@ add_compile_definitions(
 # Sources
 add_executable(xhci.device
     src/device.c
-    src/device_beginio.c
-    src/device_abortio.c
     src/unit.c
     src/unit_task.c
     src/irq.c
     src/unit_commands.c
     src/xhci/xhci.c
     src/xhci/xhci-ring.c
+    src/xhci/xhci-submit.c
     src/xhci/xhci-context.c
     src/xhci/xhci-lpm.c
-    src/xhci/xhci-hub.c
     src/xhci/xhci-events.c
     src/xhci/xhci-commands.c
     src/xhci/xhci-td.c
-    src/xhci/xhci-descriptors.c
     src/xhci/xhci-root-hub.c
     src/xhci/xhci-udev.c
     src/xhci/xhci-endpoint.c
+    src/xhci/xhci-ep-rtiso.c
+    src/xhci/xhci-ctx-ops.c
+    src/xhci/xhci-direct.c
     src/device_end.c
 )
 

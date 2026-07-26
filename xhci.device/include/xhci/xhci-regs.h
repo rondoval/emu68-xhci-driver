@@ -129,6 +129,9 @@ struct xhci_hccr
 #define HCC_CFC(p) ((p) & BIT(11))
 /* Max size for Primary Stream Arrays - 2^(n+1), where n is bits 12:15 */
 #define HCC_MAX_PSA(p) (1 << ((((p) >> 12) & 0xf) + 1))
+/* Raw MaxPSASize exponent (bits 15:12): 0 = streams unsupported; otherwise the
+ * largest MaxPStreams value an endpoint context may be programmed with. */
+#define HCC_MAX_PSA_SIZE(p) (((p) >> 12) & 0xf)
 /* Extended Capabilities pointer from PCI base - section 5.3.6 */
 #define HCC_EXT_CAPS(p) (((p) >> 16) & 0xffff)
 
@@ -423,6 +426,11 @@ struct xhci_intr_reg
 	volatile __le64 erst_dequeue;
 };
 
+/* irq_pending (IMAN) bits: IP is Write-1-to-Clear, IE is normal RW,
+ * bits 2:31 are RsvdP and must be preserved across writes. */
+#define IMAN_IP BIT(0)
+#define IMAN_IE BIT(1)
+
 /* irq_pending bitmasks */
 #define ER_IRQ_PENDING(p) ((p) & 0x1)
 /* bits 2:31 need to be preserved */
@@ -484,7 +492,7 @@ struct xhci_doorbell_array
 	volatile __le32 doorbell[256];
 };
 
-#define DB_VALUE(ep, stream) ((((ep) + 1) & 0xff) | ((stream) << 16))
+#define DB_VALUE(ep, stream) (((((u32)(ep)) + 1) & 0xffU) | ((u32)(stream) << 16))
 #define DB_VALUE_HOST 0x00000000
 /*
  * Registers should always be accessed with double word or quad word accesses.

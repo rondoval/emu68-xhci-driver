@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#ifndef _GENET_DEVICE_H
-#define _GENET_DEVICE_H
+#ifndef _XHCI_DEVICE_H
+#define _XHCI_DEVICE_H
 
 #if defined(__INTELLISENSE__)
 #define asm(x)
@@ -14,7 +14,8 @@
 
 #include <reset_guard.h>
 
-#include <devices/hcd_api.h>
+#include <types.h>
+#include <exec/io.h>
 
 #define LIB_MIN_VERSION 39 /* we use memory pools */
 #define DEVICE_PRIORITY 90
@@ -22,7 +23,9 @@
 #define COMMAND_PROCESSED 1
 #define COMMAND_SCHEDULED 0
 
-#define CMD_INTERNAL_ABORT_REQUEST (CMD_NONSTD + 0x100)
+/* Driver-private command: a root-hub transfer the direct path defers to the
+ * unit task (struct xhci_rh_submit_msg, xhci-direct.h). */
+#define CMD_INTERNAL_RH_SUBMIT (CMD_NONSTD + 0x100)
 
 struct XHCIDevice;
 
@@ -34,7 +37,6 @@ struct XHCIUnit
 
 	/* config */
 	LONG unitNumber;
-	LONG flags;
 
 	/* state */
 	struct Task *task;
@@ -43,7 +45,6 @@ struct XHCIUnit
 	struct Interrupt irq_isr;
 	u32 irq_line;
 	BYTE irq_signal;
-	u16 driver_state; /* DRIVER_STATE_*, reported via TAG_DRIVER_STATE/io->state */
 	char vendor_str[5];
 	char device_str[5];
 };
@@ -60,20 +61,20 @@ struct XHCIDevice
 	struct MinList units;
 };
 
-void beginIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
-LONG abortIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+void beginIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
+LONG abortIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"));
 
-/* PCI library: lazy-open on first PCIe unit, tries bcmpcie.library then openpci.library */
+/* Lazy-open bcmpcie.library (v2+) on first PCIe unit access */
 s32 xhci_open_pcie_library(struct XHCIDevice *base);
 
 /* Unit interface */
 s32 UnitTaskStart(struct XHCIUnit *unit);
 void UnitTaskStop(struct XHCIUnit *unit);
 
-s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags);
+s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber);
 s32 UnitClose(struct XHCIUnit *unit);
 
-void ProcessCommand(struct USBIORequest *io);
+void ProcessCommand(struct IORequest *io);
 
 s32 xhci_int_enable(struct XHCIUnit *unit);
 void xhci_int_shutdown(struct XHCIUnit *unit);
