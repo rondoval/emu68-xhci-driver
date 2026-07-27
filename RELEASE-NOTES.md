@@ -23,6 +23,16 @@ Changes since v5.2.
 
 ---
 
+## Firmware gate for rangeops builds
+
+Builds using the inline Emu68 range cache opcodes (`EMU68_FORCE_LVO_CACHE_OPS`
+off — the `-rangeops` stack archives) now check the `/emu68` device-tree
+node's `dcache-range-ops` capability at init and refuse to load on firmware
+that would Line-F trap on those opcodes, instead of crashing. Standard (LVO)
+builds are unaffected.
+
+---
+
 ## Requires Poseidon for AmigaOS 6.x
 
 This release drives **Poseidon for AmigaOS 6.x** and nothing else.  It will
