@@ -120,7 +120,16 @@ static dma_addr_t xhci_dma_span_prepare(struct xhci_ctrl *ctrl, struct xhci_dma_
 
 /* Payload half of a span map: the bounce copy (OUT) and the pre-DMA cache
  * maintenance.  Touches only the caller-owned buffers - safe WITHOUT
- * ctrl->xfer_lock. */
+ * ctrl->xfer_lock.
+ *
+ * IN spans pre-arm with DMA_WriteToRAM (invalidate): the destination's CPU
+ * content is disposable - the device overwrites it - so dirty lines (a bounce
+ * slot last used for OUT, a reused user buffer) are dropped instead of written
+ * back to DRAM just before being replaced.  Whole-line ownership is
+ * guaranteed by the direct-DMA gate / owns_lines in span_prepare, and by the
+ * line-owned bounce slabs.  On a short IN, bytes past the actual length are
+ * now whatever RAM held rather than the cleaned-out CPU content - both are
+ * undefined territory per USB semantics (class drivers honour ioActual). */
 static void xhci_dma_span_sync(struct xhci_dma_span *span, BOOL to_device)
 {
 	if (!span->cpu || span->length == 0)
@@ -130,10 +139,10 @@ static void xhci_dma_span_sync(struct xhci_dma_span *span, BOOL to_device)
 	{
 		if (to_device)
 			xhci_copy_aligned(span->cpu, span->bounce, span->length);
-		cache_pre_dma(span->bounce, span->length, to_device ? DMA_ReadFromRAM : 0);
+		cache_pre_dma(span->bounce, span->length, to_device ? DMA_ReadFromRAM : DMA_WriteToRAM);
 	}
 	else
-		cache_pre_dma(span->cpu, span->length, to_device ? DMA_ReadFromRAM : 0);
+		cache_pre_dma(span->cpu, span->length, to_device ? DMA_ReadFromRAM : DMA_WriteToRAM);
 }
 
 static dma_addr_t xhci_dma_span_map(struct xhci_ctrl *ctrl, struct xhci_dma_span *span,

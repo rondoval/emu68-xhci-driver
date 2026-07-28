@@ -25,6 +25,7 @@
 
 #include <device.h>
 #include <config.h>
+#include <emu68_features.h>
 #include <minlist.h>
 #include <debug.h>
 #include <xhci/xhci.h>
@@ -193,6 +194,15 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
 {
     (void)_SysBase;
     KprintfT("[xhci] %s: Initializing device\n", __func__);
+
+    if (!emu68_has_dcache_range_ops())
+    {
+        Kprintf("[xhci] %s: rangeops build, but Emu68 lacks dcache-range-ops rev 1 - refusing to load. Install the standard driver package or update Emu68.\n", __func__);
+        ULONG size = (ULONG)base->device.dd_Library.lib_NegSize + base->device.dd_Library.lib_PosSize;
+        FreeMem((APTR)((ULONG)base - base->device.dd_Library.lib_NegSize), size);
+        return NULL;
+    }
+
     base->segList = segList;
     base->device.dd_Library.lib_Revision = DEVICE_REVISION;
     _NewMinList(&base->units);

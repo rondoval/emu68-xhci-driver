@@ -16,8 +16,10 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 > **not** work with classic Poseidon **4.x** (Chris Hodges) or the AROS **5.x** line.
 > Those stacks want the driver's **5.x** line, which speaks the classic Poseidon HCD ABI
 > and is maintained on the
-> [`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main) — the two
-> lines are alternatives, so pick the one that matches your USB stack.
+> [`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main). Poseidon 6.x
+> keeps that ABI too, so it can drive the 5.x line as well — but SuperSpeed devices then
+> run through the USB 2.0 emulation, with no bulk streams. On Poseidon 6.x this line is
+> the faster choice.
 
 > **Upgrading from an older release?** See the *Upgrade notes* at the top of
 > [RELEASE-NOTES.md](RELEASE-NOTES.md) — unit renumbering and the `bcmpcie.library`
