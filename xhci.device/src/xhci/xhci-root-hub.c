@@ -45,9 +45,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci_root_hub] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci_root_hub] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci_root_hub] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 #define STATUS_CHANGE_BITMAP_LENGTH 2 /* in bytes; supports up to 15 ports */
@@ -223,120 +223,120 @@ struct xhci_root_hub
 						 * the xHC manages root-port wake hardware itself) */
 };
 
-#ifdef DEBUG_HIGH
+#ifdef TRACE
 static void xhci_roothub_debug_port(struct xhci_root_hub *rh, u32 port)
 {
 	struct xhci_ctrl *ctrl = rh->udev->controller;
 	u32 portsc = mmio_read32(&ctrl->hcor->portregs[port].or_portsc);
-	KprintfH("port %lu status: 0x%08lx\n", (ULONG)port + 1, (ULONG)portsc);
+	KprintfT("port %lu status: 0x%08lx\n", (ULONG)port + 1, (ULONG)portsc);
 
 	if (portsc & PORT_CONNECT) // ROS
-		KprintfH("  device connected\n");
+		KprintfT("  device connected\n");
 	else
-		KprintfH("  no device\n");
+		KprintfT("  no device\n");
 
 	if (portsc & PORT_PE) // RW1CS don't disable 3.0 ports
-		KprintfH("  port enabled\n");
+		KprintfT("  port enabled\n");
 	else
-		KprintfH("  port disabled\n");
+		KprintfT("  port disabled\n");
 
 	if (portsc & PORT_OC) // RO
-		KprintfH("  over-current condition\n");
+		KprintfT("  over-current condition\n");
 
 	if (portsc & PORT_RESET) // RW1S
-		KprintfH("  port in reset\n");
+		KprintfT("  port in reset\n");
 	else
-		KprintfH("  port not in reset\n");
+		KprintfT("  port not in reset\n");
 
 	u32 pls = portsc & PORT_PLS_MASK; // RWS
 	switch (pls)
 	{
 	case XDEV_U0:
-		KprintfH("  link state: U0 (active)\n");
+		KprintfT("  link state: U0 (active)\n");
 		break;
 	case XDEV_U1:
-		KprintfH("  link state: U1\n");
+		KprintfT("  link state: U1\n");
 		break;
 	case XDEV_U2:
-		KprintfH("  link state: U2\n");
+		KprintfT("  link state: U2\n");
 		break;
 	case XDEV_U3:
-		KprintfH("  link state: U3 (suspended)\n");
+		KprintfT("  link state: U3 (suspended)\n");
 		break;
 	case XDEV_DISABLED:
-		KprintfH("  link state: Disabled\n");
+		KprintfT("  link state: Disabled\n");
 		break;
 	case XDEV_RXDETECT:
-		KprintfH("  link state: RxDetect\n");
+		KprintfT("  link state: RxDetect\n");
 		break;
 	case XDEV_INACTIVE:
-		KprintfH("  link state: Inactive\n");
+		KprintfT("  link state: Inactive\n");
 		break;
 	case XDEV_POLLING:
-		KprintfH("  link state: Polling\n");
+		KprintfT("  link state: Polling\n");
 		break;
 	case XDEV_RECOVERY:
-		KprintfH("  link state: Recovery\n");
+		KprintfT("  link state: Recovery\n");
 		break;
 	case XDEV_HOTRESET:
-		KprintfH("  link state: Hot Reset\n");
+		KprintfT("  link state: Hot Reset\n");
 		break;
 	case XDEV_COMPLIANCE:
-		KprintfH("  link state: Compliance Mode\n");
+		KprintfT("  link state: Compliance Mode\n");
 		break;
 	case XDEV_TESTMODE:
-		KprintfH("  link state: Test Mode\n");
+		KprintfT("  link state: Test Mode\n");
 		break;
 	case XDEV_RESUME:
-		KprintfH("  link state: Resume\n");
+		KprintfT("  link state: Resume\n");
 		break;
 	default:
-		KprintfH("  link state: unknown (%lu)\n", (ULONG)(pls >> 5));
+		KprintfT("  link state: unknown (%lu)\n", (ULONG)(pls >> 5));
 		break;
 	}
 
 	if (portsc & PORT_POWER) // RWS
-		KprintfH("  port has power\n");
+		KprintfT("  port has power\n");
 	else
-		KprintfH("  port has no power\n");
+		KprintfT("  port has no power\n");
 
 	u32 speed = (portsc & DEV_SPEED_MASK); // ROS
 	switch (speed)
 	{
 	case XDEV_FS:
-		KprintfH("  device speed: Full Speed\n");
+		KprintfT("  device speed: Full Speed\n");
 		break;
 	case XDEV_LS:
-		KprintfH("  device speed: Low Speed\n");
+		KprintfT("  device speed: Low Speed\n");
 		break;
 	case XDEV_HS:
-		KprintfH("  device speed: High Speed\n");
+		KprintfT("  device speed: High Speed\n");
 		break;
 	case XDEV_SS:
-		KprintfH("  device speed: Super Speed\n");
+		KprintfT("  device speed: Super Speed\n");
 		break;
 	default:
-		KprintfH("  device speed: unknown (%lu)\n", (ULONG)(speed >> 10));
+		KprintfT("  device speed: unknown (%lu)\n", (ULONG)(speed >> 10));
 		break;
 	}
 
 	if (portsc & PORT_CSC) // RW1CS connect or disconnect sets this to 1
-		KprintfH("  connect status change\n");
+		KprintfT("  connect status change\n");
 	if (portsc & PORT_PEC) // RW1CS set to 1 on transition to disabled from enabled USB 2.0 only
-		KprintfH("  port enable change\n");
+		KprintfT("  port enable change\n");
 	if (portsc & PORT_WRC) // RW1CS 1 when warm reset completes (WPR 1->0)
-		KprintfH("  warm reset change\n");
+		KprintfT("  warm reset change\n");
 	if (portsc & PORT_OCC) // RW1CS when OC transitions to 1
-		KprintfH("  over-current change\n");
+		KprintfT("  over-current change\n");
 	if (portsc & PORT_RC) // RW1CS 1 when reset completes (PR 1->0 or WR 1->0)
-		KprintfH("  reset change\n");
+		KprintfT("  reset change\n");
 	if (portsc & PORT_PLC) // RW1CS when PLS changes - 4.19.1
-		KprintfH("  port link state change\n");
+		KprintfT("  port link state change\n");
 	if (portsc & PORT_CEC) // RW1CS
-		KprintfH("  port config error change\n");
+		KprintfT("  port config error change\n");
 
 	if (portsc & PORT_WR) // RW1S
-		KprintfH("  warm reset in progress\n");
+		KprintfT("  warm reset in progress\n");
 }
 #endif
 
@@ -445,7 +445,7 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 
 	rh->udev->speed = rh->is_super_speed ? USB_SPEED_SUPER : USB_SPEED_HIGH;
 
-#ifdef DEBUG_HIGH
+#ifdef TRACE
 	for (u32 i = 0; i < ports; ++i)
 		xhci_roothub_debug_port(rh, i);
 #endif
@@ -505,7 +505,7 @@ void xhci_roothub_set_usb3_port_timeout(struct xhci_root_hub *rh, u32 port, BOOL
 	if (!rh || port == 0 || port > rh->num_ports)
 		return;
 
-	KprintfH("Setting USB3 port %lu timeout: U%lu timeout=%lu %s\n", (ULONG)port, (ULONG)(u2 ? 2 : 1),
+	KprintfT("Setting USB3 port %lu timeout: U%lu timeout=%lu %s\n", (ULONG)port, (ULONG)(u2 ? 2 : 1),
 			 (ULONG)timeout, u2 ? "x256 microseconds" : "microseconds");
 
 	volatile u32 *pmsc = &rh->udev->controller->hcor->portregs[port - 1].or_portpmsc;
@@ -534,7 +534,7 @@ void xhci_roothub_set_usb2_hw_lpm(struct xhci_root_hub *rh, u32 port, u8 hird, u
 
 	struct xhci_hcor_port_regs *pr = &rh->udev->controller->hcor->portregs[port - 1];
 
-	KprintfH("Setting USB2 hardware LPM on port %lu: HIRD=%u, slot ID=%u, BESL mode=%u, BESLD=%u, L1 timeout=%u microseconds\n",
+	KprintfT("Setting USB2 hardware LPM on port %lu: HIRD=%u, slot ID=%u, BESL mode=%u, BESLD=%u, L1 timeout=%u microseconds\n",
 			 (ULONG)port, (ULONG)hird, (ULONG)slot_id, (ULONG)besl_mode, (ULONG)besld, (ULONG)l1_timeout_us);
 
 	if (besl_mode)
@@ -620,13 +620,13 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 			continue;
 
 		buffer[index] |= (u8)(1U << (((u32)port + 1U) & 7U));
-		KprintfH("port %lu status change detected: changebits=0x%08lx\n", (ULONG)(port + 1), (ULONG)change_bits);
+		KprintfT("port %lu status change detected: changebits=0x%08lx\n", (ULONG)(port + 1), (ULONG)change_bits);
 		change = TRUE;
 	}
 
 	if (!change)
 	{
-		KprintfH("no status change, not completing root hub interrupt\n");
+		KprintfT("no status change, not completing root hub interrupt\n");
 		return;
 	}
 
@@ -647,7 +647,7 @@ inline static void xhci_roothub_stall(struct USBIORequest *req)
 {
 	if (req)
 	{
-		KprintfH("stall\n");
+		KprintfT("stall\n");
 		req->actual_length = 0;
 		req->req.io_Error = ERR_DEVICE_STALL;
 	}
@@ -707,7 +707,7 @@ inline static void xhci_roothub_delay_ms(u32 milliseconds)
 
 static void xhci_roothub_handle_device_get_configuration(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	KprintfH("USB_REQ_GET_CONFIGURATION\n");
+	KprintfT("USB_REQ_GET_CONFIGURATION\n");
 	xhci_roothub_reply(req, &rh->descriptor.config.bConfigurationValue, 1);
 }
 
@@ -718,22 +718,22 @@ static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, 
 	switch (le16(setup->wValue) >> 8)
 	{
 	case USB_DT_BOS:
-		KprintfH("get USB_DT_BOS\n");
+		KprintfT("get USB_DT_BOS\n");
 		xhci_roothub_reply(req, &rh->descriptor.bos, le16(rh->descriptor.bos.wTotalLength));
 		break;
 	case USB_DT_DEVICE:
-		KprintfH("get USB_DT_DEVICE\n");
+		KprintfT("get USB_DT_DEVICE\n");
 		if (rh->is_super_speed)
 			xhci_roothub_reply(req, &rh->descriptor.device_30, rh->descriptor.device_30.bLength);
 		else
 			xhci_roothub_reply(req, &rh->descriptor.device_20, rh->descriptor.device_20.bLength);
 		break;
 	case USB_DT_CONFIG:
-		KprintfH("get USB_DT_CONFIG\n");
+		KprintfT("get USB_DT_CONFIG\n");
 		xhci_roothub_reply(req, &rh->descriptor.config, le16(rh->descriptor.config.wTotalLength));
 		break;
 	case USB_DT_STRING:
-		KprintfH("get USB_DT_STRING\n");
+		KprintfT("get USB_DT_STRING\n");
 		switch (le16(setup->wValue) & 0xff)
 		{
 		case 0: /* Language */
@@ -758,7 +758,7 @@ static void xhci_roothub_handle_device_get_descriptor(struct xhci_root_hub *rh, 
 
 static void xhci_roothub_handle_device_get_status(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
-	KprintfH("USB_REQ_GET_STATUS\n");
+	KprintfT("USB_REQ_GET_STATUS\n");
 	/* Device GET_STATUS: bit0=self-powered, bit1=remote-wakeup */
 	u8 status[2] = {(u8)(1 | (rh->remote_wakeup ? 2 : 0)), 0};
 	xhci_roothub_reply(req, status, 2);
@@ -773,7 +773,7 @@ void xhci_roothub_set_port_u3(struct xhci_root_hub *rh, u8 port)
 		return;
 
 	xhci_port_set_link_state(rh->udev->controller->hcor, port, XDEV_U3);
-	KprintfH("port %lu -> U3 standby (endpoints stopped)\n", (ULONG)port);
+	KprintfT("port %lu -> U3 standby (endpoints stopped)\n", (ULONG)port);
 }
 
 /**
@@ -831,9 +831,9 @@ inline static void xhci_roothub_clear_port_change_bit(u16 wValue, u8 portNo, vol
 	/* Change bits are all write 1 to clear */
 	mmio_write32(port_status | status, addr);
 
-#ifdef DEBUG_HIGH
+#ifdef TRACE
 	port_status = mmio_read32(addr);
-	KprintfH("clear port %s change, actual port %lu status  = 0x%lx\n", port_change_bit, (ULONG)portNo, (ULONG)port_status);
+	KprintfT("clear port %s change, actual port %lu status  = 0x%lx\n", port_change_bit, (ULONG)portNo, (ULONG)port_status);
 #else
 	(void)port_change_bit;
 	(void)portNo;
@@ -856,7 +856,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 	const u16 wValue = le16(req->setup.wValue); // feature selector
 	const u16 wIndex = le16(req->setup.wIndex); // selector | port
 	const u8 portNo = wIndex & 0xffU;
-#ifdef DEBUG_HIGH
+#ifdef TRACE
 	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
@@ -868,7 +868,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 	{
 	// Common for USB2 and USB3 ports
 	case USB_PORT_FEAT_POWER:
-		KprintfH("Clear port %lu PORT_POWER\n", (ULONG)portNo);
+		KprintfT("Clear port %lu PORT_POWER\n", (ULONG)portNo);
 		reg &= ~PORT_POWER;
 		mmio_write32(reg, &port->or_portsc);
 		break;
@@ -899,7 +899,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 
 		// USB3 specific features
 	case USB_SS_PORT_FEAT_FORCE_LINKPM_ACCEPT:
-		KprintfH("Clear port %lu FORCE_LINKPM_ACCEPT\n", (ULONG)portNo);
+		KprintfT("Clear port %lu FORCE_LINKPM_ACCEPT\n", (ULONG)portNo);
 		reg = mmio_read32(&port->or_portpmsc);
 		reg &= ~PORT_FLA;
 		mmio_write32(reg, &port->or_portpmsc);
@@ -915,7 +915,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 
 	// USB2 specific features
 	case USB_PORT_FEAT_ENABLE:
-		KprintfH("Clear port %lu PORT_PE\n", (ULONG)portNo);
+		KprintfT("Clear port %lu PORT_PE\n", (ULONG)portNo);
 		if (rh->ports[portNo - 1].major_revision >= 3)
 		{
 			Kprintf("Can't disable USB 3.0 port\n");
@@ -929,7 +929,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		}
 		break;
 	case USB_PORT_FEAT_SUSPEND:
-		KprintfH("Clear port %lu PORT_SUSPEND\n", (ULONG)portNo);
+		KprintfT("Clear port %lu PORT_SUSPEND\n", (ULONG)portNo);
 		/* For USB2, need to write 15 (XDEV_RESUME) first, wait 20ms, then write U0 */
 		if (rh->ports[portNo - 1].major_revision < 3)
 		{
@@ -958,7 +958,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 static void xhci_roothub_handle_hub_get_descriptor(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	(void)rh;
-	KprintfH("USB_REQ_GET_DESCRIPTOR HUB\n");
+	KprintfT("USB_REQ_GET_DESCRIPTOR HUB\n");
 	const u16 wValue = le16(req->setup.wValue);
 	if (wValue >> 8 == USB_DT_SS_HUB && rh->is_super_speed)
 	{
@@ -979,7 +979,7 @@ static void xhci_roothub_handle_hub_get_descriptor(struct xhci_root_hub *rh, str
 static void xhci_roothub_handle_hub_get_status(struct xhci_root_hub *rh, struct USBIORequest *req)
 {
 	(void)rh;
-	KprintfH("USB_REQ_GET_STATUS HUB\n");
+	KprintfT("USB_REQ_GET_STATUS HUB\n");
 	/* Hub GET_STATUS: bit0=local power source, bit1=over-current */
 	u8 status[4] = {0, 0, 0, 0};
 	xhci_roothub_reply(req, status, 4);
@@ -1000,7 +1000,7 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 		return;
 	}
 
-#ifdef DEBUG_HIGH
+#ifdef TRACE
 	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
@@ -1079,7 +1079,7 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 		wPortChange |= USB_PORT_STAT_C_SUSPEND;
 
 	u8 tmpbuf[4] = {wPortStatus & 0xffU, (wPortStatus >> 8) & 0xffU, wPortChange & 0xffU, (wPortChange >> 8) & 0xffU};
-	KprintfH("USB_REQ_GET_STATUS PORT %lu status=0x%lx\n", (ULONG)portNo, (ULONG)reg);
+	KprintfT("USB_REQ_GET_STATUS PORT %lu status=0x%lx\n", (ULONG)portNo, (ULONG)reg);
 	xhci_roothub_reply(req, tmpbuf, 4);
 }
 
@@ -1104,7 +1104,7 @@ static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, s
 	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	const u16 errors = mmio_read32(&port->or_portli) & 0xffff;
 
-	KprintfH("USB_REQ_GET_PORT_ERROR_COUNT PORT %lu error count=%u\n", (ULONG)wIndex, errors);
+	KprintfT("USB_REQ_GET_PORT_ERROR_COUNT PORT %lu error count=%u\n", (ULONG)wIndex, errors);
 	u8 tmpbuf[2] = {errors & 0xffU, (u8)(errors >> 8)};
 	xhci_roothub_reply(req, tmpbuf, 2);
 }
@@ -1115,7 +1115,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	const u16 wIndex = le16(req->setup.wIndex);
 	const u8 portNo = wIndex & 0xffU;
 
-#ifdef DEBUG_HIGH
+#ifdef TRACE
 	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
@@ -1137,7 +1137,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		 * reset still works after a warm reset. */
 		if (rh->ports[portNo - 1].major_revision >= 3)
 		{
-			KprintfH("SS port %lu warm reset (PLS=%lu portsc=%08lx)\n",
+			KprintfT("SS port %lu warm reset (PLS=%lu portsc=%08lx)\n",
 					 (ULONG)portNo, (ULONG)((reg & PORT_PLS_MASK) >> 5),
 					 (ULONG)mmio_read32(&port->or_portsc));
 
@@ -1180,7 +1180,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 				}
 				else
 				{
-					KprintfH("SS port %lu warm reset completed in %ld0ms "
+					KprintfT("SS port %lu warm reset completed in %ld0ms "
 							 "(portsc=%08lx)\n",
 							 (ULONG)portNo, (LONG)attempts, (ULONG)temp);
 				}
@@ -1188,7 +1188,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		}
 		else
 		{
-			KprintfH("Set port %lu PORT_RESET\n", (ULONG)portNo);
+			KprintfT("Set port %lu PORT_RESET\n", (ULONG)portNo);
 			reg |= PORT_RESET;
 			mmio_write32(reg, &port->or_portsc);
 		}
@@ -1199,7 +1199,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		break;
 	}
 	case USB_PORT_FEAT_POWER:
-		KprintfH("Set port %lu PORT_POWER\n", (ULONG)portNo);
+		KprintfT("Set port %lu PORT_POWER\n", (ULONG)portNo);
 		reg |= PORT_POWER;
 		mmio_write32(reg, &port->or_portsc);
 		break;
@@ -1212,19 +1212,19 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 
 	// USB3 specific features
 	case USB_SS_PORT_FEAT_BH_RESET:
-		KprintfH("Set port %lu PORT_BH_RESET\n", (ULONG)portNo);
+		KprintfT("Set port %lu PORT_BH_RESET\n", (ULONG)portNo);
 		reg |= PORT_WR;
 		mmio_write32(reg, &port->or_portsc);
 		break;
 	case USB_SS_PORT_FEAT_U1_TIMEOUT:
-		KprintfH("Setting port %lu U1 timeout to %lu microseconds\n", (ULONG)portNo, (ULONG)(wIndex >> 8));
+		KprintfT("Setting port %lu U1 timeout to %lu microseconds\n", (ULONG)portNo, (ULONG)(wIndex >> 8));
 		reg = mmio_read32(&port->or_portpmsc);
 		reg &= ~0xffU;
 		reg |= PORT_U1_TIMEOUT(wIndex >> 8);
 		mmio_write32(reg, &port->or_portpmsc);
 		break;
 	case USB_SS_PORT_FEAT_U2_TIMEOUT:
-		KprintfH("Setting port %lu U2 timeout to %lu microseconds\n", (ULONG)portNo, (ULONG)(wIndex >> 8));
+		KprintfT("Setting port %lu U2 timeout to %lu microseconds\n", (ULONG)portNo, (ULONG)(wIndex >> 8));
 		reg = mmio_read32(&port->or_portpmsc);
 		reg &= ~0xff00U;
 		reg |= PORT_U2_TIMEOUT(wIndex >> 8);
@@ -1233,7 +1233,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	case USB_PORT_FEAT_LINK_STATE:
 	{
 		const u32 link_state = wIndex >> 8;
-		KprintfH("Set port %lu PORT_LINK_STATE to %lu\n", (ULONG)portNo, (ULONG)link_state);
+		KprintfT("Set port %lu PORT_LINK_STATE to %lu\n", (ULONG)portNo, (ULONG)link_state);
 		if (link_state <= 5 || link_state == 10)
 		{
 			reg &= ~PORT_PLS_MASK;
@@ -1252,14 +1252,14 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	case USB_SS_PORT_FEAT_REMOTE_WAKE_MASK:
 	{
 		const u32 wake_mask = (wIndex >> 8) & 7;
-		KprintfH("Set port %lu REMOTE_WAKE_MASK to %lx\n", (ULONG)portNo, (ULONG)wake_mask);
+		KprintfT("Set port %lu REMOTE_WAKE_MASK to %lx\n", (ULONG)portNo, (ULONG)wake_mask);
 		reg &= ~(PORT_WKCONN_E | PORT_WKDISC_E | PORT_WKOC_E);
 		reg |= wake_mask << 25;
 		mmio_write32(reg, &port->or_portsc);
 		break;
 	}
 	case USB_SS_PORT_FEAT_FORCE_LINKPM_ACCEPT:
-		KprintfH("Set port %lu FORCE_LINKPM_ACCEPT\n", (ULONG)portNo);
+		KprintfT("Set port %lu FORCE_LINKPM_ACCEPT\n", (ULONG)portNo);
 		reg = mmio_read32(&port->or_portpmsc);
 		reg |= PORT_FLA;
 		mmio_write32(reg, &port->or_portpmsc);
@@ -1274,7 +1274,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		 * with nothing to stop: suspend immediately. */
 		if (xhci_udev_suspend_port(rh->udev, (u8)portNo))
 			break;
-		KprintfH("Putting port %lu link to U3 standby\n", (ULONG)portNo);
+		KprintfT("Putting port %lu link to U3 standby\n", (ULONG)portNo);
 		xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_U3);
 		break;
 	case USB_PORT_FEAT_TEST:
@@ -1335,12 +1335,12 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 		xhci_roothub_handle_device_get_status(rh, io);
 		break;
 	case DeviceOutRequest | USB_REQ_SET_ADDRESS:
-		KprintfH("USB_REQ_SET_ADDRESS rootdev=%lu\n", (ULONG)wValue);
+		KprintfT("USB_REQ_SET_ADDRESS rootdev=%lu\n", (ULONG)wValue);
 		/* Do nothing, higher layer will handle context migration */
 		xhci_roothub_no_error(io);
 		break;
 	case DeviceOutRequest | USB_REQ_SET_CONFIGURATION:
-		KprintfH("USB_REQ_SET_CONFIGURATION\n");
+		KprintfT("USB_REQ_SET_CONFIGURATION\n");
 		/* Do nothing */
 		xhci_roothub_no_error(io);
 		break;
@@ -1355,19 +1355,19 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 			xhci_roothub_stall(io);
 		break;
 	case DeviceOutRequest | USB_REQ_SET_ISOCH_DELAY:
-		KprintfH("USB_REQ_SET_ISOCH_DELAY\n");
+		KprintfT("USB_REQ_SET_ISOCH_DELAY\n");
 		/* Do nothing */
 		xhci_roothub_no_error(io);
 		break;
 	case DeviceOutRequest | USB_REQ_SET_SEL:
-		KprintfH("USB_REQ_SET_SEL\n");
+		KprintfT("USB_REQ_SET_SEL\n");
 		/* Do nothing */
 		xhci_roothub_no_error(io);
 		break;
 
 	/* Hub class requests */
 	case ClearHubFeature:
-		KprintfH("CLEAR_FEATURE HUB feature=%lx\n", wValue);
+		KprintfT("CLEAR_FEATURE HUB feature=%lx\n", wValue);
 		/* The xHC handles hub power/over-current in hardware and our hub
 		 * GET_STATUS never reports the change bits - ACK as no-ops (mirrors
 		 * Linux rh_call_control). */
@@ -1389,11 +1389,11 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 		xhci_roothub_handle_port_get_status(rh, io);
 		break;
 	case GetPortErrorCount:
-		KprintfH("USB_REQ_GET_PORT_ERROR_COUNT\n");
+		KprintfT("USB_REQ_GET_PORT_ERROR_COUNT\n");
 		xhci_roothub_handle_get_port_error_count(rh, io);
 		break;
 	case SetHubFeature:
-		KprintfH("SET_FEATURE HUB feature=%lx\n", wValue);
+		KprintfT("SET_FEATURE HUB feature=%lx\n", wValue);
 		/* Same two features as ClearHubFeature; setting them is nonsensical
 		 * for a root hub but harmless - ACK (mirrors Linux). */
 		if (wValue == C_HUB_LOCAL_POWER || wValue == C_HUB_OVER_CURRENT)
@@ -1402,7 +1402,7 @@ void xhci_roothub_submit_ctrl_request(struct xhci_root_hub *rh, struct USBIORequ
 			xhci_roothub_stall(io);
 		break;
 	case SetHubDepth:
-		KprintfH("SET_HUB_DEPTH depth=%lx\n", wValue);
+		KprintfT("SET_HUB_DEPTH depth=%lx\n", wValue);
 		/* Do nothing */
 		xhci_roothub_no_error(io);
 		break;

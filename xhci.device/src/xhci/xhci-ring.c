@@ -31,9 +31,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 static inline void xhci_copy_to_bounce_buffer(CONST_APTR src, APTR dst, u32 size)
@@ -1279,7 +1279,7 @@ static inline u32 iso_burst_bits(struct usb_device *udev,
 
 inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u32 iso_extra_bits)
 {
-	// #ifdef DEBUG_HIGH
+	// #ifdef TRACE
 	// 	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
 	// #endif
 	struct xhci_ctrl *ctrl = udev->controller;
@@ -1298,7 +1298,7 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 	 * instead of queueing into a list nothing will ever drain. */
 	if (cur_state == USB_DEV_EP_STATE_FAILED)
 	{
-		KprintfH("Rejecting transfer, ep %lu failed\n", (ULONG)ep_index);
+		KprintfT("Rejecting transfer, ep %lu failed\n", (ULONG)ep_index);
 		io->req.io_Error = ERR_HCI_ERROR;
 		return ERR_HCI_ERROR;
 	}
@@ -1307,7 +1307,7 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 		cur_state == USB_DEV_EP_STATE_RESETTING ||
 		cur_state == USB_DEV_EP_STATE_SUSPENDED)
 	{
-		KprintfH("Cannot submit transfer, ep in state %d\n", cur_state);
+		KprintfT("Cannot submit transfer, ep in state %d\n", cur_state);
 		xhci_ep_enqueue(udev_ep_ctx, io);
 		return ERR_NO_ERROR;
 	}
@@ -1320,7 +1320,7 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 	u32 trb_buff_len = 0; // non-control only
 	u64 addr = 0;		  // non-control only
 	u32 num_trbs = xhci_ring_calc_num_trbs(ctrl, io, &trb_buff_len, &addr);
-	// KprintfH("Calculated num_trbs=%lu trb_buff_len=%lu addr=%lx\n", (ULONG)num_trbs, (ULONG)trb_buff_len, (ULONG)addr);
+	// KprintfT("Calculated num_trbs=%lu trb_buff_len=%lu addr=%lx\n", (ULONG)num_trbs, (ULONG)trb_buff_len, (ULONG)addr);
 
 	struct xhci_ring *ep_ring = xhci_ep_get_ring(udev_ep_ctx);
 	if (!ep_ring)
@@ -1331,17 +1331,17 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 
 	if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1))
 	{
-		KprintfH("Ring full ep=%lu needed %lu TRBs, attempting grow\n", (ULONG)ep_index, (ULONG)num_trbs);
+		KprintfT("Ring full ep=%lu needed %lu TRBs, attempting grow\n", (ULONG)ep_index, (ULONG)num_trbs);
 		if (!xhci_ring_grow(ctrl, ep_ring, XHCI_SEGMENTS_PER_RING))
 		{
-			KprintfH("Ring grow failed, queueing request\n");
+			KprintfT("Ring grow failed, queueing request\n");
 			xhci_ep_enqueue(udev_ep_ctx, io);
 			return ERR_NO_ERROR;
 		}
-		KprintfH("Ring grew, retrying room check\n");
+		KprintfT("Ring grew, retrying room check\n");
 		if (!ring_has_room(ep_ring, udev_ep_ctx, num_trbs + 1))
 		{
-			KprintfH("Still no room after grow, queueing\n");
+			KprintfT("Still no room after grow, queueing\n");
 			xhci_ep_enqueue(udev_ep_ctx, io);
 			return ERR_NO_ERROR;
 		}

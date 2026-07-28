@@ -36,7 +36,7 @@ static LONG post_abort_request(struct XHCIUnit *unit, struct USBIORequest *io)
 LONG abortIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6") __attribute__((unused)))
 {
     /* AbortIO is a *wish* call. Someone would like to abort current IORequest */
-    KprintfH("[xhci] %s: Aborting IO request %lx\n", __func__, io);
+    KprintfT("[xhci] %s: Aborting IO request %lx\n", __func__, io);
     if (!io)
         return -1;
 

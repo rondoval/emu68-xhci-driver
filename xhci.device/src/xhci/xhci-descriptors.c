@@ -19,9 +19,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-descriptors] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-descriptors] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-descriptors] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 /**
@@ -113,7 +113,7 @@ u32 xhci_collect_config_masks(const struct usb_config *cfg, u32 limit, u32 *max_
         if (!active_alt)
             continue;
 
-        KprintfH("Preparing iface=%lu alt=%lu\n", (ULONG)ifnum, (ULONG)active_alt->desc.bAlternateSetting);
+        KprintfT("Preparing iface=%lu alt=%lu\n", (ULONG)ifnum, (ULONG)active_alt->desc.bAlternateSetting);
 
         mask |= xhci_collect_ep_mask(active_alt, max_flag);
     }
@@ -129,7 +129,7 @@ struct usb_config *xhci_find_config(struct usb_device *udev, int config_value)
     for (struct MinNode *node = udev->configurations.mlh_Head; node->mln_Succ != NULL; node = node->mln_Succ)
     {
         struct usb_config *cfg = (struct usb_config *)node;
-        KprintfH("  found config: bConfigurationValue=%lu\n", (ULONG)cfg->desc.bConfigurationValue);
+        KprintfT("  found config: bConfigurationValue=%lu\n", (ULONG)cfg->desc.bConfigurationValue);
         if (cfg->desc.bConfigurationValue == config_value)
             return cfg;
     }
@@ -187,9 +187,9 @@ static u8 xhci_microframes_to_exponent(u32 desc_interval,
 {
     u32 interval = log2_floor_u64(desc_interval);
     interval = clamp_val(interval, min_exponent, max_exponent);
-#ifdef DEBUG_HIGH
+#ifdef TRACE
     if ((1U << interval) != desc_interval)
-        KprintfH("rounding interval to %lu microframes, ep desc says %lu microframes\n",
+        KprintfT("rounding interval to %lu microframes, ep desc says %lu microframes\n",
                  (ULONG)(1U << interval), (ULONG)desc_interval);
 #endif
 
@@ -283,7 +283,7 @@ u8 xhci_get_endpoint_interval(struct usb_device *udev, struct usb_endpoint_descr
          * since it uses the same rules as low speed interrupt
          * endpoints.
          */
-        /*fallthrough;*/
+        __attribute__((fallthrough));
     case USB_SPEED_LOW:
         if (usb_endpoint_xfer_int(endpt_desc) ||
             usb_endpoint_xfer_isoc(endpt_desc))
@@ -497,7 +497,7 @@ static BOOL parse_interface_descriptor(struct cfg_parse_state *st, struct usb_in
     CopyMem(ifd, &st->current_alt->desc, sizeof(struct usb_interface_descriptor));
     st->current_alt->no_of_ep = 0;
 
-    KprintfH("interface %lu alt %lu: bInterfaceNumber=%lu bAlternateSetting=%lu bNumEndpoints=%lu bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%lu\n",
+    KprintfT("interface %lu alt %lu: bInterfaceNumber=%lu bAlternateSetting=%lu bNumEndpoints=%lu bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%lu\n",
              (ULONG)st->if_index,
              (ULONG)st->current_alt_index,
              (ULONG)ifd->bInterfaceNumber,
@@ -530,7 +530,7 @@ static void parse_endpoint_descriptor(struct cfg_parse_state *st, struct usb_end
 
     u32 ep_idx = st->current_alt->no_of_ep;
     CopyMem(epd, &st->current_alt->ep_desc[ep_idx], sizeof(struct usb_endpoint_descriptor));
-    KprintfH("  endpoint %lu: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%lu bInterval=%lu\n",
+    KprintfT("  endpoint %lu: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%lu bInterval=%lu\n",
              (ULONG)ep_idx,
              (ULONG)epd->bEndpointAddress,
              (ULONG)epd->bmAttributes,
@@ -544,7 +544,7 @@ static void parse_endpoint_descriptor(struct cfg_parse_state *st, struct usb_end
  * it follows. */
 static void parse_ss_ep_comp_descriptor(struct cfg_parse_state *st, struct usb_ss_ep_comp_descriptor *comp)
 {
-    KprintfH("found SS EP COMP descriptor\n");
+    KprintfT("found SS EP COMP descriptor\n");
     if (st->current_if && st->current_alt && st->current_alt->no_of_ep > 0)
     {
         u32 ep_slot = (u32)(st->current_alt->no_of_ep - 1U);
@@ -559,7 +559,7 @@ void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
 {
     if (len < 2)
     {
-        KprintfH("too short, len=%lu\n", (ULONG)len);
+        KprintfT("too short, len=%lu\n", (ULONG)len);
         return;
     }
 
@@ -580,7 +580,7 @@ void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
     u16 total_len = le16(desc->wTotalLength);
     if (len < total_len)
     {
-        KprintfH("short buffer len=%lu total_len=%lu\n", (ULONG)len, (ULONG)total_len);
+        KprintfT("short buffer len=%lu total_len=%lu\n", (ULONG)len, (ULONG)total_len);
         return;
     }
 
@@ -595,7 +595,7 @@ void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
     CopyMem(desc, &conf->desc, sizeof(struct usb_config_descriptor));
     cursor += desc->bLength;
 
-    KprintfH("wTotalLength=%lu bNumInterfaces=%lu bConfigurationValue=%lu iConfiguration=%lu bmAttributes=0x%02lx bMaxPower=%lu\n",
+    KprintfT("wTotalLength=%lu bNumInterfaces=%lu bConfigurationValue=%lu iConfiguration=%lu bmAttributes=0x%02lx bMaxPower=%lu\n",
              (ULONG)le16(desc->wTotalLength),
              (ULONG)desc->bNumInterfaces,
              (ULONG)desc->bConfigurationValue,
@@ -644,13 +644,13 @@ void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
             break;
         default:
             // Skip class- or vendor-specific descriptors gracefully.
-            KprintfH("found class/vendor-specific descriptor 0x%lx, len=%lu\n", (ULONG)dtype, (ULONG)dlen);
+            KprintfT("found class/vendor-specific descriptor 0x%lx, len=%lu\n", (ULONG)dtype, (ULONG)dlen);
             break;
         }
 
         cursor += dlen;
     }
-    KprintfH("parsed config with %lu interfaces\n", (ULONG)conf->no_of_if);
+    KprintfT("parsed config with %lu interfaces\n", (ULONG)conf->no_of_if);
 
     if (conf->no_of_if != desc->bNumInterfaces)
     {
@@ -664,7 +664,7 @@ void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
         struct usb_config *oldconf = (struct usb_config *)n;
         if (oldconf->desc.bConfigurationValue == conf->desc.bConfigurationValue)
         {
-            KprintfH("removing old config with value %lu\n", (ULONG)oldconf->desc.bConfigurationValue);
+            KprintfT("removing old config with value %lu\n", (ULONG)oldconf->desc.bConfigurationValue);
             RemoveMinNode(n);
             pool_free(udev->controller->metaPool, oldconf);
             break;

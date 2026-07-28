@@ -152,12 +152,12 @@ static s32 pcie_xhci_init(struct Library *pcielibBase, struct pci_dev *pd,
 		Kprintf("[xhci] %s: BAR0 not mapped\n", __func__);
 		return -EIO;
 	}
-	KprintfH("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
+	KprintfT("[xhci] %s: init mapped hccr %lx\n", __func__, *hccr);
 
 	*hcor = (struct xhci_hcor *)((uintptr_t)*hccr +
 								 HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
-	KprintfH("[xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
+	KprintfT("[xhci] %s: init hccr %lx and hcor %lx hc_length %lu\n",
 			__func__, *hccr, *hcor, (ULONG)HC_LENGTH(mmio_read32(&(*hccr)->cr_capbase)));
 
 	pci_set_master(pd);
@@ -268,7 +268,7 @@ err_free_ctrl:
 
 s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 {
-	KprintfH("[xhci] %s: Opening unit %ld with flags %lx\n", __func__, unitNumber, flags);
+	KprintfT("[xhci] %s: Opening unit %ld with flags %lx\n", __func__, unitNumber, flags);
 	if (unit->unit.unit_OpenCnt > 0)
 	{
 		unit->unit.unit_OpenCnt++;

@@ -33,9 +33,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-hub] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-hub] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-hub] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 static enum usb_device_speed xhci_hub_speed_from_port_status(u16 status)
@@ -86,7 +86,7 @@ static void xhci_hub_cache_ss_hub_descriptor(struct usb_device *udev, struct usb
         len = (u8)(actual < sizeof(struct usb_hub_descriptor) ? actual : sizeof(struct usb_hub_descriptor));
 
     CopyMem(hub, &udev->ss_hub_desc, len);
-    KprintfH("Cached SS hub descriptor for addr %lu with %lu ports\n",
+    KprintfT("Cached SS hub descriptor for addr %lu with %lu ports\n",
              (ULONG)udev->virtual_address, (ULONG)hub->bNbrPorts);
 }
 
@@ -102,7 +102,7 @@ static void xhci_hub_set_ss_hub_depth(struct usb_device *udev)
     if (udev->ss_hub_depth_set)
         return;
 
-    KprintfH("SS hub addr=%lu route=0x%lx -> SET_HUB_DEPTH depth=%lu\n",
+    KprintfT("SS hub addr=%lu route=0x%lx -> SET_HUB_DEPTH depth=%lu\n",
              (ULONG)udev->virtual_address, (ULONG)udev->route, (ULONG)udev->route_depth);
 
     xhci_udev_send_control_request(udev,
@@ -151,45 +151,45 @@ static void xhci_hub_map_ss_port_status(u16 *wStatus, u16 *wChange, enum usb_dev
 
     if ((*wStatus & PORT_PLS_MASK) == XDEV_U3)
     {
-        KprintfH("SS hub: PLS=U3 detected, mapping to USB_PORT_STAT_SUSPEND\n");
+        KprintfT("SS hub: PLS=U3 detected, mapping to USB_PORT_STAT_SUSPEND\n");
         wStatusNew |= USB_PORT_STAT_SUSPEND;
     }
     if (*wStatus & USB_SS_PORT_STAT_POWER)
     {
-        KprintfH("SS hub: POWER bit set, mapping to USB_PORT_STAT_POWER\n");
+        KprintfT("SS hub: POWER bit set, mapping to USB_PORT_STAT_POWER\n");
         wStatusNew |= USB_PORT_STAT_POWER;
     }
 
     switch (speed)
     {
     case USB_SPEED_LOW:
-        KprintfH("SS hub: detected LowSpeed device, mapping to USB_PORT_STAT_LOW_SPEED\n");
+        KprintfT("SS hub: detected LowSpeed device, mapping to USB_PORT_STAT_LOW_SPEED\n");
         wStatusNew |= USB_PORT_STAT_LOW_SPEED;
         break;
     case USB_SPEED_FULL:
-        KprintfH("SS hub: detected FullSpeed device\n");
+        KprintfT("SS hub: detected FullSpeed device\n");
         break;
     case USB_SPEED_HIGH:
-        KprintfH("SS hub: detected HighSpeed device, mapping to USB_PORT_STAT_HIGH_SPEED\n");
+        KprintfT("SS hub: detected HighSpeed device, mapping to USB_PORT_STAT_HIGH_SPEED\n");
         wStatusNew |= USB_PORT_STAT_HIGH_SPEED;
         break;
     default:
-        KprintfH("SS hub: detected SuperSpeed device, mapping to USB_PORT_STAT_HIGH_SPEED for compatibility\n");
+        KprintfT("SS hub: detected SuperSpeed device, mapping to USB_PORT_STAT_HIGH_SPEED for compatibility\n");
         wStatusNew |= USB_PORT_STAT_HIGH_SPEED;
         break;
     }
 
-    KprintfH("SS hub: mapped status 0x%04lx -> 0x%04lx\n", (ULONG)*wStatus, (ULONG)wStatusNew);
+    KprintfT("SS hub: mapped status 0x%04lx -> 0x%04lx\n", (ULONG)*wStatus, (ULONG)wStatusNew);
 
     u16 wChangeNew = *wChange & (USB_PORT_STAT_C_CONNECTION | USB_PORT_STAT_C_OVERCURRENT | USB_PORT_STAT_C_RESET);
 
     if (*wChange & USB_SS_PORT_STAT_C_LINK_STATE && ((*wStatus & PORT_PLS_MASK) == XDEV_U0))
     {
-        KprintfH("SS hub: C_LINK_STATE detected and PLS=U0, mapping to C_SUSPEND\n");
+        KprintfT("SS hub: C_LINK_STATE detected and PLS=U0, mapping to C_SUSPEND\n");
         wChangeNew |= USB_PORT_STAT_C_SUSPEND;
     }
 
-    KprintfH("SS hub: mapped change 0x%04lx -> 0x%04lx\n", (ULONG)*wChange, (ULONG)wChangeNew);
+    KprintfT("SS hub: mapped change 0x%04lx -> 0x%04lx\n", (ULONG)*wChange, (ULONG)wChangeNew);
     *wStatus = wStatusNew;
     *wChange = wChangeNew;
 }
@@ -303,7 +303,7 @@ void xhci_hub_translate_descriptor_request(struct usb_device *udev, struct USBIO
     u16 old_value = le16(setup->wValue);
     setup->wValue = le16((USB_DT_SS_HUB << 8) | (old_value & 0xFF));
 
-    KprintfH("SS hub addr=%lu: modified wValue from 0x%04lx (USB_DT_HUB) to 0x%04lx (USB_DT_SS_HUB)\n",
+    KprintfT("SS hub addr=%lu: modified wValue from 0x%04lx (USB_DT_HUB) to 0x%04lx (USB_DT_SS_HUB)\n",
              (ULONG)udev->virtual_address, (ULONG)old_value, (ULONG)le16(setup->wValue));
 
     /* Return FALSE to let the request proceed normally - it will be translated back in parse */
@@ -316,7 +316,7 @@ void xhci_hub_handle_get_descriptor(struct usb_device *udev, struct USBIORequest
         return;
 
     struct usb_hub_descriptor *hub = (struct usb_hub_descriptor *)io->data_buffer;
-    KprintfH("Hub Descriptor: bLength=%lu bDescriptorType=%lu bNbrPorts=%lu wHubCharacteristics=0x%04lx bPwrOn2PwrGood=%lu bHubContrCurrent=%lu\n",
+    KprintfT("Hub Descriptor: bLength=%lu bDescriptorType=%lu bNbrPorts=%lu wHubCharacteristics=0x%04lx bPwrOn2PwrGood=%lu bHubContrCurrent=%lu\n",
              (ULONG)hub->bLength,
              (ULONG)hub->bDescriptorType,
              (ULONG)hub->bNbrPorts,
@@ -329,7 +329,7 @@ void xhci_hub_handle_get_descriptor(struct usb_device *udev, struct USBIORequest
     {
         const u16 characteristics = le16(hub->wHubCharacteristics);
         udev->tt_think_time = (u8)((characteristics >> 5) & 0x3);
-        KprintfH("hub addr %lu TT think time code=%lu (bit-times=%lu)\n",
+        KprintfT("hub addr %lu TT think time code=%lu (bit-times=%lu)\n",
                  (ULONG)udev->virtual_address, (ULONG)udev->tt_think_time, (ULONG)((udev->tt_think_time + 1) * 8));
     }
 
@@ -338,7 +338,7 @@ void xhci_hub_handle_get_descriptor(struct usb_device *udev, struct USBIORequest
     /* If this is an SS hub descriptor response, cache it */
     if (descriptorType == USB_DT_SS_HUB)
     {
-        KprintfH("SS hub addr=%lu: caching USB3 hub descriptor (len=%lu)\n", (ULONG)udev->virtual_address, (ULONG)io->actual_length);
+        KprintfT("SS hub addr=%lu: caching USB3 hub descriptor (len=%lu)\n", (ULONG)udev->virtual_address, (ULONG)io->actual_length);
         xhci_hub_cache_ss_hub_descriptor(udev, hub, io->actual_length);
         xhci_hub_set_ss_hub_depth(udev);
 
@@ -347,7 +347,7 @@ void xhci_hub_handle_get_descriptor(struct usb_device *udev, struct USBIORequest
         {
             /* Build USB 2.0 descriptor from the SS descriptor we just cached */
             io->actual_length = xhci_hub_build_usb2_hub_descriptor(udev, (u8 *)io->data_buffer, io->data_buffer_length);
-            KprintfH("SS hub addr=%lu: translated USB3 descriptor to USB2 format. Size %lu bytes\n", (ULONG)udev->virtual_address, (ULONG)io->actual_length);
+            KprintfT("SS hub addr=%lu: translated USB3 descriptor to USB2 format. Size %lu bytes\n", (ULONG)udev->virtual_address, (ULONG)io->actual_length);
         }
     }
 }
@@ -376,7 +376,7 @@ void xhci_hub_handle_get_port_status(struct usb_device *udev, struct USBIOReques
         ((u16 *)io->data_buffer)[1] = le16(wChange);
     }
 
-    KprintfH("hub addr=%lu port=%lu status=%04lx change=%04lx\n", (ULONG)udev->virtual_address, (ULONG)port, (ULONG)wStatus, (ULONG)wChange);
+    KprintfT("hub addr=%lu port=%lu status=%04lx change=%04lx\n", (ULONG)udev->virtual_address, (ULONG)port, (ULONG)wStatus, (ULONG)wChange);
 
     /* Tear down any existing child as soon as the port is powered-but-disabled,
      * otherwise re-enumeration races the stale slot/context we still own. */
@@ -388,12 +388,12 @@ void xhci_hub_handle_get_port_status(struct usb_device *udev, struct USBIOReques
 
     if (port_lost_child)
     {
-        KprintfH("hub addr=%lu port=%lu lost power, disconnected, or disabled; removing child if any\n",
+        KprintfT("hub addr=%lu port=%lu lost power, disconnected, or disabled; removing child if any\n",
                  (ULONG)udev->virtual_address, (ULONG)port);
         struct usb_device *child = xhci_udev_find_child_on_port(udev, port);
         if (child)
         {
-            KprintfH("hub addr=%lu port=%lu tearing down child addr=%lu slot=%lu before re-enumeration\n",
+            KprintfT("hub addr=%lu port=%lu tearing down child addr=%lu slot=%lu before re-enumeration\n",
                      (ULONG)udev->virtual_address, (ULONG)port, (ULONG)child->virtual_address, (ULONG)child->slot_id);
             xhci_udev_disconnect(child, TRUE);
         }
@@ -411,7 +411,7 @@ void xhci_hub_handle_get_port_status(struct usb_device *udev, struct USBIOReques
                           USB_SS_PORT_STAT_C_BH_RESET |
                           USB_SS_PORT_STAT_C_LINK_STATE)))
         {
-            KprintfH("hub addr=%lu port=%lu speed=%lu SS attach ready; remembering for pending attach (raw_status=%04lx)\n",
+            KprintfT("hub addr=%lu port=%lu speed=%lu SS attach ready; remembering for pending attach (raw_status=%04lx)\n",
                      (ULONG)udev->virtual_address, (ULONG)port, (ULONG)speed, (ULONG)rawStatus);
             ctrl->pending_parent = udev;
             ctrl->pending_parent_port = port;
@@ -421,7 +421,7 @@ void xhci_hub_handle_get_port_status(struct usb_device *udev, struct USBIOReques
     /* USB 2.0 enables device after reset completes */
     else if ((wChange & USB_PORT_STAT_C_RESET) && (wStatus & (USB_PORT_STAT_CONNECTION | USB_PORT_STAT_ENABLE)))
     {
-        KprintfH("hub addr=%lu port=%lu speed=%lu reset-complete; remembering for pending attach (status=%04lx)\n",
+        KprintfT("hub addr=%lu port=%lu speed=%lu reset-complete; remembering for pending attach (status=%04lx)\n",
                  (ULONG)udev->virtual_address, (ULONG)port, (ULONG)speed, (ULONG)wStatus);
         ctrl->pending_parent = udev;
         ctrl->pending_parent_port = port;

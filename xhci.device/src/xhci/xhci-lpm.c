@@ -36,9 +36,9 @@
 #define Kprintf(fmt, ...) PrintPistorm("[xhci-lpm] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-#ifdef DEBUG_HIGH
-#undef KprintfH
-#define KprintfH(fmt, ...) PrintPistorm("[xhci-lpm] %s: " fmt, __func__, ##__VA_ARGS__)
+#ifdef TRACE
+#undef KprintfT
+#define KprintfT(fmt, ...) PrintPistorm("[xhci-lpm] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
 /* BESL selector (0-15) to microseconds — USB 2.0 LPM ECN Table; identical to
@@ -144,7 +144,7 @@ u32 xhci_calculate_mel(struct usb_device *udev)
     u32 mel_us = (mel_ns + 999u) / 1000u;
     if (mel_us > 0xffffU)
         mel_us = 0xffffU;
-    KprintfH("Calculated MEL for addr %lu: %lu us (u1_mel=%lu u2_mel=%lu ns)\n",
+    KprintfT("Calculated MEL for addr %lu: %lu us (u1_mel=%lu u2_mel=%lu ns)\n",
              (ULONG)udev->virtual_address, (ULONG)mel_us,
              (ULONG)udev->u1_mel, (ULONG)udev->u2_mel);
     return mel_us;
@@ -282,7 +282,7 @@ static void xhci_set_lpm_parameters(struct usb_device *udev)
     udev->u1_sel = udev->u1_pel + sel_extra;
     udev->u2_sel = udev->u2_pel + sel_extra;
 
-    KprintfH("LPM params addr %lu: U1 sel=%lu pel=%lu mel=%lu | U2 sel=%lu pel=%lu mel=%lu (ns)\n",
+    KprintfT("LPM params addr %lu: U1 sel=%lu pel=%lu mel=%lu | U2 sel=%lu pel=%lu mel=%lu (ns)\n",
              (ULONG)udev->virtual_address,
              (ULONG)udev->u1_sel, (ULONG)udev->u1_pel, (ULONG)udev->u1_mel,
              (ULONG)udev->u2_sel, (ULONG)udev->u2_pel, (ULONG)udev->u2_mel);
@@ -297,7 +297,7 @@ void xhci_lpm_parse_bos_caps(struct usb_device *udev, const u8 *buf, u32 len)
     if (!buf || hdr->bDescriptorType != USB_DT_BOS)
         return;
 
-    KprintfH("BOS descriptor total length is %lu, num device caps is %lu\n",
+    KprintfT("BOS descriptor total length is %lu, num device caps is %lu\n",
              (ULONG)le16(hdr->wTotalLength), (ULONG)hdr->bNumDeviceCaps);
     const u8 *cursor = buf + sizeof(struct usb_bos_descriptor);
     const u8 *end = buf + (u32)le16(hdr->wTotalLength);
@@ -328,7 +328,7 @@ void xhci_lpm_parse_bos_caps(struct usb_device *udev, const u8 *buf, u32 len)
                     udev->besl_baseline = (u8)USB_20_EXTENSION_ATT_BESL_BASELINE(att);
                 if (udev->besl_deep_valid)
                     udev->besl_deep = (u8)USB_20_EXTENSION_ATT_BESL_DEEP(att);
-                KprintfH("USB2 Ext Cap: lpm=%ld besl=%ld baseline=%lu(v=%ld) deep=%lu(v=%ld)\n",
+                KprintfT("USB2 Ext Cap: lpm=%ld besl=%ld baseline=%lu(v=%ld) deep=%lu(v=%ld)\n",
                          (LONG)udev->lpm_capable, (LONG)udev->besl_supported,
                          (ULONG)udev->besl_baseline, (LONG)udev->besl_baseline_valid,
                          (ULONG)udev->besl_deep, (LONG)udev->besl_deep_valid);
@@ -341,17 +341,17 @@ void xhci_lpm_parse_bos_caps(struct usb_device *udev, const u8 *buf, u32 len)
                 udev->u1_dev_exit_lat = ss->bU1DevExitLat;
                 udev->u2_dev_exit_lat = le16(ss->wU2DevExitLat);
                 udev->ltm_capable = (ss->bmAttributes & USB_SS_DEVICE_ATT_LATENCY_TOLERANCE_MESSAGES) != 0;
-                KprintfH("SS Dev Cap: U1=%lu U2=%lu\n",
+                KprintfT("SS Dev Cap: U1=%lu U2=%lu\n",
                          (ULONG)udev->u1_dev_exit_lat, (ULONG)udev->u2_dev_exit_lat);
             }
         }
 
         cursor += caplen;
     }
-    KprintfH("Finished parsing BOS device capabilities for addr=%lu\n", (ULONG)udev->virtual_address);
-    KprintfH("Device LPM capability: %ld, BESL support: %ld, BESL baseline: %lu\n",
+    KprintfT("Finished parsing BOS device capabilities for addr=%lu\n", (ULONG)udev->virtual_address);
+    KprintfT("Device LPM capability: %ld, BESL support: %ld, BESL baseline: %lu\n",
              (LONG)udev->lpm_capable, (LONG)udev->besl_supported, (ULONG)udev->besl_baseline);
-    KprintfH("Device U1 exit latency: %lu us, U2 exit latency: %lu us\n",
+    KprintfT("Device U1 exit latency: %lu us, U2 exit latency: %lu us\n",
              (ULONG)udev->u1_dev_exit_lat, (ULONG)udev->u2_dev_exit_lat);
 
     /* For SS devices, LPM capability comes from the SS Device Cap exit
@@ -437,7 +437,7 @@ static BOOL xhci_udev_send_set_sel(struct usb_device *udev)
         return FALSE;
     }
 
-    KprintfH("SET_SEL addr %lu: u1 sel=%lu pel=%lu, u2 sel=%lu pel=%lu (us)\n",
+    KprintfT("SET_SEL addr %lu: u1 sel=%lu pel=%lu, u2 sel=%lu pel=%lu (us)\n",
              (ULONG)udev->virtual_address, (ULONG)u1_sel, (ULONG)u1_pel,
              (ULONG)u2_sel, (ULONG)u2_pel);
     return TRUE;
@@ -454,7 +454,7 @@ static void xhci_udev_set_device_lpm(struct usb_device *udev, BOOL u2)
                                    0 /* wIndex */,
                                    0 /* wLength */,
                                    FALSE /* send now */);
-    KprintfH("SET_FEATURE %s_ENABLE addr %lu\n", u2 ? "U2" : "U1", (ULONG)udev->virtual_address);
+    KprintfT("SET_FEATURE %s_ENABLE addr %lu\n", u2 ? "U2" : "U1", (ULONG)udev->virtual_address);
 }
 
 /* Enable device-initiated Latency Tolerance Messaging via SET_FEATURE.
@@ -538,7 +538,7 @@ static void xhci_usb2_set_hw_lpm(struct usb_device *udev)
     xhci_roothub_set_usb2_hw_lpm(ctrl->root_hub, root_port, hird, udev->slot_id,
                                  besl_mode, besld, XHCI_L1_TIMEOUT);
 
-    KprintfH("USB2 HW LPM enabled: port %lu slot %lu hird=%lu besl_cap=%ld\n",
+    KprintfT("USB2 HW LPM enabled: port %lu slot %lu hird=%lu besl_cap=%ld\n",
              (ULONG)root_port, (ULONG)udev->slot_id, (ULONG)hird, (LONG)besl_mode);
 }
 
