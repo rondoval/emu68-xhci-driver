@@ -33,6 +33,12 @@ struct ep_context
     IOReqList stop_abort_reqs;
     BOOL stop_process_timeouts;
 
+    /* TRUE between the suspend path's Stop Endpoint and its completion: an
+     * abort arriving in that window is queued on stop_abort_reqs and recovered
+     * from the stop's completion; once clear, the ring is known stopped and
+     * recovery runs synchronously against the output-context dequeue. */
+    BOOL suspend_stop_pending;
+
     /* Driver-initiated STALL recovery already sent CLEAR_FEATURE(HALT) to the
      * device; the next stack-issued clear-halt is a duplicate and is answered
      * without a wire request (consumed by xhci_ep_consume_halt_synced). */

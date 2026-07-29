@@ -96,6 +96,9 @@ void xhci_ep_request_stop(struct ep_context *ep_ctx);
  * semantics. */
 BOOL xhci_ep_process_stop(struct ep_context *ep_ctx, dma_addr_t *deq_ptr);
 BOOL xhci_ep_request_suspend(struct ep_context *ep_ctx);
+/* The suspend path's Stop Endpoint completed (handle_stop_ring, SUSPENDED
+ * branch): run any abort/timeout recovery queued while the stop sequenced. */
+void xhci_ep_suspend_stop_complete(struct ep_context *ep_ctx);
 void xhci_ep_resume(struct ep_context *ep_ctx);
 
 /* Clear-halt deduplication for the driver's own STALL recovery (see

@@ -21,6 +21,12 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl);
 
 void xhci_reset_ep(struct usb_device *udev, u8 ep_index);
 void xhci_stop_ring(struct usb_device *udev, u8 ep_index);
+/* Set TR Deq for one ring (endpoint must be Stopped or in Error); stream_id
+ * 0 = the default ring. */
+void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16 stream_id);
+/* Reset every transfer ring of the endpoint to its software enqueue position
+ * — the ring-flush half of every recovery path. */
+void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx);
 void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct xhci_xfer *req);
 void xhci_address_device(struct usb_device *udev, struct xhci_xfer *req);
 void xhci_reset_device(struct usb_device *udev);

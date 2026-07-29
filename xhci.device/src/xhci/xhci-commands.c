@@ -30,8 +30,6 @@
 struct pending_command; /* forward declaration */
 
 /* TU-local command issuers (used before their definitions) */
-static void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16 stream_id);
-static void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx);
 static void xhci_enable_slot(struct usb_device *udev, struct xhci_xfer *req);
 typedef void (*command_handler)(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event);
 
@@ -348,6 +346,7 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
         if (comp != COMP_SUCCESS && comp != COMP_CTX_STATE)
             Kprintf("Suspend stop EP %lu: unexpected completion code %lu\n", (ULONG)ep_index, (ULONG)comp);
         xhci_udev_suspend_stop_done(cmd->udev);
+        xhci_ep_suspend_stop_complete(ep_ctx);
         return;
     }
 
@@ -786,7 +785,7 @@ void xhci_stop_ring(struct usb_device *udev, u8 ep_index)
  * Used after a reset endpoint command to continue processing.
  * The endpoint needs to be either in Error or Stopped state.
  */
-static void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16 stream_id)
+void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16 stream_id)
 {
     struct xhci_ctrl *ctrl = udev->controller;
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
@@ -804,7 +803,7 @@ static void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_p
  * endpoint gets one command per stream ring (the setdeq counter lets
  * handle_set_deq act only on the last completion); a plain endpoint gets the
  * classic single command. */
-static void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx)
+void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx)
 {
     const u8 ep_index = xhci_ep_get_ep_index(ep_ctx);
     const u16 num_streams = xhci_ep_streams_count(ep_ctx);
@@ -910,6 +909,9 @@ static void xhci_enable_slot(struct usb_device *udev, struct xhci_xfer *req)
 void xhci_disable_slot(struct usb_device *udev)
 {
     struct xhci_ctrl *ctrl = udev->controller;
+    /* Bare ABORTING with no Stop Endpoint outstanding: an abort landing in
+     * this window queues its node but issues nothing — it is retired by the
+     * DISABLE_SLOT completion (xhci_udev_free) or its command timeout. */
     for (u8 ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
     {
         struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);

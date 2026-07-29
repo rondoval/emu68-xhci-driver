@@ -158,6 +158,9 @@ static u32 Do_CMD_FLUSH(struct IORequest *io)
         if (!udev)
             continue;
 
+        /* A SET_SUSPEND op caught mid-sequence is a pending request too. */
+        xhci_udev_suspend_cancel(udev, IOERR_ABORTED);
+
         for (u8 ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ++ep_index)
         {
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);

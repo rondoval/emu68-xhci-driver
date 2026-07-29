@@ -325,6 +325,11 @@ static void xhci_ep_kick_all_streams(struct ep_context *ep_ctx)
 
 void xhci_ep_flush_complete(struct ep_context *ep_ctx)
 {
+    /* A recovery finishing on a still-suspended endpoint must not restart
+     * anything: survivors and pending stay parked until xhci_ep_resume(). */
+    if (ep_ctx->state == USB_DEV_EP_STATE_SUSPENDED)
+        return;
+
     if (ep_ctx->streams && !xhci_td_is_empty(ep_ctx->active_tds))
         xhci_ep_kick_all_streams(ep_ctx);
 
@@ -417,11 +422,25 @@ static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx)
     ep_ctx->stop_process_timeouts = FALSE;
 }
 
+/* Abort/timeout recovery for an endpoint whose ring the suspend path already
+ * stopped: identical mechanics to handle_stop_ring's recovery half minus any
+ * restart — the endpoint stays SUSPENDED and xhci_ep_resume() restarts the
+ * survivors after U0.  The stopped dequeue comes from the output EP context
+ * (valid any time while stopped); a streams endpoint queues its own per-stream
+ * Set TR Deq commands inside xhci_ep_process_stop. */
+static void xhci_ep_recover_stopped(struct ep_context *ep_ctx)
+{
+    dma_addr_t deq_ptr = 0;
+    if (xhci_ep_process_stop(ep_ctx, &deq_ptr) && deq_ptr)
+        xhci_set_deq_pointer(ep_ctx->udev, ep_ctx->ep_index, (u32)deq_ptr, 0);
+}
+
 static void xhci_ep_prepare_stop_processing(struct ep_context *ep_ctx, struct xhci_xfer *abort_req, BOOL process_timeouts)
 {
     enum ep_state state = xhci_ep_get_state(ep_ctx);
     if (state != USB_DEV_EP_STATE_RECEIVING &&
-        state != USB_DEV_EP_STATE_ABORTING)
+        state != USB_DEV_EP_STATE_ABORTING &&
+        state != USB_DEV_EP_STATE_SUSPENDED)
         return;
 
     if (abort_req)
@@ -433,10 +452,35 @@ static void xhci_ep_prepare_stop_processing(struct ep_context *ep_ctx, struct xh
             return;
 
         if (!xhci_ep_append_stop_abort_request(ep_ctx, abort_req))
-            return;
+        {
+            /* No node for a surgical abort: degrade to whole-endpoint
+             * recovery rather than dropping the request — the completion
+             * contract must hold even out of memory.  Suspended: the ring is
+             * already stopped, retire-and-re-arm right here.  Otherwise drop
+             * the surgical plan; the stop lands with no markers and the
+             * ordinary-stop fallback (set_failed + ring flush) retires
+             * everything. */
+            xhci_ep_clear_stop_processing(ep_ctx);
+            if (state == USB_DEV_EP_STATE_SUSPENDED)
+            {
+                xhci_ep_set_failed(ep_ctx);
+                xhci_flush_ep_rings(ep_ctx->udev, ep_ctx);
+                return;
+            }
+        }
     }
 
     ep_ctx->stop_process_timeouts |= process_timeouts;
+
+    if (state == USB_DEV_EP_STATE_SUSPENDED)
+    {
+        /* Ring already stopped for U3: no command, no state excursion, no
+         * doorbell.  A suspend stop still sequencing runs the recovery from
+         * its completion (xhci_ep_suspend_stop_complete). */
+        if (!ep_ctx->suspend_stop_pending)
+            xhci_ep_recover_stopped(ep_ctx);
+        return;
+    }
 
     if (ep_ctx->state != USB_DEV_EP_STATE_ABORTING)
     {
@@ -470,6 +514,16 @@ void xhci_ep_request_stop(struct ep_context *ep_ctx)
     if (state == USB_DEV_EP_STATE_ABORTING)
         return;
 
+    if (state == USB_DEV_EP_STATE_SUSPENDED)
+    {
+        /* CMD_FLUSH on a parked endpoint: the ring is already stopped —
+         * retire everything in place and re-arm to the software enqueue
+         * (the ordinary-stop fallback minus the redundant Stop Endpoint). */
+        xhci_ep_set_failed(ep_ctx);
+        xhci_flush_ep_rings(ep_ctx->udev, ep_ctx);
+        return;
+    }
+
     if (state != USB_DEV_EP_STATE_RECEIVING &&
         state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
         return;
@@ -494,11 +548,21 @@ BOOL xhci_ep_request_suspend(struct ep_context *ep_ctx)
     case USB_DEV_EP_STATE_IDLE:
     case USB_DEV_EP_STATE_RECEIVING:
         xhci_ep_transition(ep_ctx, USB_DEV_EP_STATE_SUSPENDED);
+        ep_ctx->suspend_stop_pending = TRUE;
         xhci_stop_ring(ep_ctx->udev, ep_ctx->ep_index);
         return TRUE;
     default:
         return FALSE;
     }
+}
+
+/* The suspend path's Stop Endpoint completed (handle_stop_ring, SUSPENDED
+ * branch): the ring is now known stopped — run any abort/timeout recovery
+ * queued while the stop was sequencing. */
+void xhci_ep_suspend_stop_complete(struct ep_context *ep_ctx)
+{
+    ep_ctx->suspend_stop_pending = FALSE;
+    xhci_ep_recover_stopped(ep_ctx);
 }
 
 /* Restart an endpoint after port resume: restore the pre-suspend state, kick
