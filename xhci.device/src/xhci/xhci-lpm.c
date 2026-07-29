@@ -348,6 +348,15 @@ BOOL xhci_lpm_set_link_power(struct usb_device *udev, struct UhcdSetLinkPower *o
         udev->lpm.capable = (op->slo_Flags & UHCD_LPF_USB2_LPM) ? TRUE : FALSE;
     }
 
+    /* Policy withheld (the stack zeroed the enables and dropped the capability
+     * flags) or the device lost the capability: tear down whatever an earlier op
+     * armed.  Without this the HS branch below early-returns and leaves
+     * PORTPMSC.HLE set with a stale L1DS pointing at this slot.  Runs before
+     * xhci_set_lpm_parameters(), which early-returns on !capable and so leaves
+     * usb2_hw_lpm_capable - the fact xhci_lpm_disable() needs - intact. */
+    if (!udev->lpm.capable && udev->lpm.setup_done)
+        xhci_lpm_disable(udev);
+
     xhci_set_lpm_parameters(udev);
 
     /* Outputs default to "nothing to issue"; a repeated op re-arms cleanly. */
@@ -371,7 +380,10 @@ BOOL xhci_lpm_set_link_power(struct usb_device *udev, struct UhcdSetLinkPower *o
     if (udev->speed == USB_SPEED_HIGH)
     {
         xhci_usb2_set_hw_lpm(udev);
-        udev->lpm.setup_done = TRUE;
+        /* "armed", not "visited": a withheld policy must not leave setup_done
+         * set, or the teardown above re-runs the register clear on every
+         * subsequent op. */
+        udev->lpm.setup_done = udev->lpm.capable;
         return FALSE;
     }
 
