@@ -1,13 +1,14 @@
 name: Versioning
 
 # Gates every PR on a version bump + RELEASE-NOTES.md update + a clean build inside
-# the stack, and auto-tags v<version> on merge to main. The logic lives in the
-# stack's reusable workflow so all components stay in lock-step.
+# the stack, and auto-tags v<version> on merge to main or context_release (the 5.x
+# classic-HCD and 6.x context-ABI release lines). The logic lives in the stack's
+# reusable workflow so all components stay in lock-step.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, context_release]
   push:
-    branches: [main]
+    branches: [main, context_release]
 
 permissions:
   contents: write
@@ -16,4 +17,6 @@ jobs:
   versioning:
     uses: rondoval/emu68-driver-stack/.github/workflows/component-versioning.yml@main
     with:
-      source_dir_var: EMU68_XHCI_SOURCE_DIR
+      # This branch is the 6.x line; the 5.x line on main passes
+      # EMU68_XHCI_LEGACY_SOURCE_DIR from its own copy of this file.
+      source_dir_var: EMU68_XHCI_CONTEXT_SOURCE_DIR
