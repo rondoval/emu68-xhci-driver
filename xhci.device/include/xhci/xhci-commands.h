@@ -29,10 +29,9 @@ void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16
 void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx);
 void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct xhci_xfer *req);
 void xhci_address_device(struct usb_device *udev, struct xhci_xfer *req);
-void xhci_reset_device(struct usb_device *udev);
-/* Set TR Deq only the stream rings marked in map (bit id set) — the surgical
- * recovery flush; handle_set_deq restarts the endpoint after the last one. */
-void xhci_flush_ep_streams_marked(struct usb_device *udev, struct ep_context *ep_ctx, const u32 *map);
+/* xHCI 4.6.11 Reset Device chained into a BSR=0 re-address; req is the
+ * NSCMD_USB_RESET_DEVICE op being served (replied from the chain). */
+void xhci_reset_device(struct usb_device *udev, struct xhci_xfer *req);
 void xhci_disable_slot(struct usb_device *udev);
 
 #endif /* XHCI_COMMANDS_H */

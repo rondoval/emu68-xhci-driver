@@ -12,6 +12,7 @@
 
 #include <slab.h>
 #include <xhci/xhci-endpoint.h>
+#include <xhci/xhci-ring.h>
 #include "xhci-td-priv.h"
 
 struct ep_context
@@ -25,13 +26,19 @@ struct ep_context
                               * context wiring so submits skip the device-context
                               * invalidate+read; 0 = not wired */
 
-    IOReqList pending_reqs;             /* list of pending requests */
-    TransferDescriptorList *active_tds; /* list of in-flight TDs */
+    IOReqList pending_reqs; /* list of pending requests */
 
-    struct xhci_ring *ring; /* ring for this endpoint */
+    struct xhci_ring *ring; /* default ring for this endpoint; in-flight TDs
+                             * live on each ring's own TD list */
 
     IOReqList stop_abort_reqs;
     BOOL stop_process_timeouts;
+
+    /* Outstanding Set TR Deq commands of the recovery/flush in flight (one
+     * per targeted ring; a plain endpoint's recovery is just count 1).
+     * handle_set_deq consumes them and restarts the endpoint after the
+     * last. */
+    u16 pending_setdeq;
 
     /* TRUE between the suspend path's Stop Endpoint and its completion: an
      * abort arriving in that window is queued on stop_abort_reqs and recovered
@@ -63,17 +70,16 @@ struct ep_context
 
 /* Per-endpoint stream mode: the linear stream context array the endpoint
  * context points at while in stream mode, plus one transfer ring per stream
- * id.  TDs of every stream share the endpoint's active_tds list — transfer
- * events resolve by TRB address, which is ring-agnostic. */
+ * id.  Each stream ring carries its own TD list, so recovery and restarts
+ * know exactly which rings hold TDs; transfer events (which carry no stream
+ * id) resolve TRB → ring by a bounded scan of the rings' lists. */
 struct ep_streams
 {
     u16 num_streams;                   /* valid stream ids: 1..num_streams */
     u8 max_pstreams;                   /* MaxPStreams exponent programmed into the EP context */
-    u16 pending_setdeq;                /* outstanding per-stream Set TR Deq commands (recovery) */
     struct xhci_stream_ctx *ctx_array; /* DMA: 2^(max_pstreams+1) entries */
     u32 ctx_array_bytes;
     struct xhci_ring **rings;          /* [0..num_streams]; [0] unused */
-    u32 *recover_map;                  /* recovery scratch: bit id = stream targeted */
 };
 
 /* Per-endpoint clock-driven iso streaming state (NSCMD_USB_REGISTER_HOOKS ..
@@ -123,9 +129,16 @@ void xhci_ep_schedule_next(struct ep_context *ep_ctx);
 void xhci_ep_rt_iso_fire_release(struct ep_context *ep_ctx);
 void xhci_ep_destroy_rt_staging_slab(struct ep_context *ep_ctx);
 
+/* The default ring's TD list (RT-ISO and single-ring paths; RT-ISO endpoints
+ * never have streams). */
+static inline TransferDescriptorList *ep_default_tds(struct ep_context *ep_ctx)
+{
+    return xhci_ring_get_td_list(ep_ctx->ring);
+}
+
 static inline u32 xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
 {
-    return xhci_td_get_queued_td_count(ep_ctx->active_tds);
+    return xhci_td_get_queued_td_count(ep_default_tds(ep_ctx));
 }
 
 #endif /* __XHCI_ENDPOINT_PRIV_H */

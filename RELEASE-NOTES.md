@@ -23,6 +23,19 @@ Changes since v5.2.
 
 ---
 
+## Aborts complete on suspended endpoints
+
+Aborting a transfer parked on a suspended endpoint (port in U3) used to be a
+silent no-op: the completion never arrived, and a device unplugged while
+suspended could hang its class task — and with it the hub teardown chain —
+forever, leaving stale devices in the stack and a dead port.  Aborts (and NAK
+timeout recovery) now retire the targeted transfers while the endpoint stays
+suspended; surviving transfers still restart on resume.  A `CMD_FLUSH` arriving
+mid-suspend-sequence now also cancels the sequence instead of orphaning the
+`SET_SUSPEND` op.
+
+---
+
 ## Firmware gate for rangeops builds
 
 Builds using the inline Emu68 range cache opcodes (`EMU68_FORCE_LVO_CACHE_OPS`

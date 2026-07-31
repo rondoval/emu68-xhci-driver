@@ -273,6 +273,7 @@ struct xhci_erst;
 struct xhci_intr_reg;
 struct usb_device;
 struct ep_context;
+struct TransferDescriptorList;
 
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 							BOOL link_trbs, BOOL is_event_ring, u8 ep_index, u32 max_packet_size);
@@ -284,6 +285,20 @@ BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_
  * <xhci/xhci-submit.h>; this header is the ring/segment mechanics only. */
 
 void xhci_ring_set_stream_id(struct xhci_ring *ring, u16 stream_id);
+
+/* The ring's in-flight TD list (opaque here; only the TD tracker looks
+ * inside).  Set by xhci_td_create_list, cleared by xhci_td_destroy_list;
+ * NULL for event/command rings. */
+void xhci_ring_set_td_list(struct xhci_ring *ring, struct TransferDescriptorList *td_list);
+struct TransferDescriptorList *xhci_ring_get_td_list(struct xhci_ring *ring);
+/* This ring's TRB occupancy, the room policy's whole state: the submit layer
+ * reserves a TD's TRBs before emitting them (and releases them again if the
+ * TD never reaches the hardware), the TD tracker releases them as the TD
+ * leaves the ring.  needed counts the TRBs the caller is about to emit. */
+u32 xhci_ring_get_queued_trbs(struct xhci_ring *ring);
+void xhci_ring_reserve_trbs(struct xhci_ring *ring, u32 trb_count);
+void xhci_ring_release_trbs(struct xhci_ring *ring, u32 trb_count);
+BOOL xhci_ring_has_room(struct xhci_ring *ring, u32 needed);
 
 void xhci_ring_consume_event(struct xhci_ctrl *ctrl);
 void xhci_ring_ack_events(struct xhci_ctrl *ctrl);

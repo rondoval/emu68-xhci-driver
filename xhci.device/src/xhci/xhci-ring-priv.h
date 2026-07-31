@@ -27,7 +27,13 @@ struct xhci_ring
 	u32 num_segs;
 	u32 max_packet_size;
 	u32 queued_trbs; /* TRBs of in-flight TDs on THIS ring (per-stream-accurate
-	                  * room accounting; maintained by the submit layer) */
+	                  * room accounting; xhci-ring.c owns every access -
+	                  * xhci_ring_reserve_trbs / _release_trbs / _has_room) */
+
+	/* This ring's in-flight TDs.  Owned and tracked by the endpoint layer
+	 * (xhci-td.c is the only code that looks inside); transfer rings only,
+	 * NULL for event/command rings. */
+	struct TransferDescriptorList *td_list;
 
 	struct xhci_segment *first_seg;
 	union xhci_trb *enqueue;

@@ -64,8 +64,8 @@ struct TransferDescriptorList
 {
     struct MinList list;
     struct xhci_ctrl *ctrl;
-    u32 queued_trbs;
     u32 queued_tds;
+    struct xhci_ring *ring;    /* the ring these TDs ride (one list per ring) */
     struct ep_context *ep_ctx; /* back-reference for per-endpoint resource cleanup */
 };
 
@@ -79,7 +79,8 @@ void xhci_td_slab_destroy(struct xhci_ctrl *ctrl)
     slab_cache_destroy(&ctrl->td_slab);
 }
 
-TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
+TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx,
+                                            struct xhci_ring *ring)
 {
     TransferDescriptorList *td_list = pool_zalloc(ctrl->metaPool, sizeof(TransferDescriptorList));
     if (!td_list)
@@ -90,10 +91,11 @@ TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_co
 
     _NewMinList(&td_list->list);
     td_list->ctrl = ctrl;
-    td_list->queued_trbs = 0;
     td_list->queued_tds = 0;
+    td_list->ring = ring;
     td_list->ep_ctx = ep_ctx;
 
+    xhci_ring_set_td_list(ring, td_list);
     return td_list;
 }
 
@@ -104,6 +106,7 @@ void xhci_td_destroy_list(TransferDescriptorList *td_list, s8 error_code)
 
     xhci_td_fail_all(td_list, error_code);
 
+    xhci_ring_set_td_list(td_list->ring, NULL);
     pool_free(td_list->ctrl->metaPool, td_list);
 }
 
@@ -137,14 +140,6 @@ BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
     }
 
     return FALSE;
-}
-
-u32 xhci_td_get_queued_trb_count(TransferDescriptorList *td_list)
-{
-    if (!td_list)
-        return 0;
-
-    return td_list->queued_trbs;
 }
 
 struct xhci_xfer *xhci_td_find_cookie_request(TransferDescriptorList *td_list, APTR cookie)
@@ -189,7 +184,6 @@ static struct xhci_td *td_alloc_common(TransferDescriptorList *td_list,
 
 static void td_append(TransferDescriptorList *td_list, struct xhci_td *td)
 {
-    td_list->queued_trbs += td->trb_count;
     td_list->queued_tds++;
     AddTailMinList(&td_list->list, (struct MinNode *)td);
 }
@@ -305,25 +299,10 @@ static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_
     return NULL;
 }
 
-/* Stream ring a TD rides: the owning request's stream id (RT ISO TDs never
- * ride stream endpoints). */
-static inline u16 td_stream_id(struct xhci_td *td)
-{
-    return (!td->is_rt_iso && td->u.req) ? td->u.req->stream_id : 0;
-}
-
 static void xhci_td_decrease_queued(TransferDescriptorList *td_list, struct xhci_td *td)
 {
     if (td->trb_count > 0)
-    {
-        if (td_list->queued_trbs >= td->trb_count)
-            td_list->queued_trbs -= td->trb_count;
-        else
-            td_list->queued_trbs = 0;
-
-        /* per-ring room accounting mirrors the endpoint-wide counters */
-        xhci_submit_release_trbs(td_list->ep_ctx, td_stream_id(td), td->trb_count);
-    }
+        xhci_ring_release_trbs(td_list->ring, td->trb_count);
 
     if (td_list->queued_tds > 0)
         td_list->queued_tds--;
@@ -526,22 +505,29 @@ static void td_abort_recovery_requests(TransferDescriptorList *td_list,
     }
 }
 
-void xhci_td_patch_recovery(TransferDescriptorList *td_list,
-                            struct xhci_ring *ring,
-                            IOReqList *abort_reqs,
-                            dma_addr_t stopped_deq_ptr,
-                            dma_addr_t *new_deq_ptr)
+dma_addr_t xhci_td_resolve_recovery(TransferDescriptorList *td_list,
+                                    struct xhci_ring *ring,
+                                    IOReqList *abort_reqs,
+                                    u32 now_us,
+                                    dma_addr_t stopped_deq_ptr)
 {
-    if (!td_list || !ring || !new_deq_ptr || !stopped_deq_ptr)
+    if (!td_list || !ring || !stopped_deq_ptr)
+        return 0;
+
+    dma_addr_t new_deq = 0;
+    td_resolve_recovery_deq_ptr(td_list, ring, abort_reqs, now_us,
+                                stopped_deq_ptr, &new_deq);
+    return new_deq;
+}
+
+void xhci_td_abort_recovery(TransferDescriptorList *td_list,
+                            IOReqList *abort_reqs,
+                            u32 now_us,
+                            dma_addr_t stopped_deq_ptr)
+{
+    if (!td_list)
         return;
 
-    u32 now_us = get_time();
-
-    td_resolve_recovery_deq_ptr(td_list, ring,
-                                abort_reqs, now_us,
-                                stopped_deq_ptr, new_deq_ptr);
-    Kprintf("recovery: HW stopped deq %08lx -> new deq %08lx\n",
-            (ULONG)stopped_deq_ptr, (ULONG)*new_deq_ptr);
     td_abort_recovery_requests(td_list, abort_reqs, now_us,
                                stopped_deq_ptr & ~(dma_addr_t)EP_CTX_CYCLE_MASK);
 }
@@ -636,70 +622,26 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
     while ((n = RemHeadMinList(&td_list->list)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)n;
-        xhci_submit_release_trbs(td_list->ep_ctx, td_stream_id(td), td->trb_count);
+        xhci_ring_release_trbs(td_list->ring, td->trb_count);
         td_unmap_and_reply(td_list, td, io_Error, 0);
         xhci_td_free(td_list, td);
     }
 
-    td_list->queued_trbs = 0;
     td_list->queued_tds = 0;
 }
 
-BOOL xhci_td_mark_recovery_streams(TransferDescriptorList *td_list,
-                                   IOReqList *abort_reqs,
-                                   u32 now_us,
-                                   u32 *map, u16 num_streams)
+BOOL xhci_td_has_recovery_victim(TransferDescriptorList *td_list,
+                                 IOReqList *abort_reqs, u32 now_us)
 {
-    BOOL any = FALSE;
-
     if (!td_list)
         return FALSE;
 
     for (struct MinNode *n = td_list->list.mlh_Head; n && n->mln_Succ; n = n->mln_Succ)
     {
-        struct xhci_td *td = (struct xhci_td *)n;
-        if (!td_is_recovery_abort(td, abort_reqs, now_us))
-            continue;
-
-        u16 id = td_stream_id(td);
-        if (id >= 1 && id <= num_streams)
-        {
-            xhci_stream_map_set(map, id);
-            any = TRUE;
-        }
+        if (td_is_recovery_abort((struct xhci_td *)n, abort_reqs, now_us))
+            return TRUE;
     }
 
-    return any;
-}
-
-/* No TRB noop-patching here (unlike the single-ring patch recovery): every
- * marked ring is reset whole to its software enqueue position, so the
- * hardware never revisits the failed TDs' TRBs. */
-void xhci_td_fail_streams(TransferDescriptorList *td_list, const u32 *map, u32 now_us)
-{
-    if (!td_list)
-        return;
-
-    struct MinNode *node = td_list->list.mlh_Head;
-    while (node && node->mln_Succ)
-    {
-        struct xhci_td *td = (struct xhci_td *)node;
-        struct MinNode *next = node->mln_Succ;
-        u16 id = td_stream_id(td);
-
-        if (id && xhci_stream_map_test(map, id))
-        {
-            RemoveMinNode((struct MinNode *)td);
-            xhci_td_decrease_queued(td_list, td);
-            /* A deadline expiry is a NAK timeout; ring-mates die as recovery
-             * collateral. */
-            td_unmap_and_reply(td_list, td,
-                               td_is_expired_at(td, now_us) ? UHIOERR_NAKTIMEOUT : IOERR_ABORTED,
-                               0);
-            xhci_td_free(td_list, td);
-        }
-
-        node = next;
-    }
+    return FALSE;
 }
 

@@ -3,6 +3,8 @@
 #include <debug.h>
 #include <config.h>
 
+#include <exec/errors.h>
+
 #include <iomem.h>
 #include <memory.h>
 #include <timing.h>
@@ -136,6 +138,21 @@ static void xhci_fail_timed_out_command(struct pending_command *cmd)
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, cmd->ep_index);
             if (ep_ctx)
                 xhci_ep_set_failed(ep_ctx);
+        }
+        break;
+
+    case TRB_RESET_DEV:
+        /* Nothing may resubmit into a half-reset slot; the generic tail
+         * replies the op with UHIOERR_TIMEOUT (device-lost to the stack). */
+        if (cmd->udev)
+        {
+            Kprintf("Reset Device timed out for slot %lu\n", (ULONG)cmd->udev->slot_id);
+            for (u8 ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
+            {
+                struct ep_context *ep_ctx = xhci_ep_get_context_for_index(cmd->udev, ep_index);
+                if (ep_ctx)
+                    xhci_ep_set_failed(ep_ctx);
+            }
         }
         break;
 
@@ -283,9 +300,9 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
     }
     KprintfT("Set DEQ for EP %lu completed successfully, status code %lu (success=1)\n", (ULONG)ep_index, (ULONG)comp);
 
-    /* A streams flush issues one Set TR Deq per stream ring; the endpoint
+    /* A flush/recovery issues one Set TR Deq per targeted ring; the endpoint
      * restarts (and the reset epilogue runs) only after the last one. */
-    if (!xhci_ep_streams_setdeq_consume(ep_ctx))
+    if (!xhci_ep_setdeq_consume(ep_ctx))
         return;
 
     if (xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_RESETTING)
@@ -359,17 +376,12 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     KprintfT("Stopped EP %lu with completion code %lu\n", (ULONG)ep_index, (ULONG)comp);
 
-    dma_addr_t deq_ptr = 0;
-    if (xhci_ep_process_stop(ep_ctx, &deq_ptr))
-    {
-        /* abort/timeout recovery: a streams endpoint queued its per-stream
-         * Set TR Deq commands itself (deq_ptr stays 0) */
-        if (deq_ptr)
-            xhci_set_deq_pointer(cmd->udev, ep_index, (u32)deq_ptr, 0);
+    /* abort/timeout recovery: process_stop issues its per-ring Set TR Deq
+     * commands itself */
+    if (xhci_ep_process_stop(ep_ctx))
         return;
-    }
 
-    /* ordinary stop command */
+    /* ordinary stop command (or an anomalous stopped dequeue degraded here) */
     xhci_ep_set_failed(ep_ctx);
     xhci_flush_ep_rings(cmd->udev, ep_ctx);
 }
@@ -563,19 +575,34 @@ static void handle_address_device(struct xhci_ctrl *ctrl, struct pending_command
 static void handle_reset_device(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
     (void)ctrl;
-#ifndef DEBUG
-    (void)cmd; /* only referenced by debug logging below */
-#endif
     const u32 status = le32(event->event_cmd.status);
+    struct usb_device *udev = cmd->udev;
 
     KprintfT("event status=%08lx flags=%08lx\n", (ULONG)status, (ULONG)le32(event->event_cmd.flags));
     if (GET_COMP_CODE(status) != COMP_SUCCESS)
     {
-        Kprintf("ERROR: Reset Device command failed for slot %lu.\n", (ULONG)cmd->udev->slot_id);
+        Kprintf("ERROR: Reset Device command failed for slot %lu.\n", (ULONG)udev->slot_id);
+        if (cmd->req)
+            xhci_xfer_complete(udev, cmd->req, UHIOERR_HOSTERROR, 0);
         return;
     }
 
-    KprintfT("Reset Device for slot %lu completed successfully.\n", (ULONG)cmd->udev->slot_id);
+    KprintfT("Reset Device for slot %lu completed successfully.\n", (ULONG)udev->slot_id);
+
+    /* The command dropped every endpoint but EP0 and put the slot in
+     * Default: retire ALL software endpoint contexts (streams die with
+     * them), failing everything in flight — recovery collateral, not
+     * timeouts (the dead-count weighs TIMEOUT +3).  EP0 is rebuilt fresh by
+     * the chained Address Device (ctx_wire_ep0), and the device's endpoint
+     * tokens stay valid: the token generation is stamped per CREATE_DEVICE,
+     * not per endpoint context. */
+    xhci_ep_destroy_contexts(udev, IOERR_ABORTED);
+    udev->slot_state = USB_DEV_SLOT_STATE_DEFAULT;
+
+    /* BSR=0 re-address, threading the op reply: handle_address_device
+     * replies it on success (handle preserved, device Addressed) and
+     * disables the slot on failure (an op error is device-lost). */
+    xhci_address_device(udev, cmd->req);
 }
 
 /*
@@ -810,7 +837,7 @@ void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx)
 
     if (num_streams)
     {
-        xhci_ep_streams_setdeq_begin(ep_ctx, num_streams);
+        xhci_ep_setdeq_begin(ep_ctx, num_streams);
         for (u16 id = 1; id <= num_streams; ++id)
         {
             struct xhci_ring *ring = xhci_ep_get_ring_for_stream(ep_ctx, id);
@@ -820,58 +847,23 @@ void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx)
     }
 
     struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
+    xhci_ep_setdeq_begin(ep_ctx, 1);
     xhci_set_deq_pointer(udev, ep_index, xhci_ring_get_new_dequeue_ptr(ring), 0);
 }
 
-/* Surgical half of a streams recovery: reset only the marked stream rings to
- * their software enqueue position (the marked TDs are already failed, and the
- * Stop Endpoint descheduled the whole endpoint — the discarded TRBs are never
- * revisited).  Same software-enqueue dequeue as the coarse flush, so the
- * VL805 broken-DCS erratum stays sidestepped. */
-void xhci_flush_ep_streams_marked(struct usb_device *udev, struct ep_context *ep_ctx, const u32 *map)
-{
-    const u8 ep_index = xhci_ep_get_ep_index(ep_ctx);
-    const u16 num_streams = xhci_ep_streams_count(ep_ctx);
-
-    u16 count = 0;
-    for (u16 id = 1; id <= num_streams; ++id)
-    {
-        if (xhci_stream_map_test(map, id))
-            ++count;
-    }
-
-    if (!count)
-    {
-        /* nothing marked (callers pre-check): restart rather than wedge in
-         * ABORTING with no Set TR Deq completion to consume */
-        xhci_ep_flush_complete(ep_ctx);
-        return;
-    }
-
-    xhci_ep_streams_setdeq_begin(ep_ctx, count);
-    for (u16 id = 1; id <= num_streams; ++id)
-    {
-        if (!xhci_stream_map_test(map, id))
-            continue;
-        struct xhci_ring *ring = xhci_ep_get_ring_for_stream(ep_ctx, id);
-        xhci_set_deq_pointer(udev, ep_index, xhci_ring_get_new_dequeue_ptr(ring), id);
-    }
-}
-
 /*
- * Issues a reset device command to inform the xHCI controller
- * that the device has been reset by software (e.g. via USB port
- * reset on the root hub). The xHC will reinitialize the device
- * and its endpoints.
- *
- * Intentionally unreferenced: this is the hardware mechanism for a future
- * NSCMD_USB_RESET_DEVICE implementation (optional ctx op, not yet wired).
+ * Issues a Reset Device command (NSCMD_USB_RESET_DEVICE): the stack has just
+ * port-reset the device — it sits in Default state on the wire — and this
+ * informs the xHC, which drops every endpoint but EP0 and puts the slot in
+ * Default (xHCI 4.6.11).  handle_reset_device retires the software endpoint
+ * contexts and chains Address Device (BSR=0), so the handle comes back
+ * Addressed with a fresh EP0; the stack rebuilds the rest with
+ * SET_CONFIGURATION + CONFIGURE_ENDPOINTS (+ ALLOC_STREAMS).
  */
-void xhci_reset_device(struct usb_device *udev)
+void xhci_reset_device(struct usb_device *udev, struct xhci_xfer *req)
 {
     struct xhci_ctrl *ctrl = udev->controller;
-    // set slot id, cycle bit; clear other fields and issue reset device command
-    xhci_queue_command(ctrl, 0, udev->slot_id, 0, TRB_RESET_DEV, NULL, udev);
+    xhci_queue_command(ctrl, 0, udev->slot_id, 0, TRB_RESET_DEV, req, udev);
 }
 
 /**

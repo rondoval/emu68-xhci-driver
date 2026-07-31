@@ -46,6 +46,7 @@
     NSCMD_USB_UPDATE_EP0,                                                     \
     NSCMD_USB_CONFIGURE_ENDPOINTS,                                            \
     NSCMD_USB_DECONFIGURE,                                                    \
+    NSCMD_USB_RESET_DEVICE,                                                   \
     NSCMD_USB_UPDATE_HUB,                                                     \
     NSCMD_USB_SET_SUSPEND,                                                    \
     NSCMD_USB_SET_LINK_POWER,                                                 \
