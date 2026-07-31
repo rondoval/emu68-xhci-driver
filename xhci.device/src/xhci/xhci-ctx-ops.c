@@ -325,6 +325,30 @@ static u32 ctx_op_update_hub(struct xhci_ctrl *ctrl, struct xhci_xfer *io)
     return COMMAND_SCHEDULED;
 }
 
+/* NSCMD_USB_RESET_DEVICE: the stack has just port-reset the device (Default
+ * state on the wire, hub class owns the port); execute xHCI 4.6.11 Reset
+ * Device and chain Address Device (BSR=0) — on success the handle comes back
+ * Addressed with a fresh EP0, every other endpoint context is dropped and
+ * everything in flight failed IOERR_ABORTED.  The stack rebuilds with
+ * SET_CONFIGURATION + CONFIGURE_ENDPOINTS (+ ALLOC_STREAMS).  On failure the
+ * slot may already be disabled: an op error is device-lost to the caller.
+ * Root-hub handles resolve NULL here — a root hub is not port-resettable. */
+static u32 ctx_op_reset_device(struct xhci_ctrl *ctrl, struct xhci_xfer *io)
+{
+    struct UhcdResetDevice *op = ctx_op_data(io);
+
+    struct usb_device *udev = ctx_device_for_handle(ctrl, op->rdo_DeviceHandle);
+    if (!udev)
+        return ctx_reply_error(io, UHIOERR_BADPARAMS);
+
+    if (udev->slot_state < USB_DEV_SLOT_STATE_ADDRESSED)
+        return ctx_reply_error(io, UHIOERR_BADPARAMS);
+
+    io->priv_flags |= REQ_CTX_OP;
+    xhci_reset_device(udev, io);
+    return COMMAND_SCHEDULED;
+}
+
 /* NSCMD_USB_SET_SUSPEND: quiesce (or restart) every endpoint ring of the
  * device.  The port transition itself stays the stack's job — the hub class
  * drives the link on external hubs and root-hub views alike; this op only
@@ -610,7 +634,7 @@ static void ctx_done_streams(struct usb_device *udev, struct xhci_xfer *io, s8 e
         struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
         const BOOL keep_streams = (ctx_op_cmd(io) == NSCMD_USB_ALLOC_STREAMS) == (err == UHIOERR_NO_ERROR);
         if (ep_ctx && !keep_streams)
-            xhci_ep_streams_destroy(ep_ctx);
+            xhci_ep_streams_destroy(ep_ctx, IOERR_ABORTED); /* lists are empty: the op gates on zero active TRBs */
     }
 }
 
@@ -630,8 +654,8 @@ static void ctx_done_streams(struct usb_device *udev, struct xhci_xfer *io, s8 e
  * submit tokens (CONFIGURE_ENDPOINTS only).
  *
  * NSCMD_USB_ATTACH (0x0b) is handled before the table (synchronous, no
- * shadow); NSCMD_USB_RESET_DEVICE (0x06) is intentionally unimplemented
- * (all-NULL row -> IOERR_NOCMD, matching its absence from the NSD list). */
+ * shadow).  NSCMD_USB_RESET_DEVICE carries no CTXOP_RH_NOOP: a root hub is
+ * not port-resettable, so a reserved handle fails with UHIOERR_BADPARAMS. */
 
 #define CTXOP_RH_NOOP   0x01u
 #define CTXOP_RH_TOKENS 0x02u
@@ -649,6 +673,7 @@ static const struct ctx_op_desc ctx_ops[0x10] = {
     [NSCMD_USB_UPDATE_EP0 - NSCMD_USBHCD_BASE] = {ctx_op_update_ep0, NULL, CTXOP_RH_NOOP},
     [NSCMD_USB_CONFIGURE_ENDPOINTS - NSCMD_USBHCD_BASE] = {ctx_op_configure_endpoints, ctx_done_configure, CTXOP_RH_NOOP | CTXOP_RH_TOKENS},
     [NSCMD_USB_DECONFIGURE - NSCMD_USBHCD_BASE] = {ctx_op_deconfigure, ctx_done_deconfigure, CTXOP_RH_NOOP},
+    [NSCMD_USB_RESET_DEVICE - NSCMD_USBHCD_BASE] = {ctx_op_reset_device, NULL, 0},
     [NSCMD_USB_UPDATE_HUB - NSCMD_USBHCD_BASE] = {ctx_op_update_hub, NULL, CTXOP_RH_NOOP},
     [NSCMD_USB_SET_SUSPEND - NSCMD_USBHCD_BASE] = {ctx_op_set_suspend, NULL, CTXOP_RH_NOOP},
     [NSCMD_USB_SET_LINK_POWER - NSCMD_USBHCD_BASE] = {ctx_op_set_link_power, NULL, CTXOP_RH_NOOP},

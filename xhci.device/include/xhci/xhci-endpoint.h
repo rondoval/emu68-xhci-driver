@@ -26,6 +26,7 @@ enum ep_state
 struct usb_device;
 struct ep_context;
 struct xhci_dma_span;
+struct xhci_ring;
 
 /* Result of completing a TD (the out-param of xhci_ep_complete_by_trb):
  * either a request to reply (rt == FALSE) or the payload of an RT ISO TD (no
@@ -58,12 +59,13 @@ u16 xhci_ep_streams_count(struct ep_context *ep_ctx);
 u8 xhci_ep_streams_max_pstreams(struct ep_context *ep_ctx);
 dma_addr_t xhci_ep_streams_array_dma(struct ep_context *ep_ctx);
 s8 xhci_ep_streams_build(struct ep_context *ep_ctx, u16 num_streams, u8 max_pstreams_cap);
-void xhci_ep_streams_destroy(struct ep_context *ep_ctx);
-/* Per-stream Set TR Dequeue bookkeeping shared by both recovery flushes
- * (coarse = every ring, surgical = marked rings only): the flush issues one
- * command per targeted ring and handle_set_deq consumes them. */
-void xhci_ep_streams_setdeq_begin(struct ep_context *ep_ctx, u16 count);
-BOOL xhci_ep_streams_setdeq_consume(struct ep_context *ep_ctx); /* TRUE = last one */
+void xhci_ep_streams_destroy(struct ep_context *ep_ctx, s8 reply_code);
+/* Set TR Dequeue bookkeeping shared by every recovery/flush (coarse = every
+ * ring, surgical = victim rings only; a plain endpoint is just count 1): the
+ * issuer counts one command per targeted ring and handle_set_deq consumes
+ * them. */
+void xhci_ep_setdeq_begin(struct ep_context *ep_ctx, u16 count);
+BOOL xhci_ep_setdeq_consume(struct ep_context *ep_ctx); /* TRUE = last one */
 
 void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, u32 max_packet_size);
 u32 xhci_ep_get_max_packet_size(struct ep_context *ep_ctx);
@@ -75,13 +77,14 @@ u8 xhci_ep_get_hw_type(struct ep_context *ep_ctx);
 
 void xhci_ep_set_failed(struct ep_context *ep_ctx);
 void xhci_ep_set_idle(struct ep_context *ep_ctx);
-/* set_idle plus a kick of every stream ring when TDs survived the recovery —
- * the restart at the end of every ring flush (tail of handle_set_deq). */
+/* set_idle plus a kick of the stream rings still holding TDs — the restart
+ * at the end of every ring flush (tail of handle_set_deq). */
 void xhci_ep_flush_complete(struct ep_context *ep_ctx);
 /* Both variants: FALSE = the endpoint is FAILED and trb_addrs is already
  * freed — the caller must not touch the ring or the array, and still owns
- * the request's/span's disposal. */
-BOOL xhci_ep_set_receiving(struct ep_context *ep_ctx, struct xhci_xfer *req, dma_addr_t *trb_addrs, u32 timeout_ms, u32 trb_count);
+ * the request's/span's disposal.  The TD lands on ep_ring's own list. */
+BOOL xhci_ep_set_receiving(struct ep_context *ep_ctx, struct xhci_ring *ep_ring,
+                           struct xhci_xfer *req, dma_addr_t *trb_addrs, u32 timeout_ms, u32 trb_count);
 BOOL xhci_ep_set_receiving_rt(struct ep_context *ep_ctx, const struct xhci_dma_span *span,
                               u16 frame, u16 dir, BOOL staging, dma_addr_t *trb_addrs, u32 trb_count);
 void xhci_ep_set_resetting(struct ep_context *ep_ctx);
@@ -89,13 +92,18 @@ void xhci_ep_set_aborting(struct ep_context *ep_ctx);
 
 void xhci_ep_request_timeout_recovery(struct ep_context *ep_ctx);
 void xhci_ep_request_stop(struct ep_context *ep_ctx);
-/* Returns TRUE when the stop was consumed (abort/timeout recovery ran — on a
- * streams endpoint the surgical per-stream Set TR Deq commands are already
- * queued and *deq_ptr stays 0; a raced-out streams abort restarts the
- * endpoint synchronously); FALSE = nothing to recover, ordinary-stop
- * semantics. */
-BOOL xhci_ep_process_stop(struct ep_context *ep_ctx, dma_addr_t *deq_ptr);
+/* Surgical abort/timeout recovery over the endpoint's rings: rings without a
+ * victim are skipped whole; on each victim ring the victims' TRBs are
+ * No-Op'd, their requests replied, and one Set TR Deq re-arms the ring —
+ * survivors on the same ring keep running.  Returns TRUE when the stop was
+ * consumed (commands queued, or a raced-out abort restarted the endpoint
+ * synchronously); FALSE = nothing to recover OR an anomalous stopped
+ * dequeue — the caller runs the coarse ordinary-stop recovery. */
+BOOL xhci_ep_process_stop(struct ep_context *ep_ctx);
 BOOL xhci_ep_request_suspend(struct ep_context *ep_ctx);
+/* The suspend path's Stop Endpoint completed (handle_stop_ring, SUSPENDED
+ * branch): run any abort/timeout recovery queued while the stop sequenced. */
+void xhci_ep_suspend_stop_complete(struct ep_context *ep_ctx);
 void xhci_ep_resume(struct ep_context *ep_ctx);
 
 /* Clear-halt deduplication for the driver's own STALL recovery (see

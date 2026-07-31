@@ -94,7 +94,7 @@ cross-toolchain and the companion CMake packages (`emu68-common`, `emu68-pcie-li
 `emu68-gic400-library`). From a superproject checkout:
 
 ```sh
-./scripts/docker-build.sh --target emu68-xhci-driver   # no local toolchain needed
+./scripts/docker-build.sh --target emu68-xhci-driver-context   # no local toolchain needed
 ```
 
 The build runs inside the toolchain container, so do not invoke `cmake` on the host. The

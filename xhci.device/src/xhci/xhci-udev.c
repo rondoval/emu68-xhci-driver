@@ -283,12 +283,18 @@ inline static u8 xhci_ep_index_to_address(u8 ep_index)
  * Mirrors Linux xhci_stop_device()/xhci_ring_device().  Suspending a hub does
  * not recurse into its children: the stack suspends leaf devices first (as
  * usbcore does).
+ *
+ * Aborts while suspended keep the completion contract: the endpoint stays
+ * SUSPENDED and the targeted TDs are retired via the regular stop-recovery
+ * mechanics against the output-context dequeue - synchronously once the
+ * suspend stop completed, else from that completion (ep_ctx tracks it in
+ * suspend_stop_pending).  No doorbell rings until xhci_ep_resume().
  */
 
 /* Abort an in-flight suspend sequence, replying the stashed request so the
  * stack isn't left waiting; late Stop Endpoint completions land on a cleared
  * counter and are ignored. */
-static void xhci_udev_suspend_cancel(struct usb_device *udev, s8 err)
+void xhci_udev_suspend_cancel(struct usb_device *udev, s8 err)
 {
     if (udev->suspend.stops_pending == 0 && !udev->suspend.stash)
         return;

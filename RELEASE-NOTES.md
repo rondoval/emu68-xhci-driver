@@ -17,6 +17,108 @@ Configuration-relevant changes across all releases, newest first:
   stack configuration accordingly.
 
 
+# Release notes — xhci.device 6.1
+
+Changes since v6.0.
+
+A reliability release: aborts work on suspended endpoints, streams recovery
+stops failing transfers that were not at fault, device reset is implemented,
+and switching USB 2.0 link power management off at runtime now actually
+switches it off.
+
+---
+
+## Aborts complete on suspended endpoints
+
+Aborting a transfer parked on a suspended endpoint (port in U3) used to be a
+silent no-op: the completion never arrived, and a device unplugged while
+suspended could hang its class task — and with it the hub teardown chain —
+forever, leaving stale devices in the stack and a dead port.  Aborts (and NAK
+timeout recovery) now retire the targeted transfers while the endpoint stays
+suspended; surviving transfers still restart on resume.  A `CMD_FLUSH` arriving
+mid-suspend-sequence now also cancels the sequence instead of orphaning the
+`SET_SUSPEND` op.
+
+---
+
+## Streams recovery is as surgical as single-ring recovery
+
+Abort and NAK-timeout recovery ran two different code paths.  On an ordinary
+endpoint it was already precise: only the victim TD's TRBs were No-Op'd, only
+that request was replied, and the ring was re-armed at the first surviving TD
+so its ring-mates kept running.  On a streams endpoint it was not: each stream
+ring holding a victim was reset whole to its software enqueue position, which
+failed *every* TD on that ring — the victim and anything else queued on the
+same tag — and reported `actual` 0 for all of them, discarding the bytes the
+controller had already moved.
+
+Both are now the same path, applied per ring: rings with no victim are skipped
+whole, and on a ring that has one only the victims' TRBs are No-Op'd and
+replied (`UHIOERR_NAKTIMEOUT` for an expired TD, `IOERR_ABORTED` otherwise,
+with the partial `actual` recovered from the fully-consumed TRBs), then one Set
+TR Dequeue re-arms the ring past them.  For UAS mass storage that means a
+timed-out command reports how far it actually got, and anything sharing its
+stream ring survives.
+
+Recovery also validates before it mutates.  The re-arm dequeue is resolved
+first, without touching anything, and both halves work from the same timestamp
+so the victim set cannot shift between them.  When the hardware's stopped
+dequeue lands outside every tracked TD, recovery now falls back to the coarse
+whole-endpoint flush from an untouched ring, where previously the victims had
+already been No-Op'd and replied before the fallback ran.
+
+---
+
+## Device reset implemented (`NSCMD_USB_RESET_DEVICE`)
+
+The stack's device-reset op used to answer `IOERR_NOCMD` and was absent from the
+NSD command list, so a device that needed a reset to recover could only be
+unplugged.  It now executes an xHCI Reset Device (4.6.11) chained into a BSR=0
+Address Device: the handle comes back Addressed with a fresh EP0, every other
+endpoint context is dropped and everything in flight is failed `IOERR_ABORTED`,
+and the stack rebuilds the device with `SET_CONFIGURATION` +
+`CONFIGURE_ENDPOINTS` (and `ALLOC_STREAMS` where it had them).
+
+A root-hub handle is rejected with `UHIOERR_BADPARAMS` — a root hub is not
+port-resettable.
+
+---
+
+## Turning USB 2.0 hardware LPM off now turns it off
+
+Withdrawing the USB 2.0 hardware LPM (L1) policy at runtime — the stack zeroing
+the enables and dropping the capability flags, or the device losing the
+capability — left the port's `PORTPMSC.HLE` bit set with a stale L1 device slot
+pointer, so the device kept entering L1 after link power management had been
+switched off.  The teardown now runs when the capability goes away, and the
+driver's "LPM armed" bookkeeping records whether LPM was actually armed rather
+than merely configured, so a withheld policy does not make every later op
+re-run the register clear.
+
+---
+
+## Internals
+
+Transfer-descriptor tracking moved onto the rings: each transfer ring owns its
+own TD list, instead of one endpoint-wide list filtered by stream id.  That is
+what makes the per-ring recovery above possible, and it makes ring-room
+accounting exact per stream rather than endpoint-wide.  Ring occupancy
+(reserve / release / room check) is now owned entirely by the ring layer
+instead of being split between the ring and submit layers, and the streams
+recovery bitmap it replaces is gone.
+
+---
+
+## Build & tooling
+
+`xhci.device` no longer hardcodes `-m68040` and `-fomit-frame-pointer` in its
+own compile options.  Those are emitted after `CMAKE_C_FLAGS`, so they silently
+overrode the toolchain file's `M68K_CPU` / `M68K_FPU` knobs: a build configured
+for a different CPU still produced 68040 code.  Both now come from the
+toolchain only, which is where they were already set.
+
+---
+
 # Release notes — xhci.device 6.0
 
 Changes since v5.2.

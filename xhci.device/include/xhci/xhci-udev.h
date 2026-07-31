@@ -173,6 +173,9 @@ void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type
 /* Port suspend (U3) sequencing (struct udev_suspend above) */
 BOOL xhci_udev_suspend_device(struct usb_device *udev, u8 root_port, struct xhci_xfer *deferred_req);
 void xhci_udev_suspend_stop_done(struct usb_device *udev); /* one Stop Endpoint completed */
+/* Abort an in-flight suspend sequence, replying the stashed request with err
+ * so the stack isn't left waiting (no-op when nothing is sequencing). */
+void xhci_udev_suspend_cancel(struct usb_device *udev, s8 err);
 void xhci_udev_resume_device(struct usb_device *udev);
 BOOL xhci_udev_suspend_port(struct usb_device *hub_udev, u8 port);
 void xhci_udev_resume_port(struct usb_device *hub_udev, u8 port);

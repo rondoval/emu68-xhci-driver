@@ -550,3 +550,44 @@ void xhci_ring_set_stream_id(struct xhci_ring *ring, u16 stream_id)
 	ring->stream_id = stream_id;
 }
 
+void xhci_ring_set_td_list(struct xhci_ring *ring, struct TransferDescriptorList *td_list)
+{
+	ring->td_list = td_list;
+}
+
+struct TransferDescriptorList *xhci_ring_get_td_list(struct xhci_ring *ring)
+{
+	return ring->td_list;
+}
+
+/*
+ * Per-ring TRB occupancy.  The submit layer reserves a TD's TRBs before
+ * emitting them and gives them back if the TD never reaches the hardware;
+ * the TD tracker releases them as the TD leaves the ring.
+ */
+u32 xhci_ring_get_queued_trbs(struct xhci_ring *ring)
+{
+	return ring->queued_trbs;
+}
+
+void xhci_ring_reserve_trbs(struct xhci_ring *ring, u32 trb_count)
+{
+	ring->queued_trbs += trb_count;
+}
+
+void xhci_ring_release_trbs(struct xhci_ring *ring, u32 trb_count)
+{
+	ring->queued_trbs = (ring->queued_trbs >= trb_count) ? ring->queued_trbs - trb_count : 0;
+}
+
+BOOL xhci_ring_has_room(struct xhci_ring *ring, u32 needed)
+{
+	/* queued_trbs counts THIS ring's in-flight TDs, so a streams endpoint
+	 * sizes each stream ring by its own load instead of the endpoint-wide
+	 * total.  One TRB per segment is the link TRB and never usable. */
+	u32 capacity = ring->num_segs * (TRBS_PER_SEGMENT - 1);
+	if (capacity == 0)
+		return FALSE;
+	return ring->queued_trbs + needed <= capacity;
+}
+

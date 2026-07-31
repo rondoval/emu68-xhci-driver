@@ -42,9 +42,6 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL copy);
 dma_addr_t xhci_dma_premap(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL to_device);
 void xhci_dma_map_sync(struct xhci_xfer *req, BOOL to_device);
 
-/* Per-ring TRB accounting: TDs retire their TRBs as they leave the ring. */
-void xhci_submit_release_trbs(struct ep_context *ep_ctx, u16 stream_id, u32 trb_count);
-
 /* xhci_submit_td outcome.  NO_ROOM leaves the io fully intact (its DMA
  * mapping included — the map is idempotent) so the endpoint can park it on
  * the pending queue; FAILED sets io->error and *err and has released the

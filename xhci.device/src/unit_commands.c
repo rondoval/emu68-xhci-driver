@@ -46,6 +46,7 @@
     NSCMD_USB_UPDATE_EP0,                                                     \
     NSCMD_USB_CONFIGURE_ENDPOINTS,                                            \
     NSCMD_USB_DECONFIGURE,                                                    \
+    NSCMD_USB_RESET_DEVICE,                                                   \
     NSCMD_USB_UPDATE_HUB,                                                     \
     NSCMD_USB_SET_SUSPEND,                                                    \
     NSCMD_USB_SET_LINK_POWER,                                                 \
@@ -157,6 +158,9 @@ static u32 Do_CMD_FLUSH(struct IORequest *io)
         struct usb_device *udev = ctrl->devices_by_slot_id[slot];
         if (!udev)
             continue;
+
+        /* A SET_SUSPEND op caught mid-sequence is a pending request too. */
+        xhci_udev_suspend_cancel(udev, IOERR_ABORTED);
 
         for (u8 ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ++ep_index)
         {

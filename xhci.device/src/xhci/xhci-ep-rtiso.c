@@ -421,7 +421,7 @@ void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx)
 {
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)
     {
-        if (xhci_td_is_empty(ep_ctx->active_tds))
+        if (xhci_td_is_empty(ep_default_tds(ep_ctx)))
         {
             xhci_ep_transition(ep_ctx, USB_DEV_EP_STATE_RT_ISO_STOPPED);
             xhci_ep_notify_rt_iso_stopped(ep_ctx);
@@ -512,7 +512,7 @@ s8 xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIsoHooks *hooks, str
 
     ep_ctx->rt->stop_pending = stop_token;
 
-    if (xhci_td_is_empty(ep_ctx->active_tds))
+    if (xhci_td_is_empty(ep_default_tds(ep_ctx)))
     {
         xhci_ep_transition(ep_ctx, USB_DEV_EP_STATE_RT_ISO_STOPPED);
         xhci_ep_notify_rt_iso_stopped(ep_ctx);

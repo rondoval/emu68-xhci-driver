@@ -268,17 +268,6 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL copy)
 	req->dma_address = NULL;
 }
 
-inline static BOOL ring_has_room(struct xhci_ring *ring, u32 needed)
-{
-	/* ring->queued_trbs counts THIS ring's in-flight TDs, so a streams
-	 * endpoint sizes each stream ring by its own load instead of the
-	 * endpoint-wide total. */
-	u32 capacity = ring->num_segs * (TRBS_PER_SEGMENT - 1);
-	if (capacity == 0)
-		return FALSE;
-	return ring->queued_trbs + needed <= capacity;
-}
-
 BOOL xhci_submit_has_room(struct ep_context *ep_ctx, u32 needed_trbs)
 {
 	if (!ep_ctx)
@@ -286,17 +275,7 @@ BOOL xhci_submit_has_room(struct ep_context *ep_ctx, u32 needed_trbs)
 	struct xhci_ring *ring = xhci_ep_get_ring(ep_ctx);
 	if (!ring)
 		return FALSE;
-	return ring_has_room(ring, needed_trbs);
-}
-
-/* Retire trb_count TRBs from the accounting of the ring serving stream_id
- * (the TD tracker calls this as TDs leave the ring). */
-void xhci_submit_release_trbs(struct ep_context *ep_ctx, u16 stream_id, u32 trb_count)
-{
-	struct xhci_ring *ring = xhci_ep_get_ring_for_stream(ep_ctx, stream_id);
-	if (!ring)
-		return;
-	ring->queued_trbs = (ring->queued_trbs >= trb_count) ? ring->queued_trbs - trb_count : 0;
+	return xhci_ring_has_room(ring, needed_trbs);
 }
 
 inline static void prime_first_trb(struct xhci_generic_trb *start_trb)
@@ -674,11 +653,11 @@ inline static enum td_reserve_status td_reserve_and_prepare(struct xhci_ctrl *ct
 															u32 num_trbs,
 															dma_addr_t **td_trb_addrs_out)
 {
-	if (!ring_has_room(ep_ring, num_trbs + 1))
+	if (!xhci_ring_has_room(ep_ring, num_trbs + 1))
 	{
 		KprintfT("Ring full, needed %lu TRBs, attempting grow\n", (ULONG)num_trbs);
 		if (!xhci_ring_grow(ctrl, ep_ring, XHCI_SEGMENTS_PER_RING) ||
-			!ring_has_room(ep_ring, num_trbs + 1))
+			!xhci_ring_has_room(ep_ring, num_trbs + 1))
 			return TD_RESERVE_NO_ROOM;
 	}
 
@@ -692,7 +671,7 @@ inline static enum td_reserve_status td_reserve_and_prepare(struct xhci_ctrl *ct
 	/* Walk the enqueue pointer off any link TRB so TRB emission starts on a
 	 * data slot with the correct cycle state. */
 	prepare_ring(ep_ring);
-	ep_ring->queued_trbs += num_trbs; /* released by the TD tracker at retire */
+	xhci_ring_reserve_trbs(ep_ring, num_trbs); /* released by the TD tracker at retire */
 	*td_trb_addrs_out = td_trb_addrs;
 	return TD_RESERVE_OK;
 }
@@ -756,12 +735,12 @@ enum xhci_submit_status xhci_submit_td(struct usb_device *udev, struct ep_contex
 		xhci_ring_enqueue_non_control_trbs(ep_ring, io, addr, num_trbs, trb_buff_len, td_trb_addrs, iso_extra_bits);
 	}
 
-	if (!xhci_ep_set_receiving(ep_ctx, io, td_trb_addrs, timeout_ms, num_trbs))
+	if (!xhci_ep_set_receiving(ep_ctx, ep_ring, io, td_trb_addrs, timeout_ms, num_trbs))
 	{
 		/* The endpoint is FAILED and td_trb_addrs is freed; the emitted TRBs
 		 * are never handed over (the first TRB's cycle bit stays inverted) and
 		 * the recovery flush re-arms the ring past them. */
-		ep_ring->queued_trbs = (ep_ring->queued_trbs >= num_trbs) ? ep_ring->queued_trbs - num_trbs : 0;
+		xhci_ring_release_trbs(ep_ring, num_trbs);
 		xhci_dma_unmap(ctrl, io, FALSE);
 		*err = io->error = UHIOERR_OUTOFMEMORY;
 		return XHCI_SUBMIT_FAILED;
@@ -828,7 +807,7 @@ s8 xhci_submit_rt_td(struct usb_device *udev, struct ep_context *ep_ctx,
 	{
 		/* the endpoint is FAILED now (set_receiving_rt freed td_trb_addrs);
 		 * the span is still this function's to release */
-		ep_ring->queued_trbs = (ep_ring->queued_trbs >= num_trbs) ? ep_ring->queued_trbs - num_trbs : 0;
+		xhci_ring_release_trbs(ep_ring, num_trbs);
 		xhci_dma_span_unmap(ctrl, &span, FALSE);
 		return UHIOERR_OUTOFMEMORY;
 	}
