@@ -18,7 +18,13 @@
 #include <exec/io.h>
 
 #define LIB_MIN_VERSION 39 /* we use memory pools */
-#define DEVICE_PRIORITY 90
+
+/* Below bcmpcie.library (-41), which we OpenLibrary() from our resident init, and
+ * above the Poseidon ROM set (-45 and below) that psdAddHardware()es us.  Negative
+ * because the Emu68 module window - devicetree.resource and friends, which live in
+ * Emu68's own Z3 board ROM - only opens at `romboot` (-40); see pcie_private.h.
+ * Only matters in a Kickstart ROM: RamLib ignores this field for a DEVS: copy. */
+#define DEVICE_PRIORITY (-42)
 
 #define COMMAND_PROCESSED 1
 #define COMMAND_SCHEDULED 0
