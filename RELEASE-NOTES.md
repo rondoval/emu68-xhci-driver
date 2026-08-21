@@ -17,6 +17,22 @@ Configuration-relevant changes across all releases, newest first:
   stack configuration accordingly.
 
 
+# Release notes — xhci.device 6.2
+
+Changes since v6.1.
+
+---
+
+## Can be built into a custom Kickstart ROM
+
+The driver now comes up during the Kickstart boot sequence rather than after
+DOS, so a ROM image built with poseidon-backport has a USB keyboard, mouse
+and drives live in the early boot menu — and can boot from a USB drive.
+
+Nothing changes for the normal `DEVS:USBHardware/xhci.device` installation.
+
+---
+
 # Release notes — xhci.device 6.1
 
 Changes since v6.0.
