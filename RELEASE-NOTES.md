@@ -15,6 +15,31 @@ Configuration-relevant changes across all releases, newest first:
   stack configuration accordingly.
 
 
+# Release notes — xhci.device 5.4
+
+Changes since v5.3.
+
+---
+
+## Can be built into a custom Kickstart ROM
+
+The driver now comes up during the Kickstart boot sequence rather than after
+DOS, so a ROM image built with poseidon-backport has a USB keyboard, mouse
+and drives live in the early boot menu — and can boot from a USB drive.
+The 6.x line gained the same thing in 6.2; use whichever line matches your
+USB stack.
+
+Nothing changes for the normal `DEVS:USBHardware/xhci.device` installation.
+
+---
+
+## Build & tooling
+
+- Hardcoded `-m68040` removed — it overrode the toolchain's `M68K_CPU`, so
+  non-68040 builds produced 68040 code.
+
+---
+
 # Release notes — xhci.device 5.3
 
 Changes since v5.2.
