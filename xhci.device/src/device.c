@@ -65,7 +65,7 @@ static struct Resident const xhciDeviceResident __attribute__((used)) = {
     RTC_MATCHWORD,
     (struct Resident *)&xhciDeviceResident,
     (APTR)&endOfCode,
-    RTF_AUTOINIT | RTF_AFTERDOS,
+    RTF_AUTOINIT | RTF_COLDSTART,
     DEVICE_VERSION,
     NT_DEVICE,
     DEVICE_PRIORITY,

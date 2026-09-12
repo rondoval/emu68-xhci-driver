@@ -340,7 +340,8 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
     (void)ctrl;
     u32 flags = le32(event->event_cmd.flags);
     xhci_comp_code comp = GET_COMP_CODE(le32(event->event_cmd.status));
-    u8 ep_index = cmd->ep_index;
+    const u8 ep_index = cmd->ep_index;
+    (void)ep_index; /* debug prints only */
 
     struct ep_context *ep_ctx = cmd_resolve_ep(cmd, flags);
     if (!ep_ctx)
