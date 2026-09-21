@@ -3,13 +3,13 @@
 ## Build
 
 This repo is a submodule of the `emu68-driver-stack` superbuild, at
-`components/emu68-xhci-driver`. Build only through the stack's container
+`components/emu68-xhci-driver-context`. Build only through the stack's container
 wrapper — never host `cmake`, since build trees are configured at `/work`
 inside the toolchain container:
 
 ```sh
 cd ../..    # emu68-driver-stack root
-./scripts/docker-build.sh --target emu68-xhci-driver
+./scripts/docker-build.sh --target emu68-xhci-driver-context
 ```
 
 - The prefix must already carry `emu68-common` and `emu68-pcie-library`; gic400
@@ -18,7 +18,7 @@ cd ../..    # emu68-driver-stack root
 - Debug backend: `EMU68_CONFIGURE_ARGS="-DEMU68_DEBUG_BACKEND=serial"` (`pistorm`
   default | `serial` | `off`), chosen stack-wide via `emu68-common`. `serial`
   links `debug.lib` and is not ROM-able.
-- Target `emu68-xhci-driver` → `xhci.device` → `DEVS/USBHardware/xhci.device`.
+- Target `emu68-xhci-driver-context` → `xhci.device` → `DEVS/USBHardware/xhci.device`.
 - The driver is ROM-able: the link fails on any writable data section, so no
   mutable globals.
 - Always build after C changes; it must come back clean of warnings.
