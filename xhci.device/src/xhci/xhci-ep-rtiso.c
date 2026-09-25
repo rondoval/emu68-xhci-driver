@@ -13,7 +13,7 @@
 #include <clib/utility_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define UTILITY_BASE_NAME ep_ctx->udev->controller->utilityBase
 #include <proto/utility.h>
@@ -151,6 +151,7 @@ s8 xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIsoHooks *hoo
 {
     if (!hooks || !ep_ctx)
         return UHIOERR_BADPARAMS;
+    struct ExecBase *SysBase = ep_ctx->sysBase;
 
     if (ep_ctx->state != USB_DEV_EP_STATE_IDLE)
     {
@@ -196,6 +197,7 @@ s8 xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIsoHooks *hoo
         Kprintf("Invalid parameters to remove RT ISO handler\n");
         return UHIOERR_BADPARAMS;
     }
+    struct ExecBase *SysBase = ep_ctx->sysBase;
 
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
     {
@@ -233,7 +235,7 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, APTR buffer, u32 length, u32 a
     if (rt_buffer_req.data)
     {
         u32 copy_len = act_len < rt_buffer_req.length ? act_len : rt_buffer_req.length;
-        CopyMem(buffer, rt_buffer_req.data, copy_len);
+        memcpy(rt_buffer_req.data, buffer, copy_len);
         rt_buffer_req.length = copy_len;
         rt_buffer_req.flags = ubr_flags; /* done direction carries the wire status */
 
@@ -469,7 +471,7 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
      * and the target inflight depth.  OUT endpoints have no staging buffer. */
     if (ep_ctx->rt->direction == XHCI_DIR_IN && ep_ctx->max_packet_size > 0)
     {
-        slab_cache_init(&ep_ctx->rt->in_staging_slab,
+        slab_cache_init(&ep_ctx->rt->in_staging_slab, ep_ctx->sysBase,
                         ep_ctx->udev->controller->metaPool,
                         ep_ctx->udev->controller->dmaPool,
                         ep_ctx->max_packet_size,

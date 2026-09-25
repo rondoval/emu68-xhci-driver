@@ -13,6 +13,8 @@
  *	    Vikas Sajjan <vikas.sajjan@samsung.com>
  */
 
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <config.h>
 #include <debug.h>
 #include <memory.h>
@@ -39,6 +41,7 @@
  */
 static void xhci_segment_free(struct xhci_ctrl *ctrl, struct xhci_segment *seg)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (seg->trbs)
 		slab_free(&ctrl->seg_slab, seg->trbs);
 	seg->trbs = NULL;
@@ -54,6 +57,7 @@ static void xhci_segment_free(struct xhci_ctrl *ctrl, struct xhci_segment *seg)
  */
 void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (!ring)
 	{
 		Kprintf("Ring is NULL, nothing to free\n");
@@ -145,6 +149,7 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring)
  */
 static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	struct xhci_segment *seg = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_segment));
 	if (!seg)
 	{
@@ -185,6 +190,7 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
  */
 BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_segs)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (!ring || num_new_segs == 0 ||
 		ring->num_segs + num_new_segs > XHCI_MAX_SEGMENTS_PER_RING)
 		return FALSE;
@@ -296,6 +302,7 @@ BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 								  BOOL link_trbs, BOOL is_event_ring, u8 ep_index, u32 max_packet_size)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	u32 remaining = num_segs;
 
 	struct xhci_ring *ring = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_ring));
@@ -305,6 +312,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 				(ULONG)sizeof(struct xhci_ring));
 		return NULL;
 	}
+	ring->sysBase = ctrl->sysBase;
 	ring->num_segs = num_segs;
 	ring->is_event_ring = is_event_ring;
 	ring->ep_index = ep_index;
@@ -354,6 +362,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 
 void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct xhci_intr_reg *ir_set)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	u32 val;
 	struct xhci_segment *seg;
 	const u32 entry_count = erst->num_entries;
@@ -429,6 +438,7 @@ inline static void inc_deq(struct xhci_ring *ring)
  */
 union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	cache_post_dma(ring->dequeue, sizeof(union xhci_trb), 0);
 	union xhci_trb *event = ring->dequeue;
 
@@ -485,8 +495,9 @@ u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring)
 	return (u32)deq | cycle;
 }
 
-u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr)
+u32 xhci_ring_get_deq_ptr_for_trb(struct xhci_ring *ring, dma_addr_t trb_addr)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	if (!trb_addr)
 		return 0;
 
@@ -495,8 +506,9 @@ u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr)
 	return trb_addr | (le32(trb->generic.field[3]) & TRB_CYCLE);
 }
 
-void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, u32 trb_count, u32 start_index)
+void xhci_ring_patch_trbs_to_noop(struct xhci_ring *ring, dma_addr_t *trb_addrs, u32 trb_count, u32 start_index)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	if (!trb_addrs || start_index >= trb_count)
 		return;
 

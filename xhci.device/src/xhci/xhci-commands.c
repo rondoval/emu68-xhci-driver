@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <debug.h>
 #include <config.h>
 
@@ -181,6 +183,7 @@ static void xhci_fail_timed_out_command(struct pending_command *cmd)
  */
 static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, u16 stream_id, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
 
     dma_addr_t trb_dma = xhci_ring_enqueue_command(ctrl->cmd_ring, addr, slot_id, ep_index, stream_id, cmd);
     if (trb_dma == 0)
@@ -458,6 +461,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
 static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     const u32 status = le32(event->event_cmd.status);
     const u32 flags = le32(event->event_cmd.flags);
 
@@ -678,6 +682,7 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
  */
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     const xhci_comp_code comp = (xhci_comp_code)GET_COMP_CODE(le32(event->event_cmd.status));
     const dma_addr_t trb_addr = (dma_addr_t)le64(event->event_cmd.cmd_trb);
 
@@ -877,6 +882,7 @@ void xhci_reset_device(struct usb_device *udev, struct xhci_xfer *req)
  */
 void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct xhci_xfer *req)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
     struct xhci_container_ctx *in_ctx = udev->in_ctx;
 

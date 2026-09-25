@@ -28,7 +28,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -85,6 +85,7 @@ static inline u16 ctx_op_cmd(const struct xhci_xfer *io)
  * back into the client IOStdReq, retire the shadow, reply the client. */
 static void ctx_shadow_complete(struct xhci_xfer *io)
 {
+    struct ExecBase *SysBase = io->sysBase;
     struct xhci_ctx_shadow *sh = (struct xhci_ctx_shadow *)io;
     struct IORequest *client = sh->client;
 
@@ -96,12 +97,14 @@ static void ctx_shadow_complete(struct xhci_xfer *io)
 
 static struct xhci_ctx_shadow *ctx_shadow_new(struct xhci_ctrl *ctrl, struct IORequest *client)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     struct xhci_ctx_shadow *sh = pool_zalloc(ctrl->metaPool, sizeof(*sh));
     if (!sh)
         return NULL;
 
     sh->client = client;
     sh->io.ctrl = ctrl;
+    sh->io.sysBase = ctrl->sysBase;
     sh->io.complete = ctx_shadow_complete;
     return sh;
 }
@@ -702,6 +705,7 @@ u32 xhci_ctxops_process(struct IOStdReq *client)
         client->io_Error = UHIOERR_BADPARAMS;
         return COMMAND_PROCESSED;
     }
+    struct ExecBase *SysBase = ctrl->sysBase;
 
     /* the attach handshake is synchronous with OUT fields in the client's
      * own op block — no shadow, no command-ring work */

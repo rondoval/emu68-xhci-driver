@@ -65,6 +65,7 @@ struct xhci_xfer
     struct MinNode node;        /* FIRST — ep_ctx->pending_reqs linkage; see assert below */
     void (*complete)(struct xhci_xfer *xf); /* the single retire path */
     struct xhci_ctrl *ctrl;
+    struct ExecBase *sysBase;   /* ctrl->sysBase, set with ctrl */
 
     /* what to transfer */
     u8   type;                  /* UHCD_EPTYPE_CONTROL/ISO/BULK/INTERRUPT */

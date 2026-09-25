@@ -18,6 +18,7 @@
 struct ep_context
 {
     struct usb_device *udev; /* back reference to device */
+    struct ExecBase *sysBase; /* udev->sysBase, copied at create */
     u8 ep_index;             /* Endpoint context index (0-30) */
     enum ep_state state;     /* Current endpoint state */
     u32 max_packet_size;     /* Cached max packet size for this endpoint */

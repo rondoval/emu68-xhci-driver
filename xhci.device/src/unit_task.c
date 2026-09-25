@@ -4,7 +4,7 @@
 #include <clib/timer_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #include <proto/timer.h>
 #endif
@@ -25,10 +25,11 @@
 
 static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 {
+    struct ExecBase *SysBase = unit->sysBase;
     unit->irq_signal = -1;
 
     // Initialize the built in msg port, we'll receive commands here
-    BYTE msg_sigbit = drv_unit_msgport_init(&unit->unit);
+    BYTE msg_sigbit = drv_unit_msgport_init(SysBase, &unit->unit);
     if (msg_sigbit == -1)
     {
         Kprintf("[xhci] %s: Failed to allocate message signal\n", __func__);
@@ -45,7 +46,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 
     /* Periodic tick: drives the command-ring and transfer-deadline timeout scans */
     struct drv_timer tick;
-    if (!drv_timer_open(&tick))
+    if (!drv_timer_open(&tick, SysBase))
     {
         Kprintf("[xhci] %s: Failed to open timer device\n", __func__);
         goto free_signals;
@@ -54,7 +55,7 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 
     /* The root-hub port waits' sleep timer: task-bound, so opened (and later
      * closed) here.  Failure is non-fatal — the waits degrade to hot polls. */
-    if (!drv_timer_open(&unit->xhci_ctrl->sleep_timer))
+    if (!drv_timer_open(&unit->xhci_ctrl->sleep_timer, SysBase))
         Kprintf("[xhci] %s: no sleep timer; port waits will spin\n", __func__);
 
     unit->task = FindTask(NULL);
@@ -151,12 +152,13 @@ free_signals:
     /* drv_task_exit clears the liveness slot first (drv_task_join polls it),
      * then reports CTRL_F for a task that ran / CTRL_C for one that never got
      * to its loop. */
-    drv_task_exit(&unit->task, parent, unit->task != NULL);
+    drv_task_exit(SysBase, &unit->task, parent, unit->task != NULL);
 }
 
 s32 UnitTaskStart(struct XHCIUnit *unit)
 {
-    return drv_task_spawn(unit, UnitTask, "XHCI USB driver",
+    struct ExecBase *SysBase = unit->sysBase;
+    return drv_task_spawn(SysBase, unit, UnitTask, "XHCI USB driver",
                           STACK_SIZE, UNIT_TASK_PRIORITY) == 0
                ? UHIOERR_NO_ERROR
                : UHIOERR_HOSTERROR;
@@ -164,5 +166,6 @@ s32 UnitTaskStart(struct XHCIUnit *unit)
 
 void UnitTaskStop(struct XHCIUnit *unit)
 {
-    drv_task_join(&unit->task);
+    struct ExecBase *SysBase = unit->sysBase;
+    drv_task_join(SysBase, &unit->task);
 }

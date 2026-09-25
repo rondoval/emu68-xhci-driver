@@ -5,7 +5,7 @@
 #include <clib/utility_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define UTILITY_BASE_NAME ep_ctx->udev->controller->utilityBase
 #include <proto/utility.h>
@@ -105,6 +105,7 @@ static void ep_ring_free_with_tds(struct xhci_ctrl *ctrl, struct xhci_ring *ring
 
 BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     /* a re-add over a live context (alt-setting switch): retire the old one
      * first — anything still pending fails with device-gone semantics */
     if (udev->ep_context[ep_index])
@@ -113,10 +114,11 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
     struct ep_context *ep_ctx = pool_zalloc(udev->controller->metaPool, sizeof(struct ep_context));
     if (!ep_ctx)
     {
-        Kprintf("Failed to allocate ep_context for EP %d\n", ep_index);
+        Kprintf("Failed to allocate ep_context for EP %ld\n", ep_index);
         return FALSE;
     }
     ep_ctx->udev = udev;
+    ep_ctx->sysBase = udev->sysBase;
     ep_ctx->ep_index = ep_index;
     xhci_ep_transition(ep_ctx, USB_DEV_EP_STATE_IDLE);
     ep_ctx->max_packet_size = max_packet_size;
@@ -126,7 +128,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
     ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_INITIAL_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
     if (!ep_ctx->ring || !xhci_td_create_list(udev->controller, ep_ctx, ep_ctx->ring))
     {
-        Kprintf("Failed to create resources for EP %d\n", ep_index);
+        Kprintf("Failed to create resources for EP %ld\n", ep_index);
         ep_ring_free_with_tds(udev->controller, ep_ctx->ring, UHIOERR_OUTOFMEMORY);
         pool_free(udev->controller->metaPool, ep_ctx);
         return FALSE;
@@ -140,6 +142,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
 
 void xhci_ep_destroy_context(struct usb_device *udev, u8 ep_index, s8 reply_code)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct ep_context *ep_ctx = (ep_index < USB_MAX_ENDPOINT_CONTEXTS)
                                     ? udev->ep_context[ep_index]
                                     : NULL;
@@ -249,6 +252,7 @@ void xhci_ep_set_failed(struct ep_context *ep_ctx)
 
 void xhci_ep_enqueue(struct ep_context *ep_ctx, struct xhci_xfer *io)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     if (io->priv_flags & REQ_ENQUEUED)
         AddHeadMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
     else
@@ -270,6 +274,7 @@ s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io)
 {
 #ifdef DEBUG
     /* every entry runs under the transfer-plane lock */
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     if (ep_ctx->udev->controller->xfer_lock.ss_Owner != FindTask(NULL))
         Kprintf("xfer_lock NOT HELD on submit path!\n");
 #endif
@@ -288,7 +293,7 @@ s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io)
         state == USB_DEV_EP_STATE_RESETTING ||
         state == USB_DEV_EP_STATE_SUSPENDED)
     {
-        KprintfT("Cannot submit transfer, ep in state %d\n", state);
+        KprintfT("Cannot submit transfer, ep in state %ld\n", state);
         xhci_ep_enqueue(ep_ctx, io);
         return UHIOERR_NO_ERROR;
     }
@@ -320,6 +325,7 @@ s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io)
 
 void xhci_ep_schedule_next(struct ep_context *ep_ctx)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)))
     {
@@ -460,6 +466,7 @@ static BOOL xhci_ep_has_stop_abort_requests(struct ep_context *ep_ctx)
 
 static BOOL xhci_ep_append_stop_abort_request(struct ep_context *ep_ctx, struct xhci_xfer *abort_req)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     IOReqNode *node = pool_alloc(ep_ctx->udev->controller->metaPool, sizeof(*node));
     if (!node)
         return FALSE;
@@ -471,6 +478,7 @@ static BOOL xhci_ep_append_stop_abort_request(struct ep_context *ep_ctx, struct 
 
 static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->stop_abort_reqs)) != NULL)
         pool_free(ep_ctx->udev->controller->metaPool, node);
@@ -666,6 +674,7 @@ BOOL xhci_ep_process_stop(struct ep_context *ep_ctx)
 {
     if (!ep_ctx)
         return FALSE;
+    struct ExecBase *SysBase = ep_ctx->sysBase;
 
     if (!xhci_ep_has_stop_abort_requests(ep_ctx) && !ep_ctx->stop_process_timeouts)
         return FALSE;
@@ -818,6 +827,7 @@ struct xhci_ring *xhci_ep_get_ring_for_stream(struct ep_context *ep_ctx, u16 str
 
 void xhci_ep_streams_destroy(struct ep_context *ep_ctx, s8 reply_code)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     struct ep_streams *st = ep_ctx->streams;
     if (!st)
         return;
@@ -842,6 +852,7 @@ void xhci_ep_streams_destroy(struct ep_context *ep_ctx, s8 reply_code)
 s8 xhci_ep_streams_build(struct ep_context *ep_ctx, u16 num_streams, u8 max_pstreams_cap)
 {
     struct xhci_ctrl *ctrl = ep_ctx->udev->controller;
+    struct ExecBase *SysBase = ctrl->sysBase;
 
     /* Array entries = 2^(p+1) including the reserved entry 0, so p is the
      * smallest exponent with 2^(p+1) > num_streams (p >= 1 per spec). */
@@ -902,6 +913,7 @@ fail:
  * called from xhci_direct_abort under the lock). */
 void xhci_ep_abort_cookie(struct ep_context *ep_ctx, APTR cookie)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     /* still software-queued (ring was busy): retire it without wire work */
     for (struct MinNode *node = ep_ctx->pending_reqs.mlh_Head; node->mln_Succ; node = node->mln_Succ)
     {
@@ -967,6 +979,7 @@ u32 xhci_ep_get_active_trb_count(struct ep_context *ep_ctx)
 
 void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
     {

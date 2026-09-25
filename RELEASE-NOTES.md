@@ -17,6 +17,22 @@ Configuration-relevant changes across all releases, newest first:
   stack configuration accordingly.
 
 
+# Release notes — xhci.device 6.3
+
+Changes since v6.2.
+
+---
+
+## Bug fixes
+
+- **A root-hub request for a port that does not exist no longer crashes.**
+  A port-status, port-feature or error-count request naming port 0 or a port
+  beyond the root hub's count dereferenced a NULL pointer. It now fails with a
+  STALL, the Request Error a real hub returns.
+- Adjusted to changes in emu68-common 2.0.0
+
+---
+
 # Release notes — xhci.device 6.2
 
 Changes since v6.1.

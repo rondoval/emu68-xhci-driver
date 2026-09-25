@@ -13,9 +13,8 @@
  * Authors: Vivek Gautam <gautam.vivek@samsung.com>
  *	    Vikas Sajjan <vikas.sajjan@samsung.com>
  */
-#ifdef __INTELLISENSE__
-#else
-#endif
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 
 #include <debug.h>
 

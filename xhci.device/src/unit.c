@@ -4,7 +4,7 @@
 #include <clib/bcmpcie_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define BCMPCIE_BASE_NAME pcielibBase
 #include <proto/bcmpcie.h>
@@ -37,6 +37,7 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 								  struct xhci_hccr **hccr,
 								  struct xhci_hcor **hcor)
 {
+	struct ExecBase *SysBase = unit->sysBase;
 	APTR DeviceTreeBase = OpenResource((CONST_STRPTR) "devicetree.resource");
 	if (DeviceTreeBase == NULL)
 	{
@@ -63,7 +64,7 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 	CONST_STRPTR compatible = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "compatible"));
 #endif
 
-	APTR base = DT_GetBaseAddressVirtual((CONST_STRPTR) "/scb/xhci");
+	APTR base = DT_GetBaseAddressVirtual(SysBase, (CONST_STRPTR) "/scb/xhci");
 	if (base == NULL)
 	{
 		Kprintf("[bcm-xhci] %s: Failed to get base address\n", __func__);
@@ -73,7 +74,7 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 
 	Kprintf("[bcm-xhci] %s: compatible: %s\n", __func__, compatible);
 
-	unit->irq_line = (u32)DT_GetInterrupt(key, 0);
+	unit->irq_line = (u32)DT_GetInterrupt(SysBase, key, 0);
 	Kprintf("[bcm-xhci] %s: IRQ = %lu\n", __func__, (ULONG)unit->irq_line);
 
 	// We're done with the device tree
@@ -169,6 +170,7 @@ static s32 unit_init_pcie_xhci(LONG unitNumber, struct pci_dev **ret_pci_dev,
 							   struct xhci_hcor **ret_hcor,
 							   struct XHCIDevice *device)
 {
+	struct ExecBase *SysBase = device->sysBase;
 	/* Lazily open the PCI library on first PCIe unit access */
 	if (xhci_open_pcie_library(device) != 0)
 	{
@@ -220,6 +222,7 @@ static s32 unit_init_pcie_xhci(LONG unitNumber, struct pci_dev **ret_pci_dev,
 static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_dev *pci_dev,
 							struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
+	struct ExecBase *SysBase = unit->sysBase;
 	struct xhci_ctrl *xhci_ctrl = AllocMem(sizeof(struct xhci_ctrl), MEMF_CLEAR | MEMF_PUBLIC);
 	if (!xhci_ctrl)
 	{
@@ -227,6 +230,7 @@ static s32 unit_attach_xhci(struct XHCIUnit *unit, struct pci_dev *pci_dev,
 		return UHIOERR_OUTOFMEMORY;
 	}
 
+	xhci_ctrl->sysBase = unit->sysBase;
 	xhci_ctrl->utilityBase = unit->device->utilityBase;
 	xhci_ctrl->pci_dev = pci_dev;
 	xhci_detect_quirks(unit->device->pcieBase, xhci_ctrl, pci_dev);
@@ -268,6 +272,7 @@ err_free_ctrl:
 
 s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber)
 {
+	struct ExecBase *SysBase = unit->sysBase;
 	/* openLib enforces exclusive access; a unit arrives here only unopened. */
 	KprintfT("[xhci] %s: Opening unit %ld\n", __func__, unitNumber);
 	unit->unit.unit_OpenCnt = 1;
@@ -303,6 +308,7 @@ err_del_pool:
 
 s32 UnitClose(struct XHCIUnit *unit)
 {
+	struct ExecBase *SysBase = unit->sysBase;
 	Kprintf("[xhci] %s: Closing unit %ld\n", __func__, unit->unitNumber);
 
 	unit->unit.unit_OpenCnt--;

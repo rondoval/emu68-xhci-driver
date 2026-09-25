@@ -4,7 +4,7 @@
 #include <clib/utility_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define UTILITY_BASE_NAME unit->device->utilityBase
 #include <proto/utility.h>
@@ -114,6 +114,7 @@ static u32 Do_NSCMD_DEVICEQUERY(struct IOStdReq *io)
 
 static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct IORequest *req)
 {
+    struct ExecBase *SysBase = unit->sysBase;
     (void)unit;
 
     /* A driver-owned root-hub submit still queued: complete it through its
@@ -138,6 +139,7 @@ static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct IOReq
 static u32 Do_CMD_FLUSH(struct IORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
+    struct ExecBase *SysBase = unit->sysBase;
     KprintfT("[xhci] %s: CMD_FLUSH\n", __func__);
 
     struct IORequest *req;
@@ -342,6 +344,7 @@ static inline u32 Do_CMD_DEVICE_RESET(struct IORequest *io)
 
 void ProcessCommand(struct IORequest *io)
 {
+    struct ExecBase *SysBase = ((struct XHCIUnit *)io->io_Unit)->sysBase;
     u32 complete = COMMAND_SCHEDULED;
 
     /*

@@ -40,7 +40,7 @@ void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL copy);
  * + cache maintenance touch only caller-owned buffers).  The one-call map
  * inside the submit machinery is idempotent over a premapped request. */
 dma_addr_t xhci_dma_premap(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL to_device);
-void xhci_dma_map_sync(struct xhci_xfer *req, BOOL to_device);
+void xhci_dma_map_sync(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL to_device);
 
 /* xhci_submit_td outcome.  NO_ROOM leaves the io fully intact (its DMA
  * mapping included — the map is idempotent) so the endpoint can park it on

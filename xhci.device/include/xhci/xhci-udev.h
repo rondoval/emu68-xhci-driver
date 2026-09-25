@@ -87,6 +87,7 @@ struct udev_suspend {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
+	struct ExecBase *sysBase;		/* controller->sysBase, copied at alloc */
 	u8    xhci_address;				/* Device address as seen by xHCI */
 	u8	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */

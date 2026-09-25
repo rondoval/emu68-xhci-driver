@@ -3,7 +3,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -45,6 +45,7 @@ static struct usb_device *xhci_udev_find_child_on_port(struct usb_device *hub, u
 /* Shared allocation core for both device kinds. */
 static struct usb_device *xhci_udev_alloc_common(struct xhci_ctrl *ctrl)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     struct usb_device *udev = pool_zalloc(ctrl->metaPool, sizeof(*udev));
     if (!udev)
     {
@@ -53,6 +54,7 @@ static struct usb_device *xhci_udev_alloc_common(struct xhci_ctrl *ctrl)
     }
 
     udev->controller = ctrl;
+    udev->sysBase = ctrl->sysBase;
 
     /* Allocate the (output) device context that will be used in the HC. */
     udev->out_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_DEVICE);
@@ -129,6 +131,7 @@ void xhci_udev_free(struct usb_device *udev)
 {
     if (!udev)
         return;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
@@ -229,6 +232,7 @@ static void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
         return;
 
     io->ctrl = ctrl;
+    io->sysBase = ctrl->sysBase;
     io->complete = xhci_udev_internal_complete; /* fire-and-forget: free on completion */
     io->owner_slot = udev->slot_id;
     io->type = UHCD_EPTYPE_CONTROL;
@@ -243,7 +247,7 @@ static void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
     {
-        Kprintf("No ep context for ep index %d\n", ep_index);
+        Kprintf("No ep context for ep index %ld\n", ep_index);
         slab_free(&ctrl->xfer_slab, io);
         return;
     }

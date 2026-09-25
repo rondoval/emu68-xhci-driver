@@ -19,7 +19,7 @@
 #include <clib/utility_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define UTILITY_BASE_NAME ctrl->utilityBase
 #include <proto/utility.h>
@@ -170,6 +170,7 @@ void xhci_direct_done(struct xhci_xfer *io)
 static void xhci_direct_rh_done(struct xhci_xfer *io)
 {
     struct xhci_ctrl *ctrl = io->ctrl;
+    struct ExecBase *SysBase = ctrl->sysBase;
     APTR cookie = io->cookie;
     u32 actual = io->actual;
     s8 error = io->error;
@@ -185,6 +186,7 @@ static LONG direct_rh_defer(struct XHCIUnit *unit, u32 tok,
                             APTR data, ULONG length, APTR cookie)
 {
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
+    struct ExecBase *SysBase = ctrl->sysBase;
     const u8 ep_index = (u8)(tok & DTOK_EP_MASK);
 
     /* EP0 is control-only; everything else on a root hub is the
@@ -205,6 +207,7 @@ static LONG direct_rh_defer(struct XHCIUnit *unit, u32 tok,
 
     struct xhci_xfer *io = &msg->rs_Xfer;
     io->ctrl = ctrl;
+    io->sysBase = ctrl->sysBase;
     io->complete = xhci_direct_rh_done;
     io->endpoint = (u8)((ep_index + 1) >> 1);
     if (setup)
@@ -267,6 +270,7 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
                                  ULONG naktimeout_ms, UWORD stream_id,
                                  UWORD flags, APTR cookie)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     lock_prof_obtain(&ctrl->lockProf, &ctrl->xfer_lock);
 
     struct usb_device *udev = NULL;
@@ -327,6 +331,7 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
     }
 
     io->ctrl = ctrl;
+    io->sysBase = ctrl->sysBase;
     io->complete = xhci_direct_done;
     io->priv_flags = REQ_DIRECT;
     io->endpoint = (u8)((ep_index + 1) >> 1);
@@ -376,7 +381,7 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
     lock_prof_release(&ctrl->lockProf, &ctrl->xfer_lock);
     PERF_T0(map_t0);
     if (length)
-        xhci_dma_map_sync(io, to_device);
+        xhci_dma_map_sync(ctrl, io, to_device);
     PERF_ADD(&ctrl->perf, XP_SUBMIT_MAP, map_t0);
     lock_prof_obtain(&ctrl->lockProf, &ctrl->xfer_lock);
 
@@ -444,6 +449,7 @@ LONG xhci_direct_abort(APTR hcd, APTR ep_token, APTR cookie)
     struct xhci_ctrl *ctrl = hcd_ctrl(hcd, tok);
     if (!ctrl)
         return UHIOERR_NO_ERROR; /* a wish */
+    struct ExecBase *SysBase = ctrl->sysBase;
 
     lock_prof_obtain(&ctrl->lockProf, &ctrl->xfer_lock);
 
