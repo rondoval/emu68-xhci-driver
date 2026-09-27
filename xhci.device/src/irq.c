@@ -88,7 +88,8 @@ static ULONG xhci_int_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *u
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
 	ULONG status = mmio_read32(&ctrl->hcor->or_usbsts) & XHCI_IRQ_ACK_MASK;
 
-	/* Nothing flagged: a stray call. */
+	/* Nothing flagged, so the xHC is not the one asserting: report
+	 * not-handled (Z set) and let a shared line's chain walk continue. */
 	if (!status)
 		return 0;
 
