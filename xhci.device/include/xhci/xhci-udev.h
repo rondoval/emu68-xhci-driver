@@ -180,6 +180,7 @@ struct udev_operation {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
+	struct ExecBase *sysBase; /* controller->sysBase, copied at alloc */
 	u16	virtual_address;			/* Device address as seen by the driver user */
 	u8    xhci_address;				/* Device address as seen by xHCI */
 	u8	slot_id;		/* Slot ID for xHCI */

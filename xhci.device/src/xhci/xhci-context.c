@@ -17,7 +17,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -56,6 +56,7 @@
  */
 struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 type)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     struct xhci_container_ctx *ctx = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_container_ctx));
     if (!ctx)
     {
@@ -87,6 +88,7 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
  */
 void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     dma_free(ctrl->dmaPool, ctx->bytes);
     pool_free(ctrl->metaPool, ctx);
 }
@@ -99,11 +101,11 @@ void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *
  */
 static struct xhci_input_control_ctx *xhci_get_input_control_ctx(struct xhci_container_ctx *ctx)
 {
-    if (ctx->type != XHCI_CTX_TYPE_INPUT)
-    {
-        Kprintf("Invalid context type\n");
-        return NULL;
-    }
+    /* Every caller passes a device's in_ctx, allocated as the input type, so
+     * this is an invariant, not a runtime error: never return NULL here.  A
+     * NULL result would be dereferenced at offset 4 by the callers, which GCC
+     * compiles as a store to address 4 (the Exec base pointer) plus a trap. */
+    KASSERT(ctx->type == XHCI_CTX_TYPE_INPUT, "xhci_get_input_control_ctx: not an input context");
     return (struct xhci_input_control_ctx *)ctx->bytes;
 }
 
@@ -142,6 +144,7 @@ static struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_ctrl *ctrl, struct xhci_c
 
 u32 xhci_get_hardware_address(struct usb_device *udev)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(udev->controller, udev->out_ctx);
     xhci_inval_cache(slot_ctx, sizeof(struct xhci_slot_ctx));
     return le32(slot_ctx->dev_state) & DEV_ADDR_MASK;
@@ -149,6 +152,7 @@ u32 xhci_get_hardware_address(struct usb_device *udev)
 
 u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, u8 ep_index)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
     xhci_inval_cache(ep_ctx, sizeof(struct xhci_ep_ctx));
     return le64(ep_ctx->deq);
@@ -289,6 +293,7 @@ static BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub)
  */
 void xhci_setup_addressable_virt_dev(struct usb_device *udev)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
     KprintfT("Setting up addressable virtual device addr=%lu parent_addr=%lu parent_port=%lu\n",
              (ULONG)udev->virtual_address,
@@ -500,6 +505,7 @@ static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ct
  */
 void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
     u8 ep_index = 0; /* control endpoint */
 
@@ -685,6 +691,7 @@ static void xhci_update_slot_last_ctx(struct xhci_ctrl *ctrl,
  * ep_state bookkeeping. */
 u32 xhci_read_hw_ep_state(struct usb_device *udev, u8 ep_index)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
     xhci_inval_cache(ep_ctx, sizeof(*ep_ctx));
     return le32(ep_ctx->ep_info) & EP_STATE_MASK;
@@ -717,6 +724,7 @@ static void xhci_compute_and_apply_mel(struct usb_device *udev)
  */
 s8 xhci_set_configuration(struct usb_device *udev, u32 config_value)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     KprintfT("xhci_set_configuration: config_val=%lu\n", (ULONG)config_value);
 
     struct usb_config *cfg = xhci_find_config(udev, (int)config_value);
@@ -781,6 +789,7 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
         Kprintf("xhci_set_interface: invalid usb_device pointer\n");
         return ERR_BAD_PARAMETERS;
     }
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct usb_config *cfg = udev->active_config;
     if (!cfg)
@@ -830,12 +839,6 @@ s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting)
     xhci_endpoint_copy(ctrl, udev->in_ctx, udev->out_ctx, 0);
 
     struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
-    if (!ctrl_ctx)
-    {
-        Kprintf("xhci_set_interface: missing input control context\n");
-        iface->active_altsetting = current_alt;
-        return ERR_HCI_ERROR;
-    }
 
     s8 err = ERR_NO_ERROR;
     if (new_alt->no_of_ep > 0)
@@ -949,6 +952,7 @@ static const char *ep_type_name(u32 type)
 
 void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_container_ctx *ctx = in_ctx ? udev->in_ctx : udev->out_ctx;
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(udev->controller, ctx);
     xhci_inval_cache(slot_ctx, sizeof(struct xhci_slot_ctx));
@@ -1020,6 +1024,7 @@ void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx)
  * MEL of 0 the controller will not take the link into U1/U2. */
 void xhci_evaluate_mel(struct usb_device *udev)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
 
     struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
@@ -1043,6 +1048,7 @@ void xhci_evaluate_mel(struct usb_device *udev)
 
 void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, u8 ep_index)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
     xhci_inval_cache(ep_ctx, sizeof(struct xhci_ep_ctx));
     const char *pfx = tag ? tag : "";

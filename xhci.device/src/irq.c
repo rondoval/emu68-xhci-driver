@@ -5,7 +5,7 @@
 #include <clib/bcmpcie_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define GIC400_BASE_NAME unit->device->gic400Base
 #include <proto/gic400.h>
@@ -47,9 +47,8 @@ static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
 	mmio_write32(cmd, &ctrl->hcor->or_usbcmd);
 }
 
-static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *unit asm("a1"), ULONG vector asm("d0"))
+static ULONG xhci_int_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *unit asm("a1"), ULONG vector asm("d0"))
 {
-	(void)execBase;
 	(void)vector;
 
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;

@@ -9,7 +9,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -85,7 +85,7 @@ static void xhci_hub_cache_ss_hub_descriptor(struct usb_device *udev, struct usb
     if (len == 0 || len > actual)
         len = (u8)(actual < sizeof(struct usb_hub_descriptor) ? actual : sizeof(struct usb_hub_descriptor));
 
-    CopyMem(hub, &udev->ss_hub_desc, len);
+    memcpy(&udev->ss_hub_desc, hub, len);
     KprintfT("Cached SS hub descriptor for addr %lu with %lu ports\n",
              (ULONG)udev->virtual_address, (ULONG)hub->bNbrPorts);
 }
@@ -141,7 +141,7 @@ static u32 xhci_hub_build_usb2_hub_descriptor(struct usb_device *udev, u8 *buf, 
         hub.u.hs.PortPowerCtrlMask[i] = 0xFF;
 
     u32 actual = max_len < hub.bLength ? max_len : hub.bLength;
-    CopyMem(&hub, buf, actual);
+    memcpy(buf, &hub, actual);
     return actual;
 }
 
@@ -245,6 +245,7 @@ BOOL xhci_hub_filter_emulated_ctrl_request(struct usb_device *udev, struct USBIO
 {
     if (!udev || !io || !udev->ss_hub_emulation)
         return FALSE;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct USBSetupPacket *setup = &io->setup;
     if (setup->bRequest != USB_REQ_CLEAR_FEATURE && setup->bRequest != USB_REQ_SET_FEATURE)

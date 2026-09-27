@@ -24,7 +24,7 @@
 #include <clib/timer_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #include <proto/timer.h>
 #endif
@@ -209,6 +209,7 @@ struct xhci_root_hub_port
 struct xhci_root_hub
 {
 	struct usb_device *udev;
+	struct ExecBase *sysBase; /* udev->sysBase, copied at create */
 	io_reply_data_fn io_reply_data;
 
 	struct descriptor descriptor;
@@ -342,15 +343,17 @@ static void xhci_roothub_debug_port(struct xhci_root_hub *rh, u32 port)
 
 struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data_fn io_reply_data)
 {
+	struct ExecBase *SysBase = udev->sysBase;
 	struct xhci_ctrl *ctrl = udev->controller;
 	struct xhci_root_hub *rh = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_root_hub));
 	if (!rh)
 		return NULL;
 
 	rh->udev = udev;
+	rh->sysBase = udev->sysBase;
 	rh->io_reply_data = io_reply_data;
 
-	CopyMem(&prototype_descriptor, &rh->descriptor, sizeof(prototype_descriptor));
+	memcpy(&rh->descriptor, &prototype_descriptor, sizeof(prototype_descriptor));
 
 	const u8 ports = HCS_MAX_PORTS(mmio_read32(&ctrl->hccr->cr_hcsparams1));
 	rh->num_ports = ports;
@@ -457,6 +460,7 @@ void xhci_roothub_destroy(struct xhci_root_hub *rh)
 {
 	if (!rh)
 		return;
+	struct ExecBase *SysBase = rh->sysBase;
 
 	xhci_roothub_abort_int_request(rh);
 
@@ -534,7 +538,7 @@ void xhci_roothub_set_usb2_hw_lpm(struct xhci_root_hub *rh, u32 port, u8 hird, u
 
 	struct xhci_hcor_port_regs *pr = &rh->udev->controller->hcor->portregs[port - 1];
 
-	KprintfT("Setting USB2 hardware LPM on port %lu: HIRD=%u, slot ID=%u, BESL mode=%u, BESLD=%u, L1 timeout=%u microseconds\n",
+	KprintfT("Setting USB2 hardware LPM on port %lu: HIRD=%lu, slot ID=%lu, BESL mode=%lu, BESLD=%lu, L1 timeout=%lu microseconds\n",
 			 (ULONG)port, (ULONG)hird, (ULONG)slot_id, (ULONG)besl_mode, (ULONG)besld, (ULONG)l1_timeout_us);
 
 	if (besl_mode)
@@ -670,14 +674,15 @@ inline static void xhci_roothub_reply(struct USBIORequest *req, void *data, u32 
 	length = length < req_length ? length : req_length;
 
 	if (data && length > 0)
-		CopyMem(data, req->data_buffer, length);
+		memcpy(req->data_buffer, data, length);
 
 	req->actual_length = length;
 	req->req.io_Error = ERR_NO_ERROR;
 }
 
-inline static void xhci_roothub_delay_ms(u32 milliseconds)
+inline static void xhci_roothub_delay_ms(struct xhci_root_hub *rh, u32 milliseconds)
 {
+	struct ExecBase *SysBase = rh->sysBase;
 	if (milliseconds == 0)
 		return;
 
@@ -856,11 +861,17 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 	const u16 wValue = le16(req->setup.wValue); // feature selector
 	const u16 wIndex = le16(req->setup.wIndex); // selector | port
 	const u8 portNo = wIndex & 0xffU;
+	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
+	if (!port) /* port 0 or beyond the hub: a Request Error, as on a real hub */
+	{
+		Kprintf("invalid root hub port %lu\n", (ULONG)portNo);
+		xhci_roothub_stall(req);
+		return;
+	}
 #ifdef TRACE
 	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
-	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	u32 reg = mmio_read32(&port->or_portsc);
 	reg = xhci_port_state_to_neutral(reg);
 
@@ -934,7 +945,7 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		if (rh->ports[portNo - 1].major_revision < 3)
 		{
 			xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_RESUME);
-			xhci_roothub_delay_ms(25); // wait at least 20ms for resume to take effect
+			xhci_roothub_delay_ms(rh, 25); // wait at least 20ms for resume to take effect
 		}
 		/* put port back to U0 (active) state */
 		xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_U0);
@@ -991,6 +1002,13 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 	const u16 wValue = le16(req->setup.wValue);
 	const u16 wLength = le16(req->setup.wLength);
 	const u8 portNo = wIndex & 0xffU;
+	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
+	if (!port) /* port 0 or beyond the hub: a Request Error, as on a real hub */
+	{
+		Kprintf("invalid root hub port %lu\n", (ULONG)portNo);
+		xhci_roothub_stall(req);
+		return;
+	}
 	const u8 portStatusType = wValue & 0xffU;
 
 	if (portStatusType != 0 || wLength != 4)
@@ -1004,7 +1022,6 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub *rh, struct
 	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
-	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	const u32 reg = mmio_read32(&port->or_portsc);
 
 	u16 wPortStatus;
@@ -1087,6 +1104,13 @@ static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, s
 {
 	const u16 wIndex = le16(req->setup.wIndex);
 	const u8 portNo = wIndex & 0xffU;
+	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
+	if (!port) /* port 0 or beyond the hub: a Request Error, as on a real hub */
+	{
+		Kprintf("invalid root hub port %lu\n", (ULONG)portNo);
+		xhci_roothub_stall(req);
+		return;
+	}
 
 	if (rh->ports[portNo - 1].major_revision < 3)
 	{
@@ -1101,10 +1125,9 @@ static void xhci_roothub_handle_get_port_error_count(struct xhci_root_hub *rh, s
 		return;
 	}
 
-	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	const u16 errors = mmio_read32(&port->or_portli) & 0xffff;
 
-	KprintfT("USB_REQ_GET_PORT_ERROR_COUNT PORT %lu error count=%u\n", (ULONG)wIndex, errors);
+	KprintfT("USB_REQ_GET_PORT_ERROR_COUNT PORT %lu error count=%lu\n", (ULONG)wIndex, errors);
 	u8 tmpbuf[2] = {errors & 0xffU, (u8)(errors >> 8)};
 	xhci_roothub_reply(req, tmpbuf, 2);
 }
@@ -1114,12 +1137,18 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 	const u16 wValue = le16(req->setup.wValue);
 	const u16 wIndex = le16(req->setup.wIndex);
 	const u8 portNo = wIndex & 0xffU;
+	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
+	if (!port) /* port 0 or beyond the hub: a Request Error, as on a real hub */
+	{
+		Kprintf("invalid root hub port %lu\n", (ULONG)portNo);
+		xhci_roothub_stall(req);
+		return;
+	}
 
 #ifdef TRACE
 	xhci_roothub_debug_port(rh, portNo - 1u);
 #endif
 
-	struct xhci_hcor_port_regs *port = xhci_roothub_get_port(rh, req);
 	u32 reg = mmio_read32(&port->or_portsc);
 	reg = xhci_port_state_to_neutral(reg);
 
@@ -1166,7 +1195,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 				u32 temp;
 				for (attempts = 0; attempts < 100; attempts++)
 				{
-					xhci_roothub_delay_ms(10);
+					xhci_roothub_delay_ms(rh, 10);
 					temp = mmio_read32(&port->or_portsc);
 					if (!(temp & PORT_RESET))
 						break;
@@ -1195,7 +1224,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 
 		/* Allow the link partner to stabilise before
 		 * the stack tries ADDRESS_DEVICE. */
-		xhci_roothub_delay_ms(50);
+		xhci_roothub_delay_ms(rh, 50);
 		break;
 	}
 	case USB_PORT_FEAT_POWER:

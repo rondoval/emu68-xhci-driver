@@ -4,7 +4,7 @@
 #include <clib/utility_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define UTILITY_BASE_NAME unit->device->utilityBase
 #include <proto/utility.h>
@@ -69,6 +69,7 @@ static u32 Do_NSCMD_DEVICEQUERY(struct IOStdReq *io)
 
 static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct USBIORequest *req)
 {
+    struct ExecBase *SysBase = unit->sysBase;
     if ((req->driver_private_flags & REQ_INTERNAL) && req->req.io_Command == CMD_INTERNAL_ABORT_REQUEST)
     {
         if (unit && unit->memoryPool)
@@ -86,6 +87,7 @@ static inline void flush_queued_unit_request(struct XHCIUnit *unit, struct USBIO
 static u32 Do_CMD_FLUSH(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    struct ExecBase *SysBase = unit->sysBase;
     KprintfT("[xhci] %s: CMD_FLUSH\n", __func__);
 
     struct USBIORequest *req;
@@ -377,6 +379,7 @@ static inline u32 Do_CMD_XFER(struct USBIORequest *io)
 static inline u32 Do_CMD_INTERNAL_ABORT(struct USBIORequest *io)
 {
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
+    struct ExecBase *SysBase = unit->sysBase;
     struct xhci_ctrl *ctrl = unit->xhci_ctrl;
     struct USBIORequest *orig_req = (struct USBIORequest *)io->data_buffer;
 
@@ -513,6 +516,7 @@ badparams:
 
 void ProcessCommand(struct USBIORequest *io)
 {
+    struct ExecBase *SysBase = ((struct XHCIUnit *)io->req.io_Unit)->sysBase;
     u32 complete = COMMAND_SCHEDULED;
 
     /*

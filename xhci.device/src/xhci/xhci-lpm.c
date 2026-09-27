@@ -10,7 +10,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -377,6 +377,7 @@ static BOOL xhci_udev_send_set_sel(struct usb_device *udev)
 {
     if (!udev || !udev->controller || udev->speed < USB_SPEED_SUPER || !udev->lpm_capable)
         return FALSE;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct xhci_ctrl *ctrl = udev->controller;
 

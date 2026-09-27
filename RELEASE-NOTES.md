@@ -15,6 +15,21 @@ Configuration-relevant changes across all releases, newest first:
   stack configuration accordingly.
 
 
+# Release notes — xhci.device 5.5
+
+Changes since v5.4.
+
+---
+
+## Bug fixes
+
+- **A root-hub request for a port that does not exist no longer crashes.**
+  A port-status, port-feature or error-count request naming port 0 or a port
+  beyond the root hub's count dereferenced a NULL pointer. It now fails with a
+  STALL, the Request Error a real hub returns.
+
+---
+
 # Release notes — xhci.device 5.4
 
 Changes since v5.3.

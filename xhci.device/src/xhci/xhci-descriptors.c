@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <exec/types.h>
 #include <xhci/ch9.h>
 #include <xhci/usb_defs.h>
@@ -494,7 +496,7 @@ static BOOL parse_interface_descriptor(struct cfg_parse_state *st, struct usb_in
     st->current_alt = &st->current_if->altsetting[st->current_alt_index];
     memset(st->current_alt, 0, sizeof(struct usb_interface_altsetting));
 
-    CopyMem(ifd, &st->current_alt->desc, sizeof(struct usb_interface_descriptor));
+    memcpy(&st->current_alt->desc, ifd, sizeof(struct usb_interface_descriptor));
     st->current_alt->no_of_ep = 0;
 
     KprintfT("interface %lu alt %lu: bInterfaceNumber=%lu bAlternateSetting=%lu bNumEndpoints=%lu bInterfaceClass=0x%02lx bInterfaceSubClass=0x%02lx bInterfaceProtocol=0x%02lx iInterface=%lu\n",
@@ -529,7 +531,7 @@ static void parse_endpoint_descriptor(struct cfg_parse_state *st, struct usb_end
     }
 
     u32 ep_idx = st->current_alt->no_of_ep;
-    CopyMem(epd, &st->current_alt->ep_desc[ep_idx], sizeof(struct usb_endpoint_descriptor));
+    memcpy(&st->current_alt->ep_desc[ep_idx], epd, sizeof(struct usb_endpoint_descriptor));
     KprintfT("  endpoint %lu: bEndpointAddress=0x%02lx bmAttributes=0x%02lx wMaxPacketSize=%lu bInterval=%lu\n",
              (ULONG)ep_idx,
              (ULONG)epd->bEndpointAddress,
@@ -548,7 +550,7 @@ static void parse_ss_ep_comp_descriptor(struct cfg_parse_state *st, struct usb_s
     if (st->current_if && st->current_alt && st->current_alt->no_of_ep > 0)
     {
         u32 ep_slot = (u32)(st->current_alt->no_of_ep - 1U);
-        CopyMem(comp, &st->current_alt->ss_ep_comp_desc[ep_slot], sizeof(struct usb_ss_ep_comp_descriptor));
+        memcpy(&st->current_alt->ss_ep_comp_desc[ep_slot], comp, sizeof(struct usb_ss_ep_comp_descriptor));
     }
 }
 
@@ -557,6 +559,7 @@ static void parse_ss_ep_comp_descriptor(struct cfg_parse_state *st, struct usb_s
  * the device, replacing any prior config with the same bConfigurationValue. */
 void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     if (len < 2)
     {
         KprintfT("too short, len=%lu\n", (ULONG)len);
@@ -592,7 +595,7 @@ void xhci_parse_config_descriptor(struct usb_device *udev, u8 *data, u16 len)
         goto error;
     }
 
-    CopyMem(desc, &conf->desc, sizeof(struct usb_config_descriptor));
+    memcpy(&conf->desc, desc, sizeof(struct usb_config_descriptor));
     cursor += desc->bLength;
 
     KprintfT("wTotalLength=%lu bNumInterfaces=%lu bConfigurationValue=%lu iConfiguration=%lu bmAttributes=0x%02lx bMaxPower=%lu\n",

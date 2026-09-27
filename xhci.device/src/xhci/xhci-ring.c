@@ -13,6 +13,8 @@
  *	    Vikas Sajjan <vikas.sajjan@samsung.com>
  */
 
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <config.h>
 #include <debug.h>
 #include <memory.h>
@@ -36,17 +38,6 @@
 #define KprintfT(fmt, ...) PrintPistorm("[xhci-ring] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-static inline void xhci_copy_to_bounce_buffer(CONST_APTR src, APTR dst, u32 size)
-{
-	if ((((uintptr_t)src | (uintptr_t)dst | size) & (sizeof(ULONG) - 1)) == 0)
-	{
-		CopyMemQuick((ULONG *)src, (ULONG *)dst, size);
-		return;
-	}
-
-	CopyMem(src, dst, size);
-}
-
 struct xhci_segment
 {
 	union xhci_trb *trbs;
@@ -56,6 +47,7 @@ struct xhci_segment
 
 struct xhci_ring
 {
+	struct ExecBase *sysBase; /* ctrl->sysBase, copied at alloc */
 	BOOL is_event_ring;
 	u8 ep_index; /* for transfer rings, the endpoint index this ring is associated with. For event rings, unused and set to 0. */
 	u32 num_segs;
@@ -84,6 +76,7 @@ struct xhci_ring
  */
 static void xhci_segment_free(struct xhci_ctrl *ctrl, struct xhci_segment *seg)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (seg->trbs)
 		slab_free(&ctrl->seg_slab, seg->trbs);
 	seg->trbs = NULL;
@@ -99,6 +92,7 @@ static void xhci_segment_free(struct xhci_ctrl *ctrl, struct xhci_segment *seg)
  */
 void xhci_ring_free(struct xhci_ctrl *ctrl, struct xhci_ring *ring)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (!ring)
 	{
 		Kprintf("Ring is NULL, nothing to free\n");
@@ -189,6 +183,7 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring)
  */
 static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	struct xhci_segment *seg = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_segment));
 	if (!seg)
 	{
@@ -227,6 +222,7 @@ static struct xhci_segment *xhci_segment_alloc(struct xhci_ctrl *ctrl)
  */
 BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_segs)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (!ring || num_new_segs == 0 ||
 		ring->num_segs + num_new_segs > XHCI_MAX_SEGMENTS_PER_RING)
 		return FALSE;
@@ -338,6 +334,7 @@ BOOL xhci_ring_grow(struct xhci_ctrl *ctrl, struct xhci_ring *ring, u32 num_new_
 struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 								  BOOL link_trbs, BOOL is_event_ring, u8 ep_index, u32 max_packet_size)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	u32 remaining = num_segs;
 
 	struct xhci_ring *ring = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_ring));
@@ -347,6 +344,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 				(ULONG)sizeof(struct xhci_ring));
 		return NULL;
 	}
+	ring->sysBase = ctrl->sysBase;
 	ring->num_segs = num_segs;
 	ring->is_event_ring = is_event_ring;
 	ring->ep_index = ep_index;
@@ -396,6 +394,7 @@ struct xhci_ring *xhci_ring_alloc(struct xhci_ctrl *ctrl, u32 num_segs,
 
 void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct xhci_intr_reg *ir_set)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	u32 val;
 	struct xhci_segment *seg;
 	const u32 entry_count = erst->num_entries;
@@ -492,6 +491,7 @@ inline static BOOL last_trb_on_last_seg(struct xhci_ring *ring,
  */
 inline static void inc_enq(struct xhci_ring *ring, BOOL more_trbs_coming)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	u32 chain = le32(ring->enqueue->generic.field[3]) & TRB_CHAIN;
 	union xhci_trb *next = ++(ring->enqueue);
 
@@ -585,6 +585,7 @@ inline static dma_addr_t xhci_ring_enqueue_trb(struct xhci_ring *ring,
 											   BOOL more_trbs_coming,
 											   u32 field0, u32 field1, u32 field2, u32 field3)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	struct xhci_generic_trb *trb = &ring->enqueue->generic;
 
 	trb->field[0] = le32(field0);
@@ -608,6 +609,7 @@ inline static dma_addr_t xhci_ring_enqueue_trb(struct xhci_ring *ring,
  */
 inline static void prepare_ring(struct xhci_ring *ep_ring)
 {
+	struct ExecBase *SysBase = ep_ring->sysBase;
 	union xhci_trb *next = ep_ring->enqueue;
 
 	while (last_trb(ep_ring, ep_ring->enq_seg, next))
@@ -639,6 +641,7 @@ inline static void prepare_ring(struct xhci_ring *ep_ring)
  */
 union xhci_trb *xhci_ring_get_event_trb(struct xhci_ring *ring)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	xhci_inval_cache(ring->dequeue, sizeof(union xhci_trb));
 	union xhci_trb *event = ring->dequeue;
 
@@ -689,7 +692,7 @@ u32 xhci_ring_get_new_dequeue_ptr(struct xhci_ring *ring)
 	return (u32)deq | cycle;
 }
 
-u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr)
+u32 xhci_ring_get_deq_ptr_for_trb(struct ExecBase *SysBase, dma_addr_t trb_addr)
 {
 	if (!trb_addr)
 		return 0;
@@ -699,7 +702,7 @@ u32 xhci_ring_get_deq_ptr_for_trb(dma_addr_t trb_addr)
 	return trb_addr | (le32(trb->generic.field[3]) & TRB_CYCLE);
 }
 
-void xhci_ring_patch_trbs_to_noop(dma_addr_t *trb_addrs, u32 trb_count, u32 start_index)
+void xhci_ring_patch_trbs_to_noop(struct ExecBase *SysBase, dma_addr_t *trb_addrs, u32 trb_count, u32 start_index)
 {
 	if (!trb_addrs || start_index >= trb_count)
 		return;
@@ -812,7 +815,7 @@ BOOL xhci_ring_has_room(struct ep_context *ep_ctx, u32 needed_trbs)
 	return ring_has_room(ring, ep_ctx, needed_trbs);
 }
 
-inline static void prime_first_trb(struct xhci_generic_trb *start_trb)
+inline static void prime_first_trb(struct ExecBase *SysBase, struct xhci_generic_trb *start_trb)
 {
 	start_trb->field[3] ^= le32(TRB_CYCLE);
 	xhci_flush_cache(start_trb, sizeof(struct xhci_generic_trb), 0);
@@ -829,7 +832,7 @@ void xhci_ring_kick_ep(struct usb_device *udev, u8 ep_index)
 inline static void giveback_first_trb(struct usb_device *udev, u8 ep_index,
 									  struct xhci_generic_trb *start_trb)
 {
-	prime_first_trb(start_trb);
+	prime_first_trb(udev->sysBase, start_trb);
 	xhci_ring_kick_ep(udev, ep_index);
 }
 
@@ -846,20 +849,10 @@ void xhci_ring_giveback(struct usb_device *udev, struct ep_context *ep_ctx)
 	}
 }
 
-static inline void xhci_copy_from_bounce_buffer(CONST_APTR src, APTR dst, u32 size)
-{
-	if ((((uintptr_t)src | (uintptr_t)dst | size) & (sizeof(ULONG) - 1)) == 0)
-	{
-		CopyMemQuick((ULONG *)src, (ULONG *)dst, size);
-		return;
-	}
-
-	CopyMem(src, dst, size);
-}
-
 static dma_addr_t xhci_dma_span_map(struct xhci_ctrl *ctrl, struct xhci_dma_span *span,
 									APTR buffer, u32 length, BOOL to_device)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	span->cpu = buffer;
 	span->length = length;
 	span->bounce = NULL;
@@ -916,7 +909,7 @@ static dma_addr_t xhci_dma_span_map(struct xhci_ctrl *ctrl, struct xhci_dma_span
 	}
 
 	if (to_device)
-		xhci_copy_to_bounce_buffer(buffer, aligned, length);
+		memcpy(aligned, buffer, length);
 	xhci_flush_cache(aligned, length, to_device ? DMA_ReadFromRAM : 0);
 
 	span->bounce = aligned;
@@ -928,6 +921,7 @@ void xhci_dma_span_unmap(struct xhci_ctrl *ctrl, struct xhci_dma_span *span, BOO
 {
 	if (!ctrl || !span->cpu || span->length == 0)
 		return;
+	struct ExecBase *SysBase = ctrl->sysBase;
 
 	if (!span->bounce)
 	{
@@ -939,7 +933,7 @@ void xhci_dma_span_unmap(struct xhci_ctrl *ctrl, struct xhci_dma_span *span, BOO
 	if (copy_back)
 	{
 		xhci_inval_cache(span->bounce, span->length);
-		xhci_copy_from_bounce_buffer(span->bounce, span->cpu, span->length);
+		memcpy(span->cpu, span->bounce, span->length);
 	}
 
 	switch (span->bounce_class)
@@ -1176,7 +1170,7 @@ inline static void xhci_ring_finalize_first_trb(struct usb_device *udev, u8 ep_i
 			ep_ring->deferred_giveback = start_trb;
 		else
 			/* Additional TDs: make TRBs visible now but do not ring the doorbell*/
-			prime_first_trb(start_trb);
+			prime_first_trb(udev->sysBase, start_trb);
 	}
 	else
 		giveback_first_trb(udev, ep_index, start_trb);
@@ -1279,6 +1273,7 @@ static inline u32 iso_burst_bits(struct usb_device *udev,
 
 inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms, BOOL defer_doorbell, u32 iso_extra_bits)
 {
+	struct ExecBase *SysBase = udev->sysBase;
 	// #ifdef TRACE
 	// 	xhci_dump_request("[xhci-ring] xhci_ring_enqueue_td: ", io);
 	// #endif
@@ -1288,7 +1283,7 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 	struct ep_context *udev_ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
 	if (!udev_ep_ctx)
 	{
-		Kprintf("No ep context for ep %d\n", ep_index);
+		Kprintf("No ep context for ep %ld\n", ep_index);
 		return ERR_BAD_PARAMETERS;
 	}
 
@@ -1307,7 +1302,7 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 		cur_state == USB_DEV_EP_STATE_RESETTING ||
 		cur_state == USB_DEV_EP_STATE_SUSPENDED)
 	{
-		KprintfT("Cannot submit transfer, ep in state %d\n", cur_state);
+		KprintfT("Cannot submit transfer, ep in state %ld\n", cur_state);
 		xhci_ep_enqueue(udev_ep_ctx, io);
 		return ERR_NO_ERROR;
 	}
@@ -1325,7 +1320,7 @@ inline static s8 enqueue_td_internal(struct usb_device *udev, struct USBIOReques
 	struct xhci_ring *ep_ring = xhci_ep_get_ring(udev_ep_ctx);
 	if (!ep_ring)
 	{
-		Kprintf("No ring for ep %d\n", ep_index);
+		Kprintf("No ring for ep %ld\n", ep_index);
 		return ERR_HCI_ERROR;
 	}
 
@@ -1397,6 +1392,7 @@ s8 xhci_ring_enqueue_td(struct usb_device *udev, struct USBIORequest *io, u32 ti
 s8 xhci_ring_enqueue_rt_td(struct usb_device *udev, u8 ep_index, APTR buffer, u32 length,
 						   u16 frame, u16 dir, BOOL staging_in, BOOL defer_doorbell)
 {
+	struct ExecBase *SysBase = udev->sysBase;
 	struct xhci_ctrl *ctrl = udev->controller;
 	struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
 	if (!ep_ctx)

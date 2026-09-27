@@ -4,7 +4,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -66,6 +66,7 @@ struct TransferDescriptorList
 {
     struct MinList list;
     struct xhci_ctrl *ctrl;
+    struct ExecBase *sysBase; /* ctrl->sysBase, copied at create */
     u32 queued_trbs;
     u32 queued_tds;
     struct ep_context *ep_ctx; /* back-reference for per-endpoint resource cleanup */
@@ -73,7 +74,8 @@ struct TransferDescriptorList
 
 void xhci_td_slab_init(struct xhci_ctrl *ctrl)
 {
-    slab_cache_init(&ctrl->td_slab, ctrl->metaPool, NULL, sizeof(struct xhci_td), DMA_ALIGN_MIN, 2048);
+    struct ExecBase *SysBase = ctrl->sysBase;
+    slab_cache_init(&ctrl->td_slab, SysBase, ctrl->metaPool, NULL, sizeof(struct xhci_td), DMA_ALIGN_MIN, 2048);
 }
 
 void xhci_td_slab_destroy(struct xhci_ctrl *ctrl)
@@ -83,6 +85,7 @@ void xhci_td_slab_destroy(struct xhci_ctrl *ctrl)
 
 TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_context *ep_ctx)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     TransferDescriptorList *td_list = pool_zalloc(ctrl->metaPool, sizeof(TransferDescriptorList));
     if (!td_list)
     {
@@ -92,6 +95,7 @@ TransferDescriptorList *xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_co
 
     _NewMinList(&td_list->list);
     td_list->ctrl = ctrl;
+    td_list->sysBase = ctrl->sysBase;
     td_list->queued_trbs = 0;
     td_list->queued_tds = 0;
     td_list->ep_ctx = ep_ctx;
@@ -103,6 +107,7 @@ void xhci_td_destroy_list(TransferDescriptorList *td_list, s8 error_code)
 {
     if (!td_list)
         return;
+    struct ExecBase *SysBase = td_list->sysBase;
 
     xhci_td_fail_all(td_list, error_code);
 
@@ -175,6 +180,7 @@ static struct xhci_td *td_alloc_common(TransferDescriptorList *td_list,
 
 static void td_append(TransferDescriptorList *td_list, struct xhci_td *td)
 {
+    struct ExecBase *SysBase = td_list->sysBase;
     td_list->queued_trbs += td->trb_count;
     td_list->queued_tds++;
     AddTailMinList(&td_list->list, (struct MinNode *)td);
@@ -289,6 +295,7 @@ static void xhci_td_decrease_queued(TransferDescriptorList *td_list, struct xhci
 
 static void xhci_td_free(TransferDescriptorList *td_list, struct xhci_td *td)
 {
+    struct ExecBase *SysBase = td_list->sysBase;
     if (td->trb_addrs)
     {
         if (td->trb_count <= XHCI_TD_SMALL_TRBS)
@@ -436,7 +443,7 @@ static void td_resolve_recovery_deq_ptr(TransferDescriptorList *td_list,
         dma_addr_t entry_trb = (td_find_trb_index(td, stopped_trb_addr) >= 0)
                                    ? stopped_trb_addr
                                    : td->trb_addrs[0];
-        *resolved_deq_ptr = xhci_ring_get_deq_ptr_for_trb(entry_trb);
+        *resolved_deq_ptr = xhci_ring_get_deq_ptr_for_trb(td_list->sysBase, entry_trb);
         return;
     }
 
@@ -449,6 +456,7 @@ static void td_abort_recovery_requests(TransferDescriptorList *td_list,
                                        u32 now_us,
                                        dma_addr_t stopped_trb_addr)
 {
+    struct ExecBase *SysBase = td_list->sysBase;
     struct MinNode *node = td_list->list.mlh_Head;
 
     while (node && node->mln_Succ)
@@ -469,7 +477,7 @@ static void td_abort_recovery_requests(TransferDescriptorList *td_list,
             if (stopped_idx > 0)
                 actual = td_sum_trb_lengths(td, (u32)stopped_idx);
 
-            xhci_ring_patch_trbs_to_noop(td->trb_addrs, td->trb_count, 0);
+            xhci_ring_patch_trbs_to_noop(td_list->sysBase, td->trb_addrs, td->trb_count, 0);
 
             RemoveMinNode((struct MinNode *)td);
             xhci_td_decrease_queued(td_list, td);
@@ -519,6 +527,7 @@ BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_add
                              u32 residue, BOOL short_packet,
                              struct xhci_td_completion *out, BOOL *deferred)
 {
+    struct ExecBase *SysBase = td_list->sysBase;
     *deferred = FALSE;
 
     if (!td_list)
@@ -594,6 +603,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
 {
     if (!td_list)
         return;
+    struct ExecBase *SysBase = td_list->sysBase;
 
     struct MinNode *n;
     while ((n = RemHeadMinList(&td_list->list)) != NULL)
@@ -615,6 +625,7 @@ void xhci_td_abort_req(struct USBIORequest *io)
 {
     if (!io || !io->req.io_Unit || io->virtual_address > USB_MAX_ADDRESS)
         return;
+    struct ExecBase *SysBase = ((struct XHCIUnit *)io->req.io_Unit)->sysBase;
 
     if (io->req.io_Flags & IOF_QUICK || io->req.io_Message.mn_Node.ln_Type != NT_MESSAGE)
         return;

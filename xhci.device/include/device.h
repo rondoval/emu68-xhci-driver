@@ -34,6 +34,7 @@ struct XHCIDevice;
 struct XHCIUnit
 {
 	struct Unit unit;
+	struct ExecBase *sysBase; /* the device's, copied at unit creation */
 	APTR memoryPool;
 	struct XHCIDevice *device;
 
@@ -57,6 +58,7 @@ struct XHCIDevice
 {
 	struct Device device;
 	ULONG segList;
+	struct ExecBase *sysBase; /* from initFunction's a6; every other struct copies it */
 	struct Library *utilityBase;
 	struct Library *gic400Base;
 	struct Library *pcieBase;    /* NULL until first PCIe unit opens */
