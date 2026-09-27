@@ -52,6 +52,7 @@ struct XHCIUnit
 	struct Interrupt irq_isr;
 	u32 irq_line;
 	BYTE irq_signal;
+	BOOL msi_enabled; /* MSI or MSI-X: the runtime gate is the vector mask, not IMAN.IE */
 	char vendor_str[5];
 	char device_str[5];
 };

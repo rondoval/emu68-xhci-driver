@@ -23,6 +23,17 @@ Changes since v6.2.
 
 ---
 
+## Improvements
+
+- **Cheaper interrupts with MSI and MSI-X.** On every interrupt the driver
+  used to switch the controller's interrupter off, and on again once it had
+  caught up with the events: two register writes over the PCIe link. It now
+  masks its interrupt vector inside the Pi's PCIe controller instead. INTx is
+  handled as before. The gain needs `bcmpcie.library` 2.5; the driver still
+  works with an older one.
+
+---
+
 ## Bug fixes
 
 - **A root-hub request for a port that does not exist no longer crashes.**
