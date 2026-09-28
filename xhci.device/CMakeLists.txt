@@ -6,7 +6,6 @@ add_link_options(
     -nostdlib
     -nostartfiles
     -s
-    -Wl,-e,_doNotExecute
 )
 
 # CPU/FPU/frame-pointer flags come from the stack toolchain (cmake/toolchain.cmake,
@@ -60,7 +59,6 @@ add_executable(xhci.device
     src/xhci/xhci-ep-rtiso.c
     src/xhci/xhci-ctx-ops.c
     src/xhci/xhci-direct.c
-    src/device_end.c
 )
 
 target_include_directories(xhci.device
@@ -76,10 +74,15 @@ target_link_libraries(xhci.device
 
 # ROM-able: no writable .data/.bss may sneak in (see driver-stack TODO.md). For the
 # serial backend this instead links debug.lib (+ __divsi3 glue) and skips the check.
-emu68_debug_backend_finalize(xhci.device ROMABLE)
+# Layout contract (entry at offset 0, RT_ENDSKIP, no writable sections) belongs to the
+# linker, not to source order -- see Emu68CommonModuleLayout.cmake.
+emu68_module_layout(xhci.device)
 
 # Exec interrupt servers answer with the Z flag, not D0 (exec.library/AddIntServer);
 # a compiler epilogue that ends in MOVE rather than MOVEM silently overwrites it.
+# emu68_isr_z_check() slices each server out of the LINKED module (by the section
+# EMU68_INTSERVER() puts it in), so the servers are ordinary LTO'd TUs.
+emu68_enable_lto(xhci.device)
 emu68_isr_z_check(xhci.device SERVERS xhci_int_isr)
 
 install(
