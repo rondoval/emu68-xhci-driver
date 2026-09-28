@@ -57,7 +57,8 @@ This driver and the `poseidon-backport` stack evolve together. That repo's
   commands travel as messages.
 - Value-level contracts: `ERR_*` values and their dead-device weighting
   (TIMEOUT +3 / NAK_TIMEOUT +2 / CRC +1), `CMD_FLUSH` reply-everything,
-  endpoint-layer clear-halt dedup.
+  device-side CLEAR_FEATURE(ENDPOINT_HALT) is poseidon.library's alone - the
+  driver neither issues nor dedups one (host-side recovery only).
 
 ## Code handling
 

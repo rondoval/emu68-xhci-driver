@@ -231,9 +231,14 @@ inline static s8 translate_status(xhci_comp_code comp)
         status = UHIOERR_CRCERROR;
         break;
     case COMP_DB_ERR:
+        /* the xHC could not keep the data buffer fed/drained - host side */
+        Kprintf("Data Buffer Error (host DMA/buffer underrun)\n");
+        status = UHIOERR_HOSTERROR;
+        break;
     case COMP_TRB_ERR:
-        // Data Buffer Error or TRB Error
-        Kprintf("TRB error\n");
+        /* an illegal TRB parameter for this ring or endpoint: a driver bug,
+         * never something the device did */
+        Kprintf("TRB Error (illegal TRB for this ring/endpoint)\n");
         status = UHIOERR_HOSTERROR;
         break;
     case COMP_BABBLE:

@@ -312,18 +312,13 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
     {
         KprintfT("EP %lu was resetting, completing reset\n", (ULONG)ep_index);
         /*
-         * If this is due to e.g. STALL recovery, we need to sort out the device itself...:
-         * issue ClearFeature(CLEAR_TT_BUFFER) to the hub if its control or bulk ep and dev is behind a TT
-         * if not control ep,  issue ClearFeature(ENDPOINT_HALT) to the device.
-         * We'll do that by pushing these to fron of the pending queue.
+         * Host-side recovery is done.  The device side of a STALL episode -
+         * CLEAR_FEATURE(ENDPOINT_HALT) - is poseidon.library's job (class API
+         * or async recovery sweep), never the driver's.  The one hub-directed
+         * epilogue stays ours: control/bulk endpoints behind a TT need the
+         * hub's TT buffer cleared after a failed split.
          */
         s32 ep_type = xhci_ep_type_for_index(cmd->udev, ep_index);
-
-        if (ep_index != 0 && ep_type != USB_ENDPOINT_XFER_CONTROL)
-        {
-            /* Dispatch deferred device-side CLEAR_FEATURE after host recovery. */
-            xhci_udev_clear_feature_halt(cmd->udev, ep_index);
-        }
 
         /* For control/bulk endpoints behind a TT, clear the TT buffer on the hub. */
         if (cmd->udev->speed == USB_SPEED_FULL || cmd->udev->speed == USB_SPEED_LOW)
@@ -382,12 +377,23 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     /* abort/timeout recovery: process_stop issues its per-ring Set TR Deq
      * commands itself */
-    if (xhci_ep_process_stop(ep_ctx))
+    switch (xhci_ep_process_stop(ep_ctx))
+    {
+    case EP_STOP_HANDLED:
         return;
 
-    /* ordinary stop command (or an anomalous stopped dequeue degraded here) */
-    xhci_ep_set_failed(ep_ctx);
-    xhci_flush_ep_rings(cmd->udev, ep_ctx);
+    case EP_STOP_ANOMALY:
+        /* the driver's model of the ring is wrong, but the endpoint need not die
+         * with it: retire in place and re-arm */
+        xhci_ep_degrade_coarse(ep_ctx);
+        return;
+
+    default:
+        /* ordinary stop command: retire everything and re-arm */
+        xhci_ep_set_failed(ep_ctx);
+        xhci_flush_ep_rings(cmd->udev, ep_ctx);
+        return;
+    }
 }
 
 /*
@@ -786,6 +792,10 @@ void xhci_reset_ep(struct usb_device *udev, u8 ep_index)
         Kprintf("No ep context for slot %lu ep %lu\n", (ULONG)udev->slot_id, (ULONG)ep_index);
         return;
     }
+
+    Kprintf("recovering slot %lu ep %lu (hw ep state %lu)\n",
+            (ULONG)udev->slot_id, (ULONG)ep_index,
+            (ULONG)xhci_read_hw_ep_state(udev, ep_index));
 
     xhci_ep_set_resetting(ep_ctx);
 

@@ -34,6 +34,21 @@ Changes since v6.2.
 
 ---
 
+## Behavioural changes
+
+- **Device-side STALL recovery now belongs to the USB stack (matched pair).**
+  On a bulk/interrupt STALL the driver still performs the host-side recovery
+  (Reset Endpoint + Set TR Deq, plus CLEAR_TT_BUFFER behind a TT), but no
+  longer sends the device-side CLEAR_FEATURE(ENDPOINT_HALT) itself — the
+  Poseidon for AmigaOS library owns that, clearing halts even for classes
+  that never did.  Use this driver together with the Poseidon release that
+  carries library-owned stall recovery (6.2); with an older 6.x library,
+  a class that relies on someone else clearing a halted endpoint would hang
+  on it.  The 5.x driver line is untouched and keeps its internal clear-halt
+  for classic Poseidon 4.x.
+
+---
+
 ## Bug fixes
 
 - **A root-hub request for a port that does not exist no longer crashes.**

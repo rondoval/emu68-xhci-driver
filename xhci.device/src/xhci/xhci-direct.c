@@ -292,37 +292,6 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
         return UHIOERR_BADPARAMS;
     }
 
-    /* The driver's STALL recovery already sent CLEAR_FEATURE(ENDPOINT_HALT)
-     * to the device (xhci_udev_clear_feature_halt); the stack's follow-up
-     * clear-halt is a duplicate — answer it without wire traffic, since a
-     * second clear would reset the device's data toggle under traffic that
-     * already resumed. */
-    if (setup &&
-        setup->usd_RequestType == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
-        setup->usd_Request == USB_REQ_CLEAR_FEATURE &&
-        le16(setup->usd_Value) == USB_ENDPOINT_HALT)
-    {
-        const u8 target = xhci_ep_index_from_address((u8)(le16(setup->usd_Index) & 0xffU));
-        if (xhci_ep_consume_halt_synced(xhci_ep_get_context_for_index(udev, target)))
-        {
-            struct Hook *hook = ctrl->stack_done_hook;
-            KprintfT("slot %lu ep %lu: clear-halt already synced, completing locally\n",
-                     (ULONG)udev->slot_id, (ULONG)target);
-            if (hook)
-            {
-                struct UhcdXferDone done;
-                done.uxd_Cookie = cookie;
-                done.uxd_Actual = 0;
-                done.uxd_ExtError = 0;
-                done.uxd_Error = UHIOERR_NO_ERROR;
-                done.uxd_Pad = 0;
-                CallHookPkt(hook, ctrl->stack_done_obj, &done);
-            }
-            lock_prof_release(&ctrl->lockProf, &ctrl->xfer_lock);
-            return UHIOERR_NO_ERROR;
-        }
-    }
-
     struct xhci_xfer *io = slab_zalloc(&ctrl->xfer_slab);
     if (!io)
     {

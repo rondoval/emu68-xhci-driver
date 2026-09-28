@@ -47,11 +47,6 @@ struct ep_context
      * recovery runs synchronously against the output-context dequeue. */
     BOOL suspend_stop_pending;
 
-    /* Driver-initiated STALL recovery already sent CLEAR_FEATURE(HALT) to the
-     * device; the next stack-issued clear-halt is a duplicate and is answered
-     * without a wire request (consumed by xhci_ep_consume_halt_synced). */
-    BOOL halt_cleared_internally;
-
     /* xHCI EP Context Interval decoded to microframes-per-ESIT; set for every
      * endpoint at context creation (needed before RT hooks register). */
     u16 rt_uframes_per_esit;

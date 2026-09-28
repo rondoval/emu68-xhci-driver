@@ -92,24 +92,34 @@ void xhci_ep_set_aborting(struct ep_context *ep_ctx);
 
 void xhci_ep_request_timeout_recovery(struct ep_context *ep_ctx);
 void xhci_ep_request_stop(struct ep_context *ep_ctx);
+/* xhci_ep_process_stop() outcome.  The old BOOL collapsed two genuinely
+ * different FALSE dispositions. */
+enum ep_stop_outcome
+{
+    EP_STOP_PLAIN = 0, /* not a surgical recovery - an ordinary Stop Endpoint
+                        * (CMD_FLUSH, request_stop): retire everything */
+    EP_STOP_HANDLED,   /* surgical recovery done, its Set TR Deq already issued */
+    EP_STOP_ANOMALY    /* stopped dequeue inside no tracked TD: the driver's model
+                        * of the ring is wrong - degrade to whole-endpoint recovery */
+};
+
+/* Whole-endpoint recovery for a stopped endpoint (EP_STOP_ANOMALY): retire the
+ * in-flight TDs in place, re-arm the rings, keep the endpoint. */
+void xhci_ep_degrade_coarse(struct ep_context *ep_ctx);
+
 /* Surgical abort/timeout recovery over the endpoint's rings: rings without a
  * victim are skipped whole; on each victim ring the victims' TRBs are
  * No-Op'd, their requests replied, and one Set TR Deq re-arms the ring —
- * survivors on the same ring keep running.  Returns TRUE when the stop was
+ * survivors on the same ring keep running.  EP_STOP_HANDLED = the stop was
  * consumed (commands queued, or a raced-out abort restarted the endpoint
- * synchronously); FALSE = nothing to recover OR an anomalous stopped
- * dequeue — the caller runs the coarse ordinary-stop recovery. */
-BOOL xhci_ep_process_stop(struct ep_context *ep_ctx);
+ * synchronously); the other outcomes hand the endpoint back to the caller,
+ * PLAIN for the ordinary-stop retire and ANOMALY for the coarse degrade — the caller runs the coarse ordinary-stop recovery. */
+enum ep_stop_outcome xhci_ep_process_stop(struct ep_context *ep_ctx);
 BOOL xhci_ep_request_suspend(struct ep_context *ep_ctx);
 /* The suspend path's Stop Endpoint completed (handle_stop_ring, SUSPENDED
  * branch): run any abort/timeout recovery queued while the stop sequenced. */
 void xhci_ep_suspend_stop_complete(struct ep_context *ep_ctx);
 void xhci_ep_resume(struct ep_context *ep_ctx);
-
-/* Clear-halt deduplication for the driver's own STALL recovery (see
- * xhci_udev_clear_feature_halt) */
-void xhci_ep_mark_halt_synced(struct ep_context *ep_ctx);
-BOOL xhci_ep_consume_halt_synced(struct ep_context *ep_ctx);
 
 BOOL xhci_ep_is_expired(struct ep_context *ep_ctx);
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx);
@@ -138,7 +148,6 @@ BOOL xhci_ep_complete_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr,
  * (XHCI_XF_TIMEOUT + timeout_ms). */
 s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io);
 
-void xhci_ep_enqueue(struct ep_context *ep_ctx, struct xhci_xfer *io);
 void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code);
 
 /* RT ISO functions.  The iso hooks are passed by typed parameter (not packed

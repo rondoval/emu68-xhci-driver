@@ -250,7 +250,7 @@ void xhci_ep_set_failed(struct ep_context *ep_ctx)
     xhci_ep_rt_iso_fire_release(ep_ctx); /* a registered iso stream is dead with the endpoint */
 }
 
-void xhci_ep_enqueue(struct ep_context *ep_ctx, struct xhci_xfer *io)
+static void xhci_ep_enqueue(struct ep_context *ep_ctx, struct xhci_xfer *io)
 {
     struct ExecBase *SysBase = ep_ctx->sysBase;
     if (io->priv_flags & REQ_ENQUEUED)
@@ -277,6 +277,16 @@ s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io)
     struct ExecBase *SysBase = ep_ctx->sysBase;
     if (ep_ctx->udev->controller->xfer_lock.ss_Owner != FindTask(NULL))
         Kprintf("xfer_lock NOT HELD on submit path!\n");
+
+    /* The transfer and the endpoint must agree on type: the ring decides how
+     * the TRBs are read, so a control TD on a bulk ring is rejected by the xHC
+     * with TRB Error.  Type, not index - a device may expose a control
+     * endpoint at a non-zero DCI. */
+    const s32 dbg_ep_type = xhci_ep_type_for_index(ep_ctx->udev, ep_ctx->ep_index);
+    if (dbg_ep_type >= 0 &&
+        (io->type == UHCD_EPTYPE_CONTROL) != (dbg_ep_type == USB_ENDPOINT_XFER_CONTROL))
+        Kprintf("type mismatch: xfer type %lu submitted on ep %lu (type %ld)\n",
+                (ULONG)io->type, (ULONG)ep_ctx->ep_index, (LONG)dbg_ep_type);
 #endif
     const enum ep_state state = ep_ctx->state;
 
@@ -335,8 +345,8 @@ void xhci_ep_schedule_next(struct ep_context *ep_ctx)
                  (ULONG)req->type,
                  (ULONG)(req->endpoint & 0x0F));
 
-        /* internal EP0 requests and deferred ctx shadows alike: straight
-         * back through the submit entry */
+        /* Straight back through the submit entry, on this endpoint: a pending
+         * queue never holds another endpoint's transfer. */
         s8 err = xhci_ep_submit(ep_ctx, req);
         if (err != UHIOERR_NO_ERROR)
         {
@@ -486,6 +496,37 @@ static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx)
     ep_ctx->stop_process_timeouts = FALSE;
 }
 
+/* Whole-endpoint recovery for a stopped endpoint whose ring bookkeeping no
+ * longer matches the hardware (EP_STOP_ANOMALY): the surgical machinery needs
+ * the stopped dequeue to land inside a tracked TD, and here it does not.
+ *
+ * Retire every in-flight TD in place - recovery collateral, so IOERR_ABORTED,
+ * not a host error - and re-arm each ring at the software enqueue.  The queued
+ * requests never reached hardware, so they stay put and go out when the last Set
+ * TR Deq completes (handle_set_deq -> flush_complete -> set_idle).  ABORTING
+ * holds new submissions in the queue meanwhile, and is deliberately not
+ * RESETTING: that would make the epilogue fire a CLEAR_FEATURE(HALT) at an
+ * endpoint which was never halted and reset its data toggle.
+ *
+ * The endpoint survives, which is the point: xhci_ep_set_failed() also reports
+ * every innocent queued transfer as UHIOERR_HOSTERROR, and the mass-storage
+ * class treats that as fatal where it would have retried an abort.  A SUSPENDED
+ * endpoint stays parked - xhci_ep_resume() restarts it after U0.  Only reachable
+ * for ordinary endpoints: surgical recovery never targets an iso stream. */
+void xhci_ep_degrade_coarse(struct ep_context *ep_ctx)
+{
+    Kprintf("EP %lu state %lu: coarse recovery, retiring in-flight TDs in place\n",
+            (ULONG)ep_ctx->ep_index, (ULONG)ep_ctx->state);
+
+    xhci_ep_clear_stop_processing(ep_ctx);
+    ep_fail_all_tds(ep_ctx, IOERR_ABORTED);
+
+    if (ep_ctx->state != USB_DEV_EP_STATE_SUSPENDED)
+        xhci_ep_transition(ep_ctx, USB_DEV_EP_STATE_ABORTING);
+
+    xhci_flush_ep_rings(ep_ctx->udev, ep_ctx);
+}
+
 /* Abort/timeout recovery for an endpoint whose ring the suspend path already
  * stopped: identical mechanics to handle_stop_ring's recovery half minus any
  * restart — the endpoint stays SUSPENDED and xhci_ep_resume() restarts the
@@ -493,14 +534,8 @@ static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx)
  * retire-everything-in-place recovery (the rings are already stopped). */
 static void xhci_ep_recover_stopped(struct ep_context *ep_ctx)
 {
-    if (xhci_ep_process_stop(ep_ctx))
-        return;
-
-    if (xhci_ep_has_stop_abort_requests(ep_ctx) || ep_ctx->stop_process_timeouts)
-    {
-        xhci_ep_set_failed(ep_ctx);
-        xhci_flush_ep_rings(ep_ctx->udev, ep_ctx);
-    }
+    if (xhci_ep_process_stop(ep_ctx) == EP_STOP_ANOMALY)
+        xhci_ep_degrade_coarse(ep_ctx);
 }
 
 static void xhci_ep_prepare_stop_processing(struct ep_context *ep_ctx, struct xhci_xfer *abort_req, BOOL process_timeouts)
@@ -670,14 +705,14 @@ static dma_addr_t ep_ring_stopped_deq(struct ep_context *ep_ctx, u16 stream_id)
     return (dma_addr_t)(entry & ~0xFULL);
 }
 
-BOOL xhci_ep_process_stop(struct ep_context *ep_ctx)
+enum ep_stop_outcome xhci_ep_process_stop(struct ep_context *ep_ctx)
 {
     if (!ep_ctx)
-        return FALSE;
+        return EP_STOP_PLAIN;
     struct ExecBase *SysBase = ep_ctx->sysBase;
 
     if (!xhci_ep_has_stop_abort_requests(ep_ctx) && !ep_ctx->stop_process_timeouts)
-        return FALSE;
+        return EP_STOP_PLAIN;
 
     struct ep_streams *st = ep_ctx->streams;
     const u32 now_us = get_time();
@@ -708,7 +743,7 @@ BOOL xhci_ep_process_stop(struct ep_context *ep_ctx)
         {
             Kprintf("EP %lu stream %lu: stopped deq outside every TD, degrading to coarse recovery\n",
                     (ULONG)ep_ctx->ep_index, (ULONG)stream_id);
-            return FALSE;
+            return EP_STOP_ANOMALY;
         }
         ++victims;
     }
@@ -751,7 +786,7 @@ BOOL xhci_ep_process_stop(struct ep_context *ep_ctx)
         xhci_ep_flush_complete(ep_ctx);
     }
 
-    return TRUE;
+    return EP_STOP_HANDLED;
 }
 
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx)
@@ -986,19 +1021,5 @@ void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code)
         struct xhci_xfer *req = (struct xhci_xfer *)node;
         xhci_xfer_complete(ep_ctx->udev, req, reply_code, 0);
     }
-}
-
-void xhci_ep_mark_halt_synced(struct ep_context *ep_ctx)
-{
-    if (ep_ctx)
-        ep_ctx->halt_cleared_internally = TRUE;
-}
-
-BOOL xhci_ep_consume_halt_synced(struct ep_context *ep_ctx)
-{
-    if (!ep_ctx || !ep_ctx->halt_cleared_internally)
-        return FALSE;
-    ep_ctx->halt_cleared_internally = FALSE;
-    return TRUE;
 }
 
