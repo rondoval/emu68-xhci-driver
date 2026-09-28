@@ -32,7 +32,7 @@
     unexpected results when user executes the device by mistake
 */
 int doNotExecute(void);
-int __attribute__((used, no_reorder)) doNotExecute(void)
+int __attribute__((used, section(".text.entry"))) doNotExecute(void)
 {
     return -1;
 }
@@ -58,7 +58,7 @@ static const APTR initTable[4];
     object will be initialized (coldstart means, before dos.library, after scheduler
     is started)
 */
-static struct Resident const xhciDeviceResident __attribute__((used)) = {
+static struct Resident const xhciDeviceResident __attribute__((used, section(".text.modhdr"))) = {
     RTC_MATCHWORD,
     (struct Resident *)&xhciDeviceResident,
     (APTR)&endOfCode,
