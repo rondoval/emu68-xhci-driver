@@ -838,6 +838,11 @@ void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16
         return;
     }
 
+    /* A stream ring's Set TR Dequeue must also carry the Stream Context Type
+     * (xHCI 6.4.3.9: bits 3:1 of the dequeue field) */
+    if (stream_id)
+        deq_ptr |= SCT_FOR_CTX(SCT_PRI_TR);
+
     xhci_queue_command_stream(ctrl, deq_ptr, udev->slot_id, ep_index, stream_id, TRB_SET_DEQ, NULL, udev);
 }
 
