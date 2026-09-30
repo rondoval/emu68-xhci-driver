@@ -76,8 +76,17 @@ static struct usb_device *xhci_udev_alloc_common(struct xhci_ctrl *ctrl)
     KprintfT("in_ctx bytes=%lx size=%lu\n",
              (ULONG)udev->in_ctx->bytes, (ULONG)udev->in_ctx->size);
 
+    udev->toggle_in_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_INPUT);
+    if (!udev->toggle_in_ctx)
+    {
+        Kprintf("Failed to allocate toggle-reset in context\n");
+        goto destroy_in_ctx;
+    }
+
     return udev;
 
+destroy_in_ctx:
+    xhci_free_container_ctx(ctrl, udev->in_ctx);
 destroy_out_ctx:
     xhci_free_container_ctx(ctrl, udev->out_ctx);
 free_udev:
@@ -139,6 +148,8 @@ void xhci_udev_free(struct usb_device *udev)
 
     xhci_udev_flush(udev, UHIOERR_TIMEOUT);
 
+    if (udev->toggle_in_ctx)
+        xhci_free_container_ctx(udev->controller, udev->toggle_in_ctx);
     if (udev->in_ctx)
         xhci_free_container_ctx(udev->controller, udev->in_ctx);
     if (udev->out_ctx)

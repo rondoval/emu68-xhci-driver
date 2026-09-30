@@ -27,6 +27,7 @@
 #include <xhci/xhci-ring.h>
 #include <xhci/xhci-submit.h>
 #include <xhci/xhci-context.h>
+#include <xhci/xhci-descriptors.h>
 
 #ifdef DEBUG
 #undef Kprintf
@@ -666,6 +667,63 @@ void xhci_ep_suspend_stop_complete(struct ep_context *ep_ctx)
 {
     ep_ctx->suspend_stop_pending = FALSE;
     xhci_ep_recover_stopped(ep_ctx);
+}
+
+/* The host data toggle follows a device-side clear-halt.
+ *
+ * CLEAR_FEATURE(ENDPOINT_HALT) zeroes the DEVICE's data toggle / sequence
+ * number; the xHC keeps its own, and a mismatch costs the next transfer a
+ * packet.  (Legacy HCDs honour the same contract by snooping the request.)  A
+ * clear that answers a STALL needs nothing, Reset Endpoint has zeroed the host
+ * side - this is for a clear on a healthy endpoint: Reset Recovery on the pipe
+ * that did not stall, a serial adapter's open sequence.  Reset Endpoint is
+ * Halted-only (xHCI 4.6.8), so the route is a Configure Endpoint that drops and
+ * adds the endpoint, re-initialising its context.
+ *
+ * The clear-halt is not replied until that command has completed: its xfer
+ * rides as the command's request, which handle_config_ep - or the command
+ * watchdog - retires.  The owner is therefore still blocked in its clear, and
+ * that is what keeps the target's ring quiet meanwhile; nothing is parked and
+ * no state is kept.
+ *
+ * TRUE = the request now belongs to the command.  FALSE = nothing was done and
+ * the caller replies as usual: every guard is a reason to leave the endpoint
+ * exactly as it is. */
+BOOL xhci_ep_clear_halt_follow(struct usb_device *udev, struct xhci_xfer *req)
+{
+    if (!xhci_setup_is_clear_halt(&req->setup))
+        return FALSE;
+
+    const u8 addr = (u8)(le16(req->setup.usd_Index) & 0xffU);
+    if ((addr & 0x0fU) == 0)
+        return FALSE;
+
+    const u8 ep_index = xhci_ep_index_from_address(addr);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    if (!ep_ctx)
+        return FALSE;
+
+    /* control and iso carry no data toggle; a stream endpoint is never cleared
+     * blind (UAS recovers through task management) */
+    const s32 ep_type = xhci_ep_type_for_index(udev, ep_index);
+    if ((ep_type != USB_ENDPOINT_XFER_BULK && ep_type != USB_ENDPOINT_XFER_INT) ||
+        xhci_ep_streams_count(ep_ctx))
+        return FALSE;
+
+    /* a quiet endpoint only: re-arming at the software enqueue strands nothing */
+    if (ep_ctx->state != USB_DEV_EP_STATE_IDLE || !ep_tds_empty(ep_ctx) ||
+        ep_ctx->pending_reqs.mlh_Head != (struct MinNode *)&ep_ctx->pending_reqs.mlh_Tail)
+        return FALSE;
+
+    /* a command still on the ring may change the slot context ours is a copy of */
+    if (xhci_device_command_pending(udev))
+        return FALSE;
+
+    Kprintf("clear-halt on slot %lu ep %lu: resetting the host data toggle\n",
+            (ULONG)udev->slot_id, (ULONG)ep_index);
+
+    xhci_build_ep_toggle_reset_ctx(udev, ep_index);
+    return xhci_configure_endpoints(udev, udev->toggle_in_ctx, FALSE, req);
 }
 
 /* Restart an endpoint after port resume: restore the pre-suspend state, kick

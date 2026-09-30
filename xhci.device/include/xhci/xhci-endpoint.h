@@ -119,6 +119,12 @@ BOOL xhci_ep_request_suspend(struct ep_context *ep_ctx);
 /* The suspend path's Stop Endpoint completed (handle_stop_ring, SUSPENDED
  * branch): run any abort/timeout recovery queued while the stop sequenced. */
 void xhci_ep_suspend_stop_complete(struct ep_context *ep_ctx);
+
+/* A successful EP0 transfer: if it was a CLEAR_FEATURE(ENDPOINT_HALT), make the
+ * xHC's data toggle for the target endpoint follow the device's.  TRUE = req
+ * was handed to a Configure Endpoint command that will retire it; FALSE = reply
+ * it as usual. */
+BOOL xhci_ep_clear_halt_follow(struct usb_device *udev, struct xhci_xfer *req);
 void xhci_ep_resume(struct ep_context *ep_ctx);
 
 BOOL xhci_ep_is_expired(struct ep_context *ep_ctx);

@@ -58,7 +58,10 @@ This driver and the `poseidon-backport` stack evolve together. That repo's
 - Value-level contracts: `ERR_*` values and their dead-device weighting
   (TIMEOUT +3 / NAK_TIMEOUT +2 / CRC +1), `CMD_FLUSH` reply-everything,
   device-side CLEAR_FEATURE(ENDPOINT_HALT) is poseidon.library's alone - the
-  driver neither issues nor dedups one (host-side recovery only).
+  driver neither issues nor dedups one (host-side recovery only). Error codes
+  report what happened, independent of endpoint type (UHIOERR_STALL,
+  UHIOERR_BABBLE, XACTERROR, SPLITERROR); the stack decides what each means
+  for that endpoint.
 
 ## Code handling
 

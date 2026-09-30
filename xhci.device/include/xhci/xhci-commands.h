@@ -14,6 +14,7 @@
 struct xhci_ctrl;
 struct usb_device;
 struct ep_context;
+struct xhci_container_ctx;
 union xhci_trb;
 
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event);
@@ -27,7 +28,12 @@ void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16
 /* Reset every transfer ring of the endpoint to its software enqueue position
  * — the ring-flush half of every recovery path. */
 void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx);
-void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct xhci_xfer *req);
+/* Configure Endpoint / Evaluate Context carrying in_ctx.  TRUE = queued (req,
+ * if any, is retired by the command); FALSE = nothing went out and req is
+ * still the caller's. */
+BOOL xhci_configure_endpoints(struct usb_device *udev, struct xhci_container_ctx *in_ctx, BOOL ctx_change, struct xhci_xfer *req);
+/* TRUE while any command of this device is still on the command ring. */
+BOOL xhci_device_command_pending(struct usb_device *udev);
 void xhci_address_device(struct usb_device *udev, struct xhci_xfer *req);
 /* xHCI 4.6.11 Reset Device chained into a BSR=0 re-address; req is the
  * NSCMD_USB_RESET_DEVICE op being served (replied from the chain). */

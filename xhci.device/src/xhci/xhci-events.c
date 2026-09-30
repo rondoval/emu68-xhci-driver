@@ -206,6 +206,8 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
     }
 }
 
+/* What happened on the wire, whatever the endpoint type: what a code means
+ * for a control, bulk/interrupt or iso endpoint is the stack's to decide. */
 inline static s8 translate_status(xhci_comp_code comp)
 {
     s8 status;
@@ -224,11 +226,10 @@ inline static s8 translate_status(xhci_comp_code comp)
         status = UHIOERR_STALL;
         break;
     case COMP_TX_ERR:
-        /* CRC/bit-stuffing/no-response per xHCI: report as a transaction
-         * error, not TIMEOUT - Poseidon's dead-count treats TIMEOUT three
-         * times worse than a CRC error. */
+        /* CRC/bit-stuffing/no-response per xHCI - not TIMEOUT, which the
+         * stack reads as "device gone" */
         Kprintf("USB transaction error\n");
-        status = UHIOERR_CRCERROR;
+        status = UHIOERR_XACTERROR;
         break;
     case COMP_DB_ERR:
         /* the xHC could not keep the data buffer fed/drained - host side */
@@ -254,8 +255,9 @@ inline static s8 translate_status(xhci_comp_code comp)
         status = UHIOERR_HOSTERROR;
         break;
     case COMP_SPLIT_ERR:
+        /* COMP_TX_ERR-like failure one hop away, behind a hub's TT */
         KprintfT("Split transaction error\n");
-        status = UHIOERR_TIMEOUT;
+        status = UHIOERR_SPLITERROR;
         break;
     default:
         Kprintf("Unhandled completion code %lu\n", (ULONG)comp);
@@ -369,7 +371,11 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         status = UHIOERR_RUNTPACKET;
     }
 
-    BOOL halted = (comp == COMP_STALL || comp == COMP_BABBLE || comp == COMP_SPLIT_ERR || comp == COMP_TX_ERR);
+    /* Isoch endpoints never halt: an error there fails that one TD and the
+     * ring runs on - a reset would flush every queued TD with it. */
+    BOOL halted = (comp == COMP_STALL) ||
+                  ((comp == COMP_BABBLE || comp == COMP_SPLIT_ERR || comp == COMP_TX_ERR) &&
+                   req->type != UHCD_EPTYPE_ISO);
     if (halted)
     {
         xhci_xfer_complete(udev, req, status, act_len);
@@ -377,7 +383,13 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         return;
     }
 
-    xhci_xfer_complete(udev, req, status, act_len);
+    /* A successful clear-halt may hand its reply to the toggle follow-up, which
+     * retires it once the xHC's data toggle matches the device's again.  EP0
+     * itself moves on either way. */
+    BOOL handed_off = status == UHIOERR_NO_ERROR && req->type == UHCD_EPTYPE_CONTROL &&
+                      xhci_ep_clear_halt_follow(udev, req);
+    if (!handed_off)
+        xhci_xfer_complete(udev, req, status, act_len);
     xhci_ep_set_idle(ep_ctx);
 }
 

@@ -41,16 +41,33 @@ Changes since v6.2.
   (Reset Endpoint + Set TR Deq, plus CLEAR_TT_BUFFER behind a TT), but no
   longer sends the device-side CLEAR_FEATURE(ENDPOINT_HALT) itself — the
   Poseidon for AmigaOS library owns that, clearing halts even for classes
-  that never did.  Use this driver together with the Poseidon release that
-  carries library-owned stall recovery (6.2); with an older 6.x library,
-  a class that relies on someone else clearing a halted endpoint would hang
-  on it.  The 5.x driver line is untouched and keeps its internal clear-halt
+  that never did. A halt the *controller* raises on a bulk or interrupt
+  endpoint leaves the device's data toggle out of step; the driver now reports
+  transaction and split-transaction errors with two new error codes (babble
+  keeps its code) instead of passing them off as CRC errors and timeouts, and
+  the library resyncs the device.  Use this driver together with the Poseidon
+  release that carries library-owned stall recovery (6.2); with an older 6.x
+  library, a class that relies on someone else clearing a halted endpoint would
+  hang on it, and the new error codes show up as unknown errors.  The 5.x driver line is untouched and keeps its internal clear-halt
   for classic Poseidon 4.x.
 
 ---
 
 ## Bug fixes
 
+- **One bad isochronous packet no longer throws away the whole queue.** A
+  transmission error or babble on an isochronous transfer was handled like a
+  halted endpoint: the driver reset it and discarded every transfer queued
+  behind it. Isochronous endpoints never halt, so now only the affected
+  transfer reports the error and the stream carries on.
+- **The data toggle now follows a clear-halt.** Clearing an endpoint halt
+  resets the device's data toggle, but the controller kept its own — after a
+  clear on an endpoint that had transferred an odd number of packets, the two
+  disagreed and the next transfer could be silently dropped or time out. This
+  hit blind clears in particular, where a class clears an endpoint that never
+  halted: mass storage's Bulk-Only Reset, printer soft reset, some serial
+  adapters' open sequence. The controller's toggle is now reset to match, and a
+  STALL recovery (which already reset it) costs nothing extra.
 - **A root-hub request for a port that does not exist no longer crashes.**
   A port-status, port-feature or error-count request naming port 0 or a port
   beyond the root hub's count dereferenced a NULL pointer. It now fails with a

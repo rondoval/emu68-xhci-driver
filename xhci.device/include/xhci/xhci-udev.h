@@ -155,6 +155,12 @@ struct usb_device {
 	struct xhci_container_ctx *out_ctx;
 	/* Used for addressing devices and configuration changes */
 	struct xhci_container_ctx *in_ctx;
+	/* Input context of the one driver-originated context command, the
+	 * clear-halt toggle follow-up.  The xHC reads an input context when the
+	 * command executes, not when it is queued, and the stack's context ops -
+	 * which never overlap each other - may overlap that one: it cannot share
+	 * in_ctx. */
+	struct xhci_container_ctx *toggle_in_ctx;
 	
 	struct xhci_ctrl *controller; /* xHCI controller */
 };

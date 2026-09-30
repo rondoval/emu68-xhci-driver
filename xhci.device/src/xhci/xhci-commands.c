@@ -179,9 +179,10 @@ static void xhci_fail_timed_out_command(struct pending_command *cmd)
  * @param cmd		Command type to enqueue
  * @param req       Optional xfer to reply when the command completes
  * @param udev      Optional usb_device for slot/endpoint checks
- * Return: none
+ * Return: TRUE = on the ring with a handler waiting for its completion;
+ *         FALSE = no completion will be delivered for it
  */
-static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, u16 stream_id, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
+static BOOL xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, u16 stream_id, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
 {
     struct ExecBase *SysBase = ctrl->sysBase;
 
@@ -189,7 +190,7 @@ static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u
     if (trb_dma == 0)
     {
         Kprintf("Failed to queue command TRB for cmd %s\n", xhci_command_type_name(cmd));
-        return;
+        return FALSE;
     }
 
     /* Add command handler to pending list */
@@ -197,7 +198,7 @@ static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u
     if (!pending_cmd)
     {
         Kprintf("Failed to allocate pending command\n");
-        return;
+        return FALSE;
     }
 
     pending_cmd->cmd_trb_dma = trb_dma;
@@ -224,11 +225,13 @@ static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u
      * progress; COMP_CMD_STOP will restart the ring once the HC has stopped. */
     if (!ctrl->cmd_abort_pending)
         xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
+
+    return TRUE;
 }
 
-static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
+static BOOL xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
 {
-    xhci_queue_command_stream(ctrl, addr, slot_id, ep_index, 0, cmd, req, udev);
+    return xhci_queue_command_stream(ctrl, addr, slot_id, ep_index, 0, cmd, req, udev);
 }
 
 /*
@@ -422,7 +425,10 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
      * schedule.  The LPM policy shrinks the MEL by the reported ELD; this
      * handler only re-issues the command (spec §4.23.5.2). */
     if (comp == COMP_MEL_ERR &&
-        (cmd->type == TRB_CONFIG_EP || cmd->type == TRB_EVAL_CONTEXT) && cmd->udev)
+        (cmd->type == TRB_CONFIG_EP || cmd->type == TRB_EVAL_CONTEXT) && cmd->udev &&
+        /* the retry re-issues udev->in_ctx: stack ops only.  The clear-halt
+         * toggle reset (toggle_in_ctx) fails below instead. */
+        (!cmd->req || (cmd->req->priv_flags & REQ_CTX_OP)))
     {
         struct usb_device *udev = cmd->udev;
         u32 eld = EVENT_TRB_LEN(status);
@@ -434,7 +440,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
                 xhci_xfer_complete(udev, cmd->req, UHIOERR_HOSTERROR, 0);
             return;
         }
-        xhci_configure_endpoints(udev, cmd->type == TRB_EVAL_CONTEXT, cmd->req);
+        xhci_configure_endpoints(udev, udev->in_ctx, cmd->type == TRB_EVAL_CONTEXT, cmd->req);
         return;
     }
 
@@ -887,22 +893,39 @@ void xhci_reset_device(struct usb_device *udev, struct xhci_xfer *req)
     xhci_queue_command(ctrl, 0, udev->slot_id, 0, TRB_RESET_DEV, req, udev);
 }
 
+/* TRUE while any command of this device is still on the command ring. */
+BOOL xhci_device_command_pending(struct usb_device *udev)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    for (struct MinNode *node = ctrl->pending_commands.mlh_Head; node->mln_Succ; node = node->mln_Succ)
+    {
+        if (((struct pending_command *)node)->udev == udev)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 /**
  * Issue a configure endpoint command or evaluate context command
  *
  * @param udev	pointer to the Device Data Structure
+ * @param in_ctx	input context the command carries (udev->in_ctx, or
+ *              	toggle_in_ctx for the clear-halt toggle reset)
  * @param ctx_change	flag to indicate the Context has changed or NOT
  * @param req       Optional xfer to reply when the command completes
- * Return: 0 on success, -1 on failure
+ * Return: TRUE = queued, and req (if any) is retired by the command's
+ *         completion or its timeout; FALSE = nothing went out and req is
+ *         still the caller's
  */
-void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct xhci_xfer *req)
+BOOL xhci_configure_endpoints(struct usb_device *udev, struct xhci_container_ctx *in_ctx, BOOL ctx_change, struct xhci_xfer *req)
 {
     struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
-    struct xhci_container_ctx *in_ctx = udev->in_ctx;
 
     cache_pre_dma(in_ctx->bytes, in_ctx->size, DMA_ReadFromRAM);
-    xhci_queue_command(ctrl, (dma_addr_t)in_ctx->bytes, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
+    return xhci_queue_command(ctrl, (dma_addr_t)in_ctx->bytes, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
 }
 
 /**

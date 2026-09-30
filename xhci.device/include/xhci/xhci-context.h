@@ -265,6 +265,9 @@ void xhci_apply_hub_update(struct usb_device *udev, struct xhci_xfer *req);
  * ring.  The ep_context's stream state must already be built (alloc) or still
  * present (free — destroyed by the op completion). */
 void xhci_configure_ep_stream_mode(struct usb_device *udev, u8 ep_index, BOOL enable, struct xhci_xfer *req);
+/* Input context (udev->toggle_in_ctx) of the drop+add Configure Endpoint that
+ * zeroes an endpoint's data toggle; issued by xhci_ep_clear_halt_follow(). */
+void xhci_build_ep_toggle_reset_ctx(struct usb_device *udev, u8 ep_index);
 
 /* Default EP0 max packet size for a device speed; 0 = unknown speed. */
 u16 xhci_ep0_default_mps(enum usb_device_speed speed);
