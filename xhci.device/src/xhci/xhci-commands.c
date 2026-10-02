@@ -99,6 +99,21 @@ static inline struct pending_command *xhci_find_pending_command_by_dma(struct xh
     return NULL;
 }
 
+/* Only the head command executes, so the timeout clock is the head's: it
+ * starts when a command becomes the head, not when it was queued.  A command
+ * queued behind a slow or aborted one would otherwise reach the head with its
+ * time already spent and be aborted on the next poll. */
+static void xhci_start_head_command_clock(struct xhci_ctrl *ctrl)
+{
+    struct MinNode *head = ctrl->pending_commands.mlh_Head;
+    if (!head->mln_Succ)
+        return;
+
+    struct pending_command *cmd = (struct pending_command *)head;
+    cmd->deadline_us = get_time() + CMD_TIMEOUT_MS * 1000UL;
+    cmd->deadline_active = TRUE;
+}
+
 static void xhci_fail_timed_out_command(struct xhci_ctrl *ctrl, struct pending_command *cmd)
 {
     if (!cmd)
@@ -182,11 +197,10 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     pending_cmd->ep_index = ep_index;
     pending_cmd->req = req;
     pending_cmd->type = cmd;
-    pending_cmd->deadline_us = get_time() + CMD_TIMEOUT_MS * 1000UL;
-    pending_cmd->deadline_active = TRUE;
-
     pending_cmd->complete = command_handlers[cmd];
     AddTailMinList(&ctrl->pending_commands, (struct MinNode *)pending_cmd);
+    if (ctrl->pending_commands.mlh_Head == (struct MinNode *)pending_cmd)
+        xhci_start_head_command_clock(ctrl); /* else it starts when this one becomes the head */
 
     KprintfT("Queued command type=%s trb_dma=%lx ptr=%lx slot=%lu ep=%lu vaddr=%ld pending=%lu abort=%ld\n",
              xhci_command_type_name(cmd),
@@ -717,7 +731,10 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 
         /* Restart only if there are still pending commands. */
         if (ctrl->pending_commands.mlh_Head->mln_Succ)
+        {
+            xhci_start_head_command_clock(ctrl);
             xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
+        }
         return;
     }
 
@@ -738,6 +755,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
         Remove((struct Node *)cmd);
         xhci_fail_timed_out_command(ctrl, cmd);
         pool_free(ctrl->metaPool, cmd);
+        xhci_start_head_command_clock(ctrl);
         return;
     }
 
@@ -750,6 +768,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 
         Remove((struct Node *)cmd);
         pool_free(ctrl->metaPool, cmd);
+        xhci_start_head_command_clock(ctrl);
         return;
     }
 
