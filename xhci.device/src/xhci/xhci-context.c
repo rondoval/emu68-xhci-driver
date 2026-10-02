@@ -529,6 +529,10 @@ static void xhci_refresh_input_from_output(struct usb_device *udev, struct xhci_
  * descriptor.  If the usb_device's max packet size changes after that point,
  * we need to issue an evaluate context command and wait on it.
  *
+ * Only the hardware context changes here.  The software packet size follows
+ * once the controller has accepted the command (the UPDATE_EP0 epilogue), so
+ * a refused command leaves the two agreeing.
+ *
  * @param udev	pointer to the Device Data Structure
  * @param req	optional request to reply when the Evaluate Context completes
  * Return: TRUE when an Evaluate Context was issued (req is owned by the
@@ -554,10 +558,6 @@ BOOL xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size, struct 
 
     KprintfT("Max Packet Size for ep 0 changed to %lu.\n", (ULONG)max_packet_size);
     KprintfT("Max packet size in xHCI HW = %lu\n", (ULONG)hw_max_packet_size);
-
-    // Update the EP context's max packet size as well
-    struct ep_context *ep_context = xhci_ep_get_context_for_index(udev, ep_index);
-    xhci_ep_set_max_packet_size(ep_context, max_packet_size);
 
     /* Set up the modified control endpoint 0 */
     xhci_endpoint_copy(ctrl, udev->in_ctx,
