@@ -29,6 +29,8 @@
 #include <proto/timer.h>
 #endif
 
+#include <stddef.h>
+
 #include <devices/timer.h>
 #include <exec/errors.h>
 
@@ -49,8 +51,6 @@
 #undef KprintfT
 #define KprintfT(fmt, ...) PrintPistorm("[xhci_root_hub] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
-
-#define STATUS_CHANGE_BITMAP_LENGTH 2 /* in bytes; supports up to 15 ports */
 
 static const struct descriptor
 {
@@ -78,20 +78,16 @@ static const struct descriptor
 		.u.ss = {
 			.bHubHdrDecLat = 0,	  /* no hub delay */
 			.wHubDelay = le16(0), /* no hub delay */
-			.DeviceRemovable = 0, /* all ports permanently wired */
+			.DeviceRemovable = 0, /* every port takes removable devices */
 		},
 	},
 	.hub_20 = {
-		.bLength = 9,
+		.bLength = 0,																	/* patched to the port count during init, with the port bitmaps */
 		.bDescriptorType = USB_DT_HUB,													/* hub descriptor */
 		.bNbrPorts = 2,																	/* patched to real port count during init */
 		.wHubCharacteristics = le16(HUB_CHAR_INDV_PORT_LPSM | HUB_CHAR_INDV_PORT_OCPM), /* per-port power + OC */
 		.bPwrOn2PwrGood = 10,															/* 20 ms between power on and usable */
 		.bHubContrCurrent = 0,															/* self-powered: no bus draw */
-		.u.hs = {
-			.DeviceRemovable = {0},		 /* all ports permanently wired */
-			.PortPowerCtrlMask = {0xff}, /* all ports always have power */
-		},
 	},
 	.device_30 = {
 		.bLength = sizeof(struct usb_device_descriptor), /* size of device descriptor */
@@ -151,7 +147,7 @@ static const struct descriptor
 		.bDescriptorType = USB_DT_ENDPOINT,										/* endpoint descriptor */
 		.bEndpointAddress = (USB_DIR_IN | 1),									/* INT IN endpoint 1 */
 		.bmAttributes = USB_ENDPOINT_XFER_INT | USB_ENDPOINT_INTR_NOTIFICATION, /* interrupt */
-		.wMaxPacketSize = le16(STATUS_CHANGE_BITMAP_LENGTH),
+		.wMaxPacketSize = le16(0),												/* patched during init: the change bitmap's length */
 		.bInterval = 8,
 	},
 	.ss_ep_comp = {
@@ -159,7 +155,7 @@ static const struct descriptor
 		.bDescriptorType = USB_DT_SS_ENDPOINT_COMP,			 /* SS endpoint companion descriptor */
 		.bMaxBurst = 0,										 /* no bursting */
 		.bmAttributes = 0,									 /* no streams */
-		.wBytesPerInterval = le16(STATUS_CHANGE_BITMAP_LENGTH),
+		.wBytesPerInterval = le16(0),						 /* patched during init: the change bitmap's length */
 	},
 	.bos = {
 		.bLength = sizeof(struct usb_bos_descriptor),																																												   /* size of BOS descriptor */
@@ -355,10 +351,24 @@ struct xhci_root_hub *xhci_roothub_create(struct usb_device *udev, io_reply_data
 
 	memcpy(&rh->descriptor, &prototype_descriptor, sizeof(prototype_descriptor));
 
-	const u8 ports = HCS_MAX_PORTS(mmio_read32(&ctrl->hccr->cr_hcsparams1));
+	u8 ports = HCS_MAX_PORTS(mmio_read32(&ctrl->hccr->cr_hcsparams1));
+	if (ports > USB_MAXCHILDREN)
+	{
+		Kprintf("Controller has %lu ports; ports past %lu are left out\n", (ULONG)ports, (ULONG)USB_MAXCHILDREN);
+		ports = USB_MAXCHILDREN;
+	}
 	rh->num_ports = ports;
 	rh->descriptor.hub_30.bNbrPorts = ports;
 	rh->descriptor.hub_20.bNbrPorts = ports;
+
+	/* Everything sized by the port count: the change bitmap (the interrupt
+	 * endpoint's packet) and the USB2 hub descriptor's two port bitmaps. */
+	const u8 bitmap_bytes = USB_HUB_BITMAP_BYTES(ports);
+	rh->descriptor.endpoint.wMaxPacketSize = le16(bitmap_bytes);
+	rh->descriptor.ss_ep_comp.wBytesPerInterval = le16(bitmap_bytes);
+	memset(rh->descriptor.hub_20.u.hs.bitmaps, 0, bitmap_bytes);				  /* DeviceRemovable: every port takes removable devices */
+	memset(rh->descriptor.hub_20.u.hs.bitmaps + bitmap_bytes, 0xff, bitmap_bytes); /* PortPwrCtrlMask: all ones, as USB 2.0 asks */
+	rh->descriptor.hub_20.bLength = (u8)(offsetof(struct usb_hub_descriptor, u) + 2u * bitmap_bytes);
 
 	Kprintf("Initializing root hub with %lu ports\n", (ULONG)ports);
 
@@ -597,8 +607,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 	u8 *buffer = (u8 *)rh->int_req->data_buffer;
 
 	const u8 num_ports = rh->num_ports;
-	/* USB 3.0 spec is always two bytes, however the stack may request fewer bytes */
-	const u8 need_bytes = (u8)(((u32)num_ports + 7U) / 8U);
+	const u8 need_bytes = USB_HUB_BITMAP_BYTES(num_ports);
 	if (!buffer || rh->int_req->data_buffer_length < need_bytes)
 	{
 		rh->io_reply_data(rh->udev, rh->int_req, ERR_DEVICE_STALL, 0);
@@ -606,9 +615,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 		return;
 	}
 
-	buffer[0] = 0; /* port 1-7 status change bitmap */
-	if (need_bytes > 1)
-		buffer[1] = 0; /* port 8-15 status change bitmap */
+	memset(buffer, 0, need_bytes);
 
 	const u32 change_mask = PORT_CSC | PORT_OCC | PORT_RC | PORT_WRC | PORT_PLC | PORT_CEC; /* status change bits to report in interrupt */
 	BOOL change = FALSE;
@@ -619,11 +626,7 @@ void xhci_roothub_complete_int_request(struct xhci_root_hub *rh)
 		if (!change_bits)
 			continue;
 
-		u32 index = (port + 1U) >> 3;
-		if (index >= need_bytes)
-			continue;
-
-		buffer[index] |= (u8)(1U << (((u32)port + 1U) & 7U));
+		buffer[(port + 1U) >> 3] |= (u8)(1U << ((port + 1U) & 7U));
 		KprintfT("port %lu status change detected: changebits=0x%08lx\n", (ULONG)(port + 1), (ULONG)change_bits);
 		change = TRUE;
 	}

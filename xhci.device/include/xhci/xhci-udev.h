@@ -29,7 +29,10 @@
 #define USB_ALTSETTINGALLOC			16
 #define USB_MAXINTERFACES			16
 #define USB_MAXENDPOINTS			16
-#define USB_MAXCHILDREN				8	/* This is arbitrary */
+#define USB_MAXCHILDREN				31	/* the stack's hub classes read the change bitmap into four bytes */
+
+/* A hub's port bitmaps carry one bit per port, plus bit 0 for the hub itself. */
+#define USB_HUB_BITMAP_BYTES(ports) ((u8)(((ports) + 8u) / 8u))
 
 #define USB_MAX_ADDRESS 		127
 
@@ -103,9 +106,10 @@ struct usb_hub_descriptor {
 	/* 2.0 and 3.0 hubs differ here */
 	union {
 		struct {
-			/* add 1 bit for hub status change; round to bytes */
-			__le8 DeviceRemovable[(USB_MAXCHILDREN + 1 + 7) / 8];
-			__le8 PortPowerCtrlMask[(USB_MAXCHILDREN + 1 + 7) / 8];
+			/* DeviceRemovable, then PortPwrCtrlMask: each is
+			 * USB_HUB_BITMAP_BYTES(bNbrPorts) long, so the descriptor's
+			 * length follows the port count */
+			__le8 bitmaps[2 * USB_HUB_BITMAP_BYTES(USB_MAXCHILDREN)];
 		} __attribute__ ((packed)) hs;
 
 		struct {

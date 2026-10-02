@@ -13,6 +13,8 @@
 #include <proto/exec.h>
 #endif
 
+#include <stddef.h>
+
 #include <devices/hcd_api.h>
 
 #include <xhci/xhci.h>
@@ -126,10 +128,9 @@ static u32 xhci_hub_build_usb2_hub_descriptor(struct usb_device *udev, u8 *buf, 
     memset(&hub, 0, sizeof(hub));
 
     const u8 ports = udev->hub_num_ports;
-    u32 needed_words = ((u32)ports + 1U + 7U) / 8U;
-    const u8 needed = (u8)(needed_words < sizeof(hub.u.hs.DeviceRemovable) ? needed_words : sizeof(hub.u.hs.DeviceRemovable));
+    const u8 bytes = USB_HUB_BITMAP_BYTES(ports < USB_MAXCHILDREN ? ports : USB_MAXCHILDREN);
 
-    hub.bLength = (u8)(7U + 2U * needed);
+    hub.bLength = (u8)(offsetof(struct usb_hub_descriptor, u) + 2U * bytes);
     hub.bDescriptorType = USB_DT_HUB;
     hub.bNbrPorts = ports;
 
@@ -137,8 +138,9 @@ static u32 xhci_hub_build_usb2_hub_descriptor(struct usb_device *udev, u8 *buf, 
     hub.bPwrOn2PwrGood = udev->ss_hub_desc.bPwrOn2PwrGood;
     hub.bHubContrCurrent = udev->ss_hub_desc.bHubContrCurrent;
 
-    for (u8 i = 0; i < needed; ++i)
-        hub.u.hs.PortPowerCtrlMask[i] = 0xFF;
+    /* DeviceRemovable stays zero: every port takes removable devices.
+     * PortPwrCtrlMask follows it, all ones as USB 2.0 asks. */
+    memset(hub.u.hs.bitmaps + bytes, 0xFF, bytes);
 
     u32 actual = max_len < hub.bLength ? max_len : hub.bLength;
     memcpy(buf, &hub, actual);
