@@ -235,6 +235,7 @@ void xhci_update_mel_in_input_ctx(struct usb_device *udev);
 void xhci_evaluate_mel(struct usb_device *udev);
 
 void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size);
+void xhci_ep0_commit_max_packet(struct usb_device *udev);
 s8 xhci_set_configuration(struct usb_device *udev, u32 config_value);
 s8 xhci_set_interface(struct usb_device *udev, u8 iface_number, u8 alt_setting);
 

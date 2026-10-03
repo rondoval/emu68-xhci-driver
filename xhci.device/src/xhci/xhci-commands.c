@@ -454,7 +454,10 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
      * SET_FEATURE(U1/U2_ENABLE) until it is in the Configured state.  The MEL
      * Evaluate Context it issues resumes the sequence here. */
     if (cmd->type == TRB_EVAL_CONTEXT)
+    {
+        xhci_ep0_commit_max_packet(cmd->udev);
         xhci_udev_op_advance(cmd->udev, UDEV_OP_EVENT_MEL_EVAL_DONE);
+    }
 
     if (cmd->req)
     {

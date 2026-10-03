@@ -500,8 +500,11 @@ static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ct
  * descriptor.  If the usb_device's max packet size changes after that point,
  * we need to issue an evaluate context command and wait on it.
  *
+ * Only the hardware context changes here.  The software packet size follows
+ * once the controller has accepted the command (xhci_ep0_commit_max_packet),
+ * so a refused command leaves the two agreeing.
+ *
  * @param udev	pointer to the Device Data Structure
- * Return: returns the status of the xhci_configure_endpoints
  */
 void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size)
 {
@@ -524,10 +527,6 @@ void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size)
     KprintfT("Max Packet Size for ep 0 changed to %lu.\n", (ULONG)max_packet_size);
     KprintfT("Max packet size in xHCI HW = %lu\n", (ULONG)hw_max_packet_size);
 
-    // Update the EP context's max packet size as well
-    struct ep_context *ep_context = xhci_ep_get_context_for_index(udev, ep_index);
-    xhci_ep_set_max_packet_size(ep_context, max_packet_size);
-
     /* Set up the modified control endpoint 0 */
     xhci_endpoint_copy(ctrl, udev->in_ctx,
                        udev->out_ctx, ep_index);
@@ -545,6 +544,23 @@ void xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size)
     ctrl_ctx->drop_flags = 0;
 
     xhci_configure_endpoints(udev, TRUE, NULL);
+}
+
+/*
+ * An Evaluate Context succeeded: the output context holds the EP0 packet size
+ * the controller now uses, and the software size follows it.  Called after
+ * every successful Evaluate Context; for the MEL ones EP0 is unchanged and
+ * this is a no-op.
+ */
+void xhci_ep0_commit_max_packet(struct usb_device *udev)
+{
+    struct ExecBase *SysBase = udev->sysBase;
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    xhci_inval_cache(udev->out_ctx->bytes, udev->out_ctx->size);
+    struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(ctrl, udev->out_ctx, 0);
+    xhci_ep_set_max_packet_size(xhci_ep_get_context_for_index(udev, 0),
+                                MAX_PACKET_DECODED(le32(ep_ctx->ep_info2)));
 }
 
 /**
