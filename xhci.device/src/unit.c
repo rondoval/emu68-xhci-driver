@@ -64,7 +64,7 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 	CONST_STRPTR compatible = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "compatible"));
 #endif
 
-	APTR base = DT_GetBaseAddressVirtual(SysBase, (CONST_STRPTR) "/scb/xhci");
+	APTR base = DT_GetBaseAddressVirtual(DeviceTreeBase, key, 0);
 	if (base == NULL)
 	{
 		Kprintf("[bcm-xhci] %s: Failed to get base address\n", __func__);
@@ -74,7 +74,14 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 
 	Kprintf("[bcm-xhci] %s: compatible: %s\n", __func__, compatible);
 
-	unit->irq_line = (u32)DT_GetInterrupt(SysBase, key, 0);
+	s32 irq = DT_GetInterrupt(DeviceTreeBase, key, 0);
+	if (irq < 0)
+	{
+		Kprintf("[bcm-xhci] %s: Failed to get interrupt number\n", __func__);
+		DT_CloseKey(key);
+		return -1;
+	}
+	unit->irq_line = (u32)irq;
 	Kprintf("[bcm-xhci] %s: IRQ = %lu\n", __func__, (ULONG)unit->irq_line);
 
 	// We're done with the device tree
