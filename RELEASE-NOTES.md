@@ -17,6 +17,27 @@ Configuration-relevant changes across all releases, newest first:
   stack configuration accordingly.
 
 
+# Release notes — xhci.device 6.4
+
+Changes since v6.3.
+
+The isochronous IN path learns what USB video cameras need.
+
+
+---
+
+## Bug fixes
+
+- **Isochronous IN endpoints that send several packets per interval now
+  work.** A high-speed high-bandwidth endpoint (two or three packets per
+  microframe, as HD webcams use) or a bursting SuperSpeed one was asked for a
+  single packet per service interval, so everything after the first packet was
+  lost, and the packet count of the transfer went into the wrong field. Each
+  transfer now covers the whole payload of an interval. USB audio, at one
+  packet per interval, behaves as before.
+
+---
+
 # Release notes — xhci.device 6.3
 
 Changes since v6.2.

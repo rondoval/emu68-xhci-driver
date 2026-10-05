@@ -70,10 +70,11 @@ void xhci_ep_destroy_rt_staging_slab(struct ep_context *ep_ctx)
 /*
  * RT ISO functions
  */
-void xhci_ep_set_rt_interval(struct ep_context *ep_ctx, u8 interval)
+void xhci_ep_set_rt_service(struct ep_context *ep_ctx, u8 interval, u32 max_esit_payload)
 {
     /* xHCI EP Context Interval is log2 of microframes-per-ESIT. */
     ep_ctx->rt_uframes_per_esit = (u16)(1U << interval);
+    ep_ctx->rt_esit_payload = max_esit_payload;
 }
 
 #define RT_ISO_SCHED_OFFSET_UFRAMES 32U
@@ -365,7 +366,10 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
             break;
 
         u16 frame = rt_pick_frame(ep_ctx);
-        const u32 packet_size = ep_ctx->max_packet_size;
+        /* One TD per service interval, sized for everything the interval can
+         * carry: a high-bandwidth or SuperSpeed endpoint sends several
+         * packets in it. */
+        const u32 td_length = ep_ctx->rt_esit_payload;
 
         APTR staging = slab_alloc(&ep_ctx->rt->in_staging_slab);
         if (!staging)
@@ -374,14 +378,14 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
             break;
         }
 
-        KprintfT("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+        KprintfT("RT ISO IN sched frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
-                 (ULONG)packet_size,
+                 (ULONG)td_length,
                  (ULONG)ep_ctx->rt->inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
         s8 ret = xhci_submit_rt_td(ep_ctx->udev, ep_ctx,
-                                   staging, packet_size, frame, XHCI_DIR_IN,
+                                   staging, td_length, frame, XHCI_DIR_IN,
                                    TRUE /* staging buffer, freed on completion */,
                                    TRUE /* RT ISO defers doorbell to per-run giveback */);
         if (ret != UHIOERR_NO_ERROR)
@@ -392,10 +396,10 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
         }
         ++inflight;
 
-        rt_advance(ep_ctx, packet_size);
+        rt_advance(ep_ctx, td_length);
         KprintfT("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
-                 (ULONG)packet_size,
+                 (ULONG)td_length,
                  (ULONG)ep_ctx->rt->inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
     }
@@ -467,15 +471,21 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
     const u32 target_uframes = RT_ISO_IN_TARGET_FRAMES * 8U;
     ep_ctx->rt->inflight_tds_target = (target_uframes + uframes_per_td - 1U) / uframes_per_td;
 
-    /* Build the per-endpoint IN staging slab now that we know both the packet size
-     * and the target inflight depth.  OUT endpoints have no staging buffer. */
-    if (ep_ctx->rt->direction == XHCI_DIR_IN && ep_ctx->max_packet_size > 0)
+    /* Build the per-endpoint IN staging slab now that we know both the TD length
+     * and the target inflight depth.  OUT endpoints have no staging buffer.
+     *
+     * Each buffer is aligned to its own size rounded up to a power of two, so
+     * none crosses a 64 KB boundary and every IN TD is exactly one TRB (the
+     * payload of one interval never exceeds 48 KB).  That is what makes the
+     * completion's length exact without ISP: a short packet can only end in
+     * the TD's final TRB, whose event residue is the TD's. */
+    if (ep_ctx->rt->direction == XHCI_DIR_IN && ep_ctx->rt_esit_payload > 0)
     {
         slab_cache_init(&ep_ctx->rt->in_staging_slab, ep_ctx->sysBase,
                         ep_ctx->udev->controller->metaPool,
                         ep_ctx->udev->controller->dmaPool,
-                        ep_ctx->max_packet_size,
-                        DMA_ALIGN_MIN,
+                        ep_ctx->rt_esit_payload,
+                        round_up_pow2_u32(ep_ctx->rt_esit_payload),
                         ep_ctx->rt->inflight_tds_target);
         ep_ctx->rt->in_staging_active = TRUE;
     }

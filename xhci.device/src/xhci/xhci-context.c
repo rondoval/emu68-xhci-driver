@@ -811,7 +811,7 @@ static s8 xhci_init_one_ep_context(struct usb_device *udev,
     if (err != UHIOERR_NO_ERROR)
         return err;
 
-    xhci_ep_set_rt_interval(xhci_ep_get_context_for_index(udev, ep_index), interval);
+    xhci_ep_set_rt_service(xhci_ep_get_context_for_index(udev, ep_index), interval, max_esit_payload);
 
     KprintfT("EP%lu %s: type=%lu maxp=%lu maxesit=%lu "
              "interval=%lu mult=%lu maxburst=%lu\n",

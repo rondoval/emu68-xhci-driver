@@ -600,7 +600,11 @@ static void __attribute__((unused)) xhci_dump_request(const char *tag, const str
 #endif /* DEBUG (xhci_dump_request) */
 
 /*
- * xHCI 4.11.2.3: compute TBC and TLBPC for an ISO TD.
+ * xHCI 4.11.2.3: compute TBC and TLBPC for an ISO TD from its packet count and
+ * the endpoint's Max Burst Size.  One rule serves every speed: a high-speed
+ * endpoint's Max Burst Size is its additional transactions per microframe
+ * (6.2.3) and a full-speed one has none, so below SuperSpeed TBC comes out 0
+ * and TLBPC is the TD's packet count - 1.
  * Pre-1.0 controllers leave both fields RsvdZ; older controllers can't burst anyway.
  */
 static inline u32 iso_burst_bits(struct usb_device *udev,
@@ -616,17 +620,12 @@ static inline u32 iso_burst_bits(struct usb_device *udev,
 	if (total_pkts == 0)
 		total_pkts = 1;
 
-	if (udev->speed >= USB_SPEED_SUPER)
-	{
-		const u32 max_burst = xhci_ep_get_max_burst(ep_ctx);
-		const u32 burst = max_burst + 1U;
-		const u32 tbc = ((total_pkts + burst - 1) / burst) - 1;
-		const u32 residue = total_pkts % burst;
-		const u32 tlbpc = (residue == 0) ? max_burst : (residue - 1);
-		return TRB_TBC(tbc) | TRB_TLBPC(tlbpc);
-	}
-	/* USB 2.0 / 1.1: one burst per service interval; TLBPC = total_pkts - 1. */
-	return TRB_TBC(total_pkts - 1);
+	const u32 max_burst = xhci_ep_get_max_burst(ep_ctx);
+	const u32 burst = max_burst + 1U;
+	const u32 tbc = ((total_pkts + burst - 1) / burst) - 1;
+	const u32 residue = total_pkts % burst;
+	const u32 tlbpc = (residue == 0) ? max_burst : (residue - 1);
+	return TRB_TBC(tbc) | TRB_TLBPC(tlbpc);
 }
 
 enum td_reserve_status
@@ -761,7 +760,7 @@ s8 xhci_submit_rt_td(struct usb_device *udev, struct ep_context *ep_ctx,
 
 	struct xhci_dma_span span;
 	/* staging-slab buffers own whole cache lines by construction, so an IN
-	 * map never bounces on a non-line-multiple max packet */
+	 * map never bounces on a non-line-multiple TD length */
 	dma_addr_t addr = xhci_dma_span_map(ctrl, &span, buffer, length,
 										dir == XHCI_DIR_OUT, staging_in);
 	if (length && !addr)

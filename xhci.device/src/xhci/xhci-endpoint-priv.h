@@ -47,9 +47,13 @@ struct ep_context
      * recovery runs synchronously against the output-context dequeue. */
     BOOL suspend_stop_pending;
 
-    /* xHCI EP Context Interval decoded to microframes-per-ESIT; set for every
-     * endpoint at context creation (needed before RT hooks register). */
+    /* Service-interval facts, set for every periodic endpoint at context
+     * creation (needed before RT hooks register): the xHCI EP Context Interval
+     * decoded to microframes-per-ESIT, and the Max ESIT Payload - the most one
+     * interval can carry (packet size x high-bandwidth multiplier, or the
+     * SuperSpeed wBytesPerInterval), which is the length of every RT-ISO IN TD. */
     u16 rt_uframes_per_esit;
+    u32 rt_esit_payload;
 
     /* SS bulk: highest stream id the endpoint supports (from the configure
      * op's ed_MaxStreams); 0 = endpoint has no stream capability. */
@@ -105,9 +109,10 @@ struct rt_iso_state
 
     u32 ist; /* IST decoded to microframes, cached at RT ISO start */
 
-    /* IN staging slab: created in xhci_ep_rt_iso_start, object size =
-     * max_packet_size, capacity = inflight_tds_target.  Destroyed in
-     * xhci_ep_set_rt_stopped and as a safety net on endpoint teardown. */
+    /* IN staging slab: created in xhci_ep_rt_iso_start, one object per TD
+     * (rt_esit_payload rounded up to a power of two, see there), capacity =
+     * inflight_tds_target.  Destroyed in xhci_ep_set_rt_stopped and as a
+     * safety net on endpoint teardown. */
     struct slab_cache in_staging_slab;
     BOOL in_staging_active;
 };
