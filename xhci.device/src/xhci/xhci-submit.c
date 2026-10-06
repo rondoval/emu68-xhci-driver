@@ -12,6 +12,8 @@
  * Copyright (C) 2008 Intel Corp.  Copyright (C) 2013 Samsung Electronics.
  */
 
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <config.h>
 #include <debug.h>
 #include <memory.h>
@@ -35,19 +37,6 @@
 #undef KprintfT
 #define KprintfT(fmt, ...) PrintPistorm("[xhci-submit] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
-
-/* Bounce-buffer copy, either direction: CopyMemQuick when everything is
- * longword-aligned, CopyMem otherwise. */
-static inline void xhci_copy_aligned(CONST_APTR src, APTR dst, u32 size)
-{
-	if ((((uintptr_t)src | (uintptr_t)dst | size) & (sizeof(ULONG) - 1)) == 0)
-	{
-		CopyMemQuick((ULONG *)src, (ULONG *)dst, size);
-		return;
-	}
-
-	CopyMem(src, dst, size);
-}
 
 /* Decision + allocation half of a span map (needs ctrl->xfer_lock: it touches
  * the bounce slabs and the DMA pool).  No payload copy, no cache ops - those
@@ -130,15 +119,16 @@ static dma_addr_t xhci_dma_span_prepare(struct xhci_ctrl *ctrl, struct xhci_dma_
  * line-owned bounce slabs.  On a short IN, bytes past the actual length are
  * now whatever RAM held rather than the cleaned-out CPU content - both are
  * undefined territory per USB semantics (class drivers honour ioActual). */
-static void xhci_dma_span_sync(struct xhci_dma_span *span, BOOL to_device)
+static void xhci_dma_span_sync(struct xhci_ctrl *ctrl, struct xhci_dma_span *span, BOOL to_device)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (!span->cpu || span->length == 0)
 		return;
 
 	if (span->bounce)
 	{
 		if (to_device)
-			xhci_copy_aligned(span->cpu, span->bounce, span->length);
+			memcpy(span->bounce, span->cpu, span->length);
 		cache_pre_dma(span->bounce, span->length, to_device ? DMA_ReadFromRAM : DMA_WriteToRAM);
 	}
 	else
@@ -150,12 +140,13 @@ static dma_addr_t xhci_dma_span_map(struct xhci_ctrl *ctrl, struct xhci_dma_span
 {
 	dma_addr_t mapped = xhci_dma_span_prepare(ctrl, span, buffer, length, to_device, owns_lines);
 	if (mapped)
-		xhci_dma_span_sync(span, to_device);
+		xhci_dma_span_sync(ctrl, span, to_device);
 	return mapped;
 }
 
 void xhci_dma_span_unmap(struct xhci_ctrl *ctrl, struct xhci_dma_span *span, BOOL copy_back)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (!ctrl || !span->cpu || span->length == 0)
 		return;
 
@@ -169,7 +160,7 @@ void xhci_dma_span_unmap(struct xhci_ctrl *ctrl, struct xhci_dma_span *span, BOO
 	if (copy_back)
 	{
 		cache_post_dma(span->bounce, span->length, 0);
-		xhci_copy_aligned(span->bounce, span->cpu, span->length);
+		memcpy(span->cpu, span->bounce, span->length);
 	}
 
 	switch (span->bounce_class)
@@ -230,11 +221,11 @@ static void req_to_span(const struct xhci_xfer *req, struct xhci_dma_span *span)
 	span->bounce_class = (u8)((req->priv_flags & REQ_BOUNCE_CLASS_MASK) >> REQ_BOUNCE_CLASS_SHIFT);
 }
 
-void xhci_dma_map_sync(struct xhci_xfer *req, BOOL to_device)
+void xhci_dma_map_sync(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL to_device)
 {
 	struct xhci_dma_span span;
 	req_to_span(req, &span);
-	xhci_dma_span_sync(&span, to_device);
+	xhci_dma_span_sync(ctrl, &span, to_device);
 }
 
 inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL copy)
@@ -250,7 +241,7 @@ inline static dma_addr_t xhci_dma_map(struct xhci_ctrl *ctrl, struct xhci_xfer *
 
 	dma_addr_t mapped = xhci_dma_premap(ctrl, req, copy);
 	if (mapped)
-		xhci_dma_map_sync(req, copy);
+		xhci_dma_map_sync(ctrl, req, copy);
 	return mapped;
 }
 
@@ -278,8 +269,9 @@ BOOL xhci_submit_has_room(struct ep_context *ep_ctx, u32 needed_trbs)
 	return xhci_ring_has_room(ring, needed_trbs);
 }
 
-inline static void prime_first_trb(struct xhci_generic_trb *start_trb)
+inline static void prime_first_trb(struct xhci_ring *ring, struct xhci_generic_trb *start_trb)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	start_trb->field[3] ^= le32(TRB_CYCLE);
 	/* the TD's closing barrier: every TRB of the TD was flushed with
 	 * DMAF_NoSync (xhci_ring_enqueue_trb_ns); this non-NoSync clean
@@ -298,7 +290,7 @@ void xhci_submit_kick_ep(struct usb_device *udev, u8 ep_index, u16 stream_id)
 inline static void giveback_first_trb(struct usb_device *udev, struct xhci_ring *ring,
 									  struct xhci_generic_trb *start_trb)
 {
-	prime_first_trb(start_trb);
+	prime_first_trb(ring, start_trb);
 	xhci_submit_kick_ep(udev, ring->ep_index, ring->stream_id);
 }
 
@@ -537,7 +529,7 @@ inline static void xhci_ring_finalize_first_trb(struct usb_device *udev, struct 
 			ep_ring->deferred_giveback = start_trb;
 		else
 			/* Additional TDs: make TRBs visible now but do not ring the doorbell*/
-			prime_first_trb(start_trb);
+			prime_first_trb(ep_ring, start_trb);
 	}
 	else
 		giveback_first_trb(udev, ep_ring, start_trb);

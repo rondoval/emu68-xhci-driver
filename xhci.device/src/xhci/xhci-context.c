@@ -17,7 +17,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -54,6 +54,7 @@
  */
 struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 type)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     struct xhci_container_ctx *ctx = pool_zalloc(ctrl->metaPool, sizeof(struct xhci_container_ctx));
     if (!ctx)
     {
@@ -85,6 +86,7 @@ struct xhci_container_ctx *xhci_alloc_container_ctx(struct xhci_ctrl *ctrl, u32 
  */
 void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *ctx)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     dma_free(ctrl->dmaPool, ctx->bytes);
     pool_free(ctrl->metaPool, ctx);
 }
@@ -97,11 +99,11 @@ void xhci_free_container_ctx(struct xhci_ctrl *ctrl, struct xhci_container_ctx *
  */
 static struct xhci_input_control_ctx *xhci_get_input_control_ctx(struct xhci_container_ctx *ctx)
 {
-    if (ctx->type != XHCI_CTX_TYPE_INPUT)
-    {
-        Kprintf("Invalid context type\n");
-        return NULL;
-    }
+    /* Every caller passes a device's in_ctx, allocated as the input type, so
+     * this is an invariant, not a runtime error: never return NULL here.  A
+     * NULL result would be dereferenced at offset 4 by the callers, which GCC
+     * compiles as a store to address 4 (the Exec base pointer) plus a trap. */
+    KASSERT(ctx->type == XHCI_CTX_TYPE_INPUT, "xhci_get_input_control_ctx: not an input context");
     return (struct xhci_input_control_ctx *)ctx->bytes;
 }
 
@@ -140,6 +142,7 @@ static struct xhci_ep_ctx *xhci_get_ep_ctx(struct xhci_ctrl *ctrl, struct xhci_c
 
 u32 xhci_get_hardware_address(struct usb_device *udev)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(udev->controller, udev->out_ctx);
     cache_post_dma(slot_ctx, sizeof(struct xhci_slot_ctx), 0);
     return le32(slot_ctx->dev_state) & DEV_ADDR_MASK;
@@ -147,6 +150,7 @@ u32 xhci_get_hardware_address(struct usb_device *udev)
 
 u64 xhci_get_endpoint_deq_ptr(struct usb_device *udev, u8 ep_index)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
     cache_post_dma(ep_ctx, sizeof(struct xhci_ep_ctx), 0);
     return le64(ep_ctx->deq);
@@ -424,6 +428,7 @@ static void ctx_wire_ep0(struct usb_device *udev)
  */
 void xhci_setup_addressable_virt_dev(struct usb_device *udev)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
     KprintfT("Setting up addressable virtual device slot=%lu parent_slot=%lu parent_port=%lu\n",
              (ULONG)udev->slot_id,
@@ -501,20 +506,21 @@ static void xhci_update_hub_tt(struct usb_device *udev, struct xhci_container_ct
     slot_ctx->tt_info = le32(tt_info);
 }
 
-/* Refresh the input context from the hardware output context: invalidate the
- * output copy, carry the slot context over, optionally carry one endpoint
+/* Refresh the given input context from the hardware output context: invalidate
+ * the output copy, carry the slot context over, optionally carry one endpoint
  * context (copy_ep >= 0), and re-apply the stack-supplied hub facts.
  * xhci_evaluate_mel deliberately does NOT use this: Evaluate Context must not
  * carry endpoint/hub state and zeroes dev_state itself. */
-static void xhci_refresh_input_from_output(struct usb_device *udev, s16 copy_ep)
+static void xhci_refresh_input_from_output(struct usb_device *udev, struct xhci_container_ctx *in_ctx, s16 copy_ep)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
 
     cache_post_dma(udev->out_ctx->bytes, udev->out_ctx->size, 0);
-    xhci_slot_copy(ctrl, udev->in_ctx, udev->out_ctx);
+    xhci_slot_copy(ctrl, in_ctx, udev->out_ctx);
     if (copy_ep >= 0)
-        xhci_endpoint_copy(ctrl, udev->in_ctx, udev->out_ctx, (u8)copy_ep);
-    xhci_update_hub_tt(udev, udev->in_ctx);
+        xhci_endpoint_copy(ctrl, in_ctx, udev->out_ctx, (u8)copy_ep);
+    xhci_update_hub_tt(udev, in_ctx);
 }
 
 /*
@@ -523,6 +529,10 @@ static void xhci_refresh_input_from_output(struct usb_device *udev, s16 copy_ep)
  * descriptor.  If the usb_device's max packet size changes after that point,
  * we need to issue an evaluate context command and wait on it.
  *
+ * Only the hardware context changes here.  The software packet size follows
+ * once the controller has accepted the command (the UPDATE_EP0 epilogue), so
+ * a refused command leaves the two agreeing.
+ *
  * @param udev	pointer to the Device Data Structure
  * @param req	optional request to reply when the Evaluate Context completes
  * Return: TRUE when an Evaluate Context was issued (req is owned by the
@@ -530,6 +540,7 @@ static void xhci_refresh_input_from_output(struct usb_device *udev, s16 copy_ep)
  */
 BOOL xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size, struct xhci_xfer *req)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
     u8 ep_index = 0; /* control endpoint */
 
@@ -548,10 +559,6 @@ BOOL xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size, struct 
     KprintfT("Max Packet Size for ep 0 changed to %lu.\n", (ULONG)max_packet_size);
     KprintfT("Max packet size in xHCI HW = %lu\n", (ULONG)hw_max_packet_size);
 
-    // Update the EP context's max packet size as well
-    struct ep_context *ep_context = xhci_ep_get_context_for_index(udev, ep_index);
-    xhci_ep_set_max_packet_size(ep_context, max_packet_size);
-
     /* Set up the modified control endpoint 0 */
     xhci_endpoint_copy(ctrl, udev->in_ctx,
                        udev->out_ctx, ep_index);
@@ -568,7 +575,7 @@ BOOL xhci_update_maxpacket(struct usb_device *udev, u16 max_packet_size, struct 
     ctrl_ctx->add_flags = le32(EP0_FLAG);
     ctrl_ctx->drop_flags = 0;
 
-    xhci_configure_endpoints(udev, TRUE, req);
+    xhci_configure_endpoints(udev, udev->in_ctx, TRUE, req);
     return TRUE;
 }
 
@@ -843,6 +850,7 @@ static void xhci_update_slot_last_ctx(struct xhci_ctrl *ctrl,
  * ep_state bookkeeping. */
 u32 xhci_read_hw_ep_state(struct usb_device *udev, u8 ep_index)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
     cache_post_dma(ep_ctx, sizeof(*ep_ctx), 0);
     return le32(ep_ctx->ep_info) & EP_STATE_MASK;
@@ -852,6 +860,7 @@ u32 xhci_read_hw_ep_state(struct usb_device *udev, u8 ep_index)
  * 0 = context not valid (disabled endpoint). */
 u32 xhci_read_hw_ep_type(struct usb_device *udev, u8 ep_index)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
     cache_post_dma(ep_ctx, sizeof(*ep_ctx), 0);
     return CTX_TO_EP_TYPE(le32(ep_ctx->ep_info2));
@@ -861,6 +870,7 @@ u32 xhci_read_hw_ep_type(struct usb_device *udev, u8 ep_index)
  * HC's device context. */
 u32 xhci_read_hw_ep_interval(struct usb_device *udev, u8 ep_index)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
     cache_post_dma(ep_ctx, sizeof(*ep_ctx), 0);
     return CTX_TO_EP_INTERVAL(le32(ep_ctx->ep_info));
@@ -888,7 +898,7 @@ s8 xhci_configure_endpoints_from_list(struct usb_device *udev,
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
-    xhci_refresh_input_from_output(udev, 0);
+    xhci_refresh_input_from_output(udev, udev->in_ctx, 0);
 
     u32 add_flags = SLOT_FLAG;
     u32 drop_flags = 0;
@@ -943,7 +953,7 @@ s8 xhci_configure_endpoints_from_list(struct usb_device *udev,
     KprintfT("configure_endpoints_from_list: slot=%lu add=0x%lx drop=0x%lx last=%lu\n",
              (ULONG)udev->slot_id, (ULONG)add_flags, (ULONG)drop_flags, (ULONG)last_ep_index);
 
-    xhci_configure_endpoints(udev, FALSE, req);
+    xhci_configure_endpoints(udev, udev->in_ctx, FALSE, req);
     return UHIOERR_NO_ERROR;
 }
 
@@ -953,7 +963,7 @@ void xhci_deconfigure(struct usb_device *udev, struct xhci_xfer *req)
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
-    xhci_refresh_input_from_output(udev, 0);
+    xhci_refresh_input_from_output(udev, udev->in_ctx, 0);
 
     u32 drop_flags = 0;
     for (u8 ep_index = 1; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ++ep_index)
@@ -968,7 +978,7 @@ void xhci_deconfigure(struct usb_device *udev, struct xhci_xfer *req)
 
     xhci_update_slot_last_ctx(ctrl, udev, 0); /* only EP0 remains */
 
-    xhci_configure_endpoints(udev, FALSE, req);
+    xhci_configure_endpoints(udev, udev->in_ctx, FALSE, req);
 }
 
 /* Shared prologue of the two stream-mode switches: refresh the input context
@@ -978,7 +988,7 @@ static struct xhci_ep_ctx *xhci_streams_input_ctx(struct usb_device *udev, u8 ep
 {
     struct xhci_ctrl *ctrl = udev->controller;
 
-    xhci_refresh_input_from_output(udev, (s16)ep_index);
+    xhci_refresh_input_from_output(udev, udev->in_ctx, (s16)ep_index);
 
     struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
     ctrl_ctx->add_flags = le32(SLOT_FLAG | BIT(ep_index + 1));
@@ -1005,7 +1015,27 @@ void xhci_configure_ep_stream_mode(struct usb_device *udev, u8 ep_index, BOOL en
     epc->deq = enable ? le64((u64)xhci_ep_streams_array_dma(ep_ctx))
                       : le64((u64)xhci_ring_get_new_dequeue_ptr(xhci_ep_get_ring(ep_ctx)));
 
-    xhci_configure_endpoints(udev, FALSE, req);
+    xhci_configure_endpoints(udev, udev->in_ctx, FALSE, req);
+}
+
+/* Build, in the device's private toggle_in_ctx, the input context of a
+ * data-toggle reset: drop and add the same endpoint in one Configure Endpoint,
+ * which makes the xHC re-initialise its endpoint context (toggle included).
+ * Slot and endpoint are straight copies of what the xHC already accepted, so
+ * the command changes no bandwidth, interval or exit latency and gives the xHC
+ * nothing new to object to. */
+void xhci_build_ep_toggle_reset_ctx(struct usb_device *udev, u8 ep_index)
+{
+    struct xhci_container_ctx *in_ctx = udev->toggle_in_ctx;
+
+    xhci_refresh_input_from_output(udev, in_ctx, (s16)ep_index);
+
+    struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(in_ctx);
+    ctrl_ctx->add_flags = le32(SLOT_FLAG | BIT(ep_index + 1));
+    ctrl_ctx->drop_flags = le32(BIT(ep_index + 1));
+
+    struct xhci_ring *ring = xhci_ep_get_ring(xhci_ep_get_context_for_index(udev, ep_index));
+    xhci_get_ep_ctx(udev->controller, in_ctx, ep_index)->deq = le64((u64)xhci_ring_get_new_dequeue_ptr(ring));
 }
 
 /* Apply stack-supplied hub facts (NSCMD_USB_UPDATE_HUB) to the slot context.
@@ -1013,13 +1043,13 @@ void xhci_configure_ep_stream_mode(struct usb_device *udev, u8 ep_index, BOOL en
  * legal in the Addressed state, where this normally runs. */
 void xhci_apply_hub_update(struct usb_device *udev, struct xhci_xfer *req)
 {
-    xhci_refresh_input_from_output(udev, -1);
+    xhci_refresh_input_from_output(udev, udev->in_ctx, -1);
 
     struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
     ctrl_ctx->add_flags = le32(SLOT_FLAG);
     ctrl_ctx->drop_flags = 0;
 
-    xhci_configure_endpoints(udev, FALSE, req);
+    xhci_configure_endpoints(udev, udev->in_ctx, FALSE, req);
 }
 
 #ifdef DEBUG /* name helpers below are used only by the context dumps */
@@ -1102,6 +1132,7 @@ static const char *ep_type_name(u32 type)
 
 void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_container_ctx *ctx = in_ctx ? udev->in_ctx : udev->out_ctx;
     struct xhci_slot_ctx *slot_ctx = xhci_get_slot_ctx(udev->controller, ctx);
     cache_post_dma(slot_ctx, sizeof(struct xhci_slot_ctx), 0);
@@ -1173,6 +1204,7 @@ void xhci_dump_slot_ctx(const char *tag, struct usb_device *udev, BOOL in_ctx)
  * MEL of 0 the controller will not take the link into U1/U2. */
 void xhci_evaluate_mel(struct usb_device *udev, struct xhci_xfer *req)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
 
     struct xhci_input_control_ctx *ctrl_ctx = xhci_get_input_control_ctx(udev->in_ctx);
@@ -1188,13 +1220,14 @@ void xhci_evaluate_mel(struct usb_device *udev, struct xhci_xfer *req)
 
     KprintfT("Evaluate Context: MEL=%lu us for slot %lu\n",
              (ULONG)udev->lpm.max_exit_latency_us, (ULONG)udev->slot_id);
-    xhci_configure_endpoints(udev, TRUE, req);
+    xhci_configure_endpoints(udev, udev->in_ctx, TRUE, req);
 }
 
 #ifdef DEBUG
 
 void xhci_dump_ep_ctx(const char *tag, struct usb_device *udev, u8 ep_index)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(udev->controller, udev->out_ctx, ep_index);
     cache_post_dma(ep_ctx, sizeof(struct xhci_ep_ctx), 0);
     const char *pfx = tag ? tag : "";

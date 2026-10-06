@@ -4,6 +4,7 @@
  * and segment mechanics) and xhci-submit.c (TD submission).  Deliberately in
  * src/, not include/ — nothing else may look inside a ring.  Everything here
  * is static inline so each TU gets full inlining of the enqueue helpers.
+ * Both TUs bind EXEC_BASE_NAME to a local SysBase (see xhci_ring.sysBase).
  */
 
 #ifndef __XHCI_RING_PRIV_H
@@ -21,6 +22,7 @@ struct xhci_segment
 
 struct xhci_ring
 {
+	struct ExecBase *sysBase; /* the owning ctrl's cached SysBase */
 	BOOL is_event_ring;
 	u8 ep_index; /* for transfer rings, the endpoint index this ring is associated with. For event rings, unused and set to 0. */
 	u16 stream_id; /* SS bulk stream ring: the stream id this ring serves (doorbell target); 0 = default ring */
@@ -112,6 +114,7 @@ static inline BOOL last_trb_on_last_seg(struct xhci_ring *ring,
  */
 static inline void inc_enq(struct xhci_ring *ring, BOOL more_trbs_coming)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	u32 chain = le32(ring->enqueue->generic.field[3]) & TRB_CHAIN;
 	union xhci_trb *next = ++(ring->enqueue);
 
@@ -176,6 +179,7 @@ static inline dma_addr_t xhci_ring_enqueue_trb_flags(struct xhci_ring *ring,
 													 u32 field0, u32 field1, u32 field2, u32 field3,
 													 ULONG cache_flags)
 {
+	struct ExecBase *SysBase = ring->sysBase;
 	struct xhci_generic_trb *trb = &ring->enqueue->generic;
 
 	trb->field[0] = le32(field0);
@@ -222,6 +226,7 @@ static inline dma_addr_t xhci_ring_enqueue_trb_ns(struct xhci_ring *ring,
  */
 static inline void prepare_ring(struct xhci_ring *ep_ring)
 {
+	struct ExecBase *SysBase = ep_ring->sysBase;
 	union xhci_trb *next = ep_ring->enqueue;
 
 	while (last_trb(ep_ring, ep_ring->enq_seg, next))

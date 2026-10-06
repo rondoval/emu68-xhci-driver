@@ -4,7 +4,7 @@
 #include <clib/bcmpcie_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define BCMPCIE_BASE_NAME pcielibBase
 #include <proto/bcmpcie.h>
@@ -35,7 +35,7 @@
     unexpected results when user executes the device by mistake
 */
 int doNotExecute(void);
-int __attribute__((used, no_reorder)) doNotExecute(void)
+int __attribute__((used, section(".text.entry"))) doNotExecute(void)
 {
     return -1;
 }
@@ -61,7 +61,7 @@ static const APTR initTable[4];
     object will be initialized (coldstart means, before dos.library, after scheduler
     is started)
 */
-static struct Resident const xhciDeviceResident __attribute__((used)) = {
+static struct Resident const xhciDeviceResident __attribute__((used, section(".text.modhdr"))) = {
     RTC_MATCHWORD,
     (struct Resident *)&xhciDeviceResident,
     (APTR)&endOfCode,
@@ -78,7 +78,7 @@ static struct Resident const xhciDeviceResident __attribute__((used)) = {
     can be sizeof(struct Library), sizeof(struct Device) or any size necessary to
     store user defined object extending the Device structure.
 */
-APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *_SysBase asm("a6"));
+APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *SysBase asm("a6"));
 
 static const APTR funcTable[];
 static const APTR initTable[4] = {
@@ -105,6 +105,7 @@ static const APTR funcTable[] = {
 
 s32 xhci_open_pcie_library(struct XHCIDevice *base)
 {
+    struct ExecBase *SysBase = base->sysBase;
     /* v2: the typed multi-vector interrupt API (AllocIntVectors, LVO -342…) is
      * only present in bcmpcie.library 2.0.  Requesting v2 makes the open fail
      * cleanly against an older 1.x library rather than crashing on a call that
@@ -131,6 +132,7 @@ s32 xhci_open_pcie_library(struct XHCIDevice *base)
 
 static void xhci_close_libraries(struct XHCIDevice *base)
 {
+    struct ExecBase *SysBase = base->sysBase;
     if (base->pcieBase != NULL)
     {
         CloseLibrary(base->pcieBase);
@@ -152,6 +154,7 @@ static void xhci_close_libraries(struct XHCIDevice *base)
 
 static s32 xhci_open_libraries(struct XHCIDevice *base)
 {
+    struct ExecBase *SysBase = base->sysBase;
     if (base->utilityBase != NULL && base->gic400Base != NULL)
         return 0;
 
@@ -190,12 +193,11 @@ static void xhci_reset_prepare(APTR user)
     }
 }
 
-APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *_SysBase asm("a6"))
+APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), struct ExecBase *SysBase asm("a6"))
 {
-    (void)_SysBase;
     KprintfT("[xhci] %s: Initializing device\n", __func__);
 
-    if (!emu68_has_dcache_range_ops())
+    if (!emu68_has_dcache_range_ops(SysBase))
     {
         Kprintf("[xhci] %s: rangeops build, but Emu68 lacks dcache-range-ops rev 1 - refusing to load. Install the standard driver package or update Emu68.\n", __func__);
         ULONG size = (ULONG)base->device.dd_Library.lib_NegSize + base->device.dd_Library.lib_PosSize;
@@ -204,13 +206,14 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
     }
 
     base->segList = segList;
+    base->sysBase = SysBase;
     base->device.dd_Library.lib_Revision = DEVICE_REVISION;
     _NewMinList(&base->units);
     base->utilityBase = NULL;
     base->gic400Base = NULL;
     base->pcieBase = NULL;
 
-    if (!reset_guard_install(&base->resetGuard, xhci_reset_prepare, base,
+    if (!reset_guard_install(&base->resetGuard, SysBase, xhci_reset_prepare, base,
                              (CONST_STRPTR)"xhci.device"))
         Kprintf("[xhci] %s: reset guard install failed\n", __func__);
 
@@ -220,6 +223,7 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
 void openLib(struct IORequest *io asm("a1"), LONG unitNumber asm("d0"),
              ULONG flags asm("d1") __attribute__((unused)), struct XHCIDevice *base asm("a6"))
 {
+    struct ExecBase *SysBase = base->sysBase;
     BOOL firstOpen = FALSE;
     BOOL createdUnit = FALSE;
 
@@ -254,6 +258,7 @@ void openLib(struct IORequest *io asm("a1"), LONG unitNumber asm("d0"),
             io->io_Error = IOERR_OPENFAIL;
             return;
         }
+        unit->sysBase = base->sysBase;
         unit->device = base;
         AddTailMinList(&base->units, (struct MinNode *)unit);
         createdUnit = TRUE;
@@ -302,6 +307,7 @@ err_free_unit:
 
 ULONG closeLib(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"))
 {
+    struct ExecBase *SysBase = base->sysBase;
     struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
     KprintfT("[xhci] %s: Closing device\n", __func__);
 
@@ -329,6 +335,7 @@ ULONG closeLib(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6")
 
 ULONG expungeLib(struct XHCIDevice *base asm("a6"))
 {
+    struct ExecBase *SysBase = base->sysBase;
     KprintfT("[xhci] %s: Expunging device\n", __func__);
     if (base->device.dd_Library.lib_OpenCnt > 0)
     {
@@ -372,8 +379,9 @@ APTR extFunc(struct XHCIDevice *base asm("a6"))
  * unit commands are serialized by the unit task (io_Error is (re)initialized by
  * ProcessCommand before any handler runs); everything else is IOERR_NOCMD.
  * No QUICK_IO: every accepted request completes asynchronously. */
-void beginIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6") __attribute__((unused)))
+void beginIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"))
 {
+    struct ExecBase *SysBase = base->sysBase;
     struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;
     const UWORD cmd = io->io_Command;
 
@@ -407,8 +415,9 @@ void beginIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6") _
  * UhcdAbortFunc entry, xhci-direct.c) and a command already picked up by the
  * unit task completes naturally.  Best-effort: pull a still-queued message off
  * the port, otherwise decline.  AbortIO is a wish. */
-LONG abortIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6") __attribute__((unused)))
+LONG abortIO(struct IORequest *io asm("a1"), struct XHCIDevice *base asm("a6"))
 {
+    struct ExecBase *SysBase = base->sysBase;
     KprintfT("[xhci] %s: Aborting IO request %lx\n", __func__, io);
 
     struct XHCIUnit *unit = (struct XHCIUnit *)io->io_Unit;

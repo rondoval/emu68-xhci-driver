@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <debug.h>
 #include <config.h>
 
@@ -103,6 +105,21 @@ static inline struct pending_command *xhci_find_pending_command_by_dma(struct xh
     return NULL;
 }
 
+/* Only the head command executes, so the timeout clock is the head's: it
+ * starts when a command becomes the head, not when it was queued.  A command
+ * queued behind a slow or aborted one would otherwise reach the head with its
+ * time already spent and be aborted on the next poll. */
+static void xhci_start_head_command_clock(struct xhci_ctrl *ctrl)
+{
+    struct MinNode *head = ctrl->pending_commands.mlh_Head;
+    if (!head->mln_Succ)
+        return;
+
+    struct pending_command *cmd = (struct pending_command *)head;
+    cmd->deadline_us = get_time() + CMD_TIMEOUT_MS * 1000UL;
+    cmd->deadline_active = TRUE;
+}
+
 static void xhci_fail_timed_out_command(struct pending_command *cmd)
 {
     if (!cmd)
@@ -177,16 +194,18 @@ static void xhci_fail_timed_out_command(struct pending_command *cmd)
  * @param cmd		Command type to enqueue
  * @param req       Optional xfer to reply when the command completes
  * @param udev      Optional usb_device for slot/endpoint checks
- * Return: none
+ * Return: TRUE = on the ring with a handler waiting for its completion;
+ *         FALSE = no completion will be delivered for it
  */
-static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, u16 stream_id, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
+static BOOL xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, u16 stream_id, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
 
     dma_addr_t trb_dma = xhci_ring_enqueue_command(ctrl->cmd_ring, addr, slot_id, ep_index, stream_id, cmd);
     if (trb_dma == 0)
     {
         Kprintf("Failed to queue command TRB for cmd %s\n", xhci_command_type_name(cmd));
-        return;
+        return FALSE;
     }
 
     /* Add command handler to pending list */
@@ -194,7 +213,7 @@ static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u
     if (!pending_cmd)
     {
         Kprintf("Failed to allocate pending command\n");
-        return;
+        return FALSE;
     }
 
     pending_cmd->cmd_trb_dma = trb_dma;
@@ -202,11 +221,10 @@ static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u
     pending_cmd->ep_index = ep_index;
     pending_cmd->req = req;
     pending_cmd->type = cmd;
-    pending_cmd->deadline_us = get_time() + CMD_TIMEOUT_MS * 1000UL;
-    pending_cmd->deadline_active = TRUE;
-
     pending_cmd->complete = command_handlers[cmd];
     AddTailMinList(&ctrl->pending_commands, (struct MinNode *)pending_cmd);
+    if (ctrl->pending_commands.mlh_Head == (struct MinNode *)pending_cmd)
+        xhci_start_head_command_clock(ctrl); /* else it starts when this one becomes the head */
 
     KprintfT("Queued command type=%s trb_dma=%lx ptr=%lx slot=%lu ep=%lu pending=%lu abort=%ld\n",
              xhci_command_type_name(cmd),
@@ -221,11 +239,13 @@ static void xhci_queue_command_stream(struct xhci_ctrl *ctrl, dma_addr_t addr, u
      * progress; COMP_CMD_STOP will restart the ring once the HC has stopped. */
     if (!ctrl->cmd_abort_pending)
         xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
+
+    return TRUE;
 }
 
-static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
+static BOOL xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, trb_type cmd, struct xhci_xfer *req, struct usb_device *udev)
 {
-    xhci_queue_command_stream(ctrl, addr, slot_id, ep_index, 0, cmd, req, udev);
+    return xhci_queue_command_stream(ctrl, addr, slot_id, ep_index, 0, cmd, req, udev);
 }
 
 /*
@@ -309,18 +329,13 @@ static void handle_set_deq(struct xhci_ctrl *ctrl, struct pending_command *cmd, 
     {
         KprintfT("EP %lu was resetting, completing reset\n", (ULONG)ep_index);
         /*
-         * If this is due to e.g. STALL recovery, we need to sort out the device itself...:
-         * issue ClearFeature(CLEAR_TT_BUFFER) to the hub if its control or bulk ep and dev is behind a TT
-         * if not control ep,  issue ClearFeature(ENDPOINT_HALT) to the device.
-         * We'll do that by pushing these to fron of the pending queue.
+         * Host-side recovery is done.  The device side of a STALL episode -
+         * CLEAR_FEATURE(ENDPOINT_HALT) - is poseidon.library's job (class API
+         * or async recovery sweep), never the driver's.  The one hub-directed
+         * epilogue stays ours: control/bulk endpoints behind a TT need the
+         * hub's TT buffer cleared after a failed split.
          */
         s32 ep_type = xhci_ep_type_for_index(cmd->udev, ep_index);
-
-        if (ep_index != 0 && ep_type != USB_ENDPOINT_XFER_CONTROL)
-        {
-            /* Dispatch deferred device-side CLEAR_FEATURE after host recovery. */
-            xhci_udev_clear_feature_halt(cmd->udev, ep_index);
-        }
 
         /* For control/bulk endpoints behind a TT, clear the TT buffer on the hub. */
         if (cmd->udev->speed == USB_SPEED_FULL || cmd->udev->speed == USB_SPEED_LOW)
@@ -379,12 +394,23 @@ static void handle_stop_ring(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
     /* abort/timeout recovery: process_stop issues its per-ring Set TR Deq
      * commands itself */
-    if (xhci_ep_process_stop(ep_ctx))
+    switch (xhci_ep_process_stop(ep_ctx))
+    {
+    case EP_STOP_HANDLED:
         return;
 
-    /* ordinary stop command (or an anomalous stopped dequeue degraded here) */
-    xhci_ep_set_failed(ep_ctx);
-    xhci_flush_ep_rings(cmd->udev, ep_ctx);
+    case EP_STOP_ANOMALY:
+        /* the driver's model of the ring is wrong, but the endpoint need not die
+         * with it: retire in place and re-arm */
+        xhci_ep_degrade_coarse(ep_ctx);
+        return;
+
+    default:
+        /* ordinary stop command: retire everything and re-arm */
+        xhci_ep_set_failed(ep_ctx);
+        xhci_flush_ep_rings(cmd->udev, ep_ctx);
+        return;
+    }
 }
 
 /*
@@ -413,7 +439,10 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
      * schedule.  The LPM policy shrinks the MEL by the reported ELD; this
      * handler only re-issues the command (spec §4.23.5.2). */
     if (comp == COMP_MEL_ERR &&
-        (cmd->type == TRB_CONFIG_EP || cmd->type == TRB_EVAL_CONTEXT) && cmd->udev)
+        (cmd->type == TRB_CONFIG_EP || cmd->type == TRB_EVAL_CONTEXT) && cmd->udev &&
+        /* the retry re-issues udev->in_ctx: stack ops only.  The clear-halt
+         * toggle reset (toggle_in_ctx) fails below instead. */
+        (!cmd->req || (cmd->req->priv_flags & REQ_CTX_OP)))
     {
         struct usb_device *udev = cmd->udev;
         u32 eld = EVENT_TRB_LEN(status);
@@ -425,7 +454,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
                 xhci_xfer_complete(udev, cmd->req, UHIOERR_HOSTERROR, 0);
             return;
         }
-        xhci_configure_endpoints(udev, cmd->type == TRB_EVAL_CONTEXT, cmd->req);
+        xhci_configure_endpoints(udev, udev->in_ctx, cmd->type == TRB_EVAL_CONTEXT, cmd->req);
         return;
     }
 
@@ -458,6 +487,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
 static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     const u32 status = le32(event->event_cmd.status);
     const u32 flags = le32(event->event_cmd.flags);
 
@@ -678,6 +708,7 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
  */
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     const xhci_comp_code comp = (xhci_comp_code)GET_COMP_CODE(le32(event->event_cmd.status));
     const dma_addr_t trb_addr = (dma_addr_t)le64(event->event_cmd.cmd_trb);
 
@@ -722,7 +753,10 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 
         /* Restart only if there are still pending commands. */
         if (ctrl->pending_commands.mlh_Head->mln_Succ)
+        {
+            xhci_start_head_command_clock(ctrl);
             xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
+        }
         return;
     }
 
@@ -743,6 +777,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
         Remove((struct Node *)cmd);
         xhci_fail_timed_out_command(cmd);
         pool_free(ctrl->metaPool, cmd);
+        xhci_start_head_command_clock(ctrl);
         return;
     }
 
@@ -755,6 +790,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 
         Remove((struct Node *)cmd);
         pool_free(ctrl->metaPool, cmd);
+        xhci_start_head_command_clock(ctrl);
         return;
     }
 
@@ -781,6 +817,10 @@ void xhci_reset_ep(struct usb_device *udev, u8 ep_index)
         Kprintf("No ep context for slot %lu ep %lu\n", (ULONG)udev->slot_id, (ULONG)ep_index);
         return;
     }
+
+    Kprintf("recovering slot %lu ep %lu (hw ep state %lu)\n",
+            (ULONG)udev->slot_id, (ULONG)ep_index,
+            (ULONG)xhci_read_hw_ep_state(udev, ep_index));
 
     xhci_ep_set_resetting(ep_ctx);
 
@@ -822,6 +862,11 @@ void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16
         Kprintf("No ep context for slot %lu ep %lu\n", (ULONG)udev->slot_id, (ULONG)ep_index);
         return;
     }
+
+    /* A stream ring's Set TR Dequeue must also carry the Stream Context Type
+     * (xHCI 6.4.3.9: bits 3:1 of the dequeue field) */
+    if (stream_id)
+        deq_ptr |= SCT_FOR_CTX(SCT_PRI_TR);
 
     xhci_queue_command_stream(ctrl, deq_ptr, udev->slot_id, ep_index, stream_id, TRB_SET_DEQ, NULL, udev);
 }
@@ -867,21 +912,39 @@ void xhci_reset_device(struct usb_device *udev, struct xhci_xfer *req)
     xhci_queue_command(ctrl, 0, udev->slot_id, 0, TRB_RESET_DEV, req, udev);
 }
 
+/* TRUE while any command of this device is still on the command ring. */
+BOOL xhci_device_command_pending(struct usb_device *udev)
+{
+    struct xhci_ctrl *ctrl = udev->controller;
+
+    for (struct MinNode *node = ctrl->pending_commands.mlh_Head; node->mln_Succ; node = node->mln_Succ)
+    {
+        if (((struct pending_command *)node)->udev == udev)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 /**
  * Issue a configure endpoint command or evaluate context command
  *
  * @param udev	pointer to the Device Data Structure
+ * @param in_ctx	input context the command carries (udev->in_ctx, or
+ *              	toggle_in_ctx for the clear-halt toggle reset)
  * @param ctx_change	flag to indicate the Context has changed or NOT
  * @param req       Optional xfer to reply when the command completes
- * Return: 0 on success, -1 on failure
+ * Return: TRUE = queued, and req (if any) is retired by the command's
+ *         completion or its timeout; FALSE = nothing went out and req is
+ *         still the caller's
  */
-void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct xhci_xfer *req)
+BOOL xhci_configure_endpoints(struct usb_device *udev, struct xhci_container_ctx *in_ctx, BOOL ctx_change, struct xhci_xfer *req)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
-    struct xhci_container_ctx *in_ctx = udev->in_ctx;
 
     cache_pre_dma(in_ctx->bytes, in_ctx->size, DMA_ReadFromRAM);
-    xhci_queue_command(ctrl, (dma_addr_t)in_ctx->bytes, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
+    return xhci_queue_command(ctrl, (dma_addr_t)in_ctx->bytes, udev->slot_id, 0, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, req, udev);
 }
 
 /**

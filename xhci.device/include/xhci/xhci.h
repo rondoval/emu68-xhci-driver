@@ -20,7 +20,6 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
 #endif
 
@@ -137,6 +136,7 @@ enum XhciProfSlot
 
 struct xhci_ctrl
 {
+	struct ExecBase *sysBase; /* cached: $4 is an Amiga-bus read on PiStorm */
 	struct xhci_hccr *hccr; /* R/O registers, not need for volatile */
 	struct xhci_hcor *hcor;
 	struct xhci_doorbell_array *dba;
@@ -226,6 +226,7 @@ struct xhci_ctrl
  * case), metaPool otherwise.  Alloc and free must agree on the size class. */
 static inline dma_addr_t *xhci_td_trb_addrs_alloc(struct xhci_ctrl *ctrl, u32 num_trbs)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (likely(num_trbs <= XHCI_TD_SMALL_TRBS))
 		return slab_alloc(&ctrl->trb_addr_slab);
 	return pool_alloc(ctrl->metaPool, num_trbs * sizeof(dma_addr_t));
@@ -233,6 +234,7 @@ static inline dma_addr_t *xhci_td_trb_addrs_alloc(struct xhci_ctrl *ctrl, u32 nu
 
 static inline void xhci_td_trb_addrs_free(struct xhci_ctrl *ctrl, dma_addr_t *trb_addrs, u32 num_trbs)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	if (likely(num_trbs <= XHCI_TD_SMALL_TRBS))
 		slab_free(&ctrl->trb_addr_slab, trb_addrs);
 	else
@@ -246,6 +248,7 @@ static inline void *xhci_malloc_page_bounded(struct xhci_ctrl *ctrl, u32 size, u
 	 * boundary), so rounding the alignment up to cover the size makes the buffer never
 	 * cross the controller PAGESIZE boundary.  align must be a power of two (callers pass
 	 * XHCI_ALIGNMENT); size <= page_size for every caller. */
+	struct ExecBase *SysBase = ctrl->sysBase;
 	u32 eff = round_up_pow2_u32(size);
 	if (eff < align)
 		eff = align;

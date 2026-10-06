@@ -28,7 +28,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -85,6 +85,7 @@ static inline u16 ctx_op_cmd(const struct xhci_xfer *io)
  * back into the client IOStdReq, retire the shadow, reply the client. */
 static void ctx_shadow_complete(struct xhci_xfer *io)
 {
+    struct ExecBase *SysBase = io->sysBase;
     struct xhci_ctx_shadow *sh = (struct xhci_ctx_shadow *)io;
     struct IORequest *client = sh->client;
 
@@ -96,12 +97,14 @@ static void ctx_shadow_complete(struct xhci_xfer *io)
 
 static struct xhci_ctx_shadow *ctx_shadow_new(struct xhci_ctrl *ctrl, struct IORequest *client)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     struct xhci_ctx_shadow *sh = pool_zalloc(ctrl->metaPool, sizeof(*sh));
     if (!sh)
         return NULL;
 
     sh->client = client;
     sh->io.ctrl = ctrl;
+    sh->io.sysBase = ctrl->sysBase;
     sh->io.complete = ctx_shadow_complete;
     return sh;
 }
@@ -570,6 +573,17 @@ static void ctx_done_create(struct usb_device *udev, struct xhci_xfer *io, s8 er
     }
 }
 
+/* The software EP0 packet size commits with the hardware: an Evaluate Context
+ * the controller refused leaves both at the old size. */
+static void ctx_done_update_ep0(struct usb_device *udev, struct xhci_xfer *io, s8 err)
+{
+    if (err == UHIOERR_NO_ERROR && udev)
+    {
+        struct UhcdUpdateEp0 *op = ctx_op_data(io);
+        xhci_ep_set_max_packet_size(xhci_ep_get_context_for_index(udev, 0), op->ueo_Ep0MaxPkt);
+    }
+}
+
 static void ctx_done_configure(struct usb_device *udev, struct xhci_xfer *io, s8 err)
 {
     if (err != UHIOERR_NO_ERROR || !udev)
@@ -670,7 +684,7 @@ struct ctx_op_desc
 static const struct ctx_op_desc ctx_ops[0x10] = {
     [NSCMD_USB_CREATE_DEVICE - NSCMD_USBHCD_BASE] = {ctx_op_create_device, ctx_done_create, 0},
     [NSCMD_USB_DESTROY_DEVICE - NSCMD_USBHCD_BASE] = {ctx_op_destroy_device, NULL, CTXOP_RH_NOOP},
-    [NSCMD_USB_UPDATE_EP0 - NSCMD_USBHCD_BASE] = {ctx_op_update_ep0, NULL, CTXOP_RH_NOOP},
+    [NSCMD_USB_UPDATE_EP0 - NSCMD_USBHCD_BASE] = {ctx_op_update_ep0, ctx_done_update_ep0, CTXOP_RH_NOOP},
     [NSCMD_USB_CONFIGURE_ENDPOINTS - NSCMD_USBHCD_BASE] = {ctx_op_configure_endpoints, ctx_done_configure, CTXOP_RH_NOOP | CTXOP_RH_TOKENS},
     [NSCMD_USB_DECONFIGURE - NSCMD_USBHCD_BASE] = {ctx_op_deconfigure, ctx_done_deconfigure, CTXOP_RH_NOOP},
     [NSCMD_USB_RESET_DEVICE - NSCMD_USBHCD_BASE] = {ctx_op_reset_device, NULL, 0},
@@ -702,6 +716,7 @@ u32 xhci_ctxops_process(struct IOStdReq *client)
         client->io_Error = UHIOERR_BADPARAMS;
         return COMMAND_PROCESSED;
     }
+    struct ExecBase *SysBase = ctrl->sysBase;
 
     /* the attach handshake is synchronous with OUT fields in the client's
      * own op block — no shadow, no command-ring work */

@@ -38,6 +38,7 @@ struct XHCIDevice;
 struct XHCIUnit
 {
 	struct Unit unit;
+	struct ExecBase *sysBase; /* the device's, copied at unit creation */
 	APTR memoryPool;
 	struct XHCIDevice *device;
 
@@ -51,6 +52,7 @@ struct XHCIUnit
 	struct Interrupt irq_isr;
 	u32 irq_line;
 	BYTE irq_signal;
+	BOOL msi_enabled; /* MSI or MSI-X: the runtime gate is the vector mask, not IMAN.IE */
 	char vendor_str[5];
 	char device_str[5];
 };
@@ -59,6 +61,7 @@ struct XHCIDevice
 {
 	struct Device device;
 	ULONG segList;
+	struct ExecBase *sysBase; /* cached: $4 is an Amiga-bus read on PiStorm */
 	struct Library *utilityBase;
 	struct Library *gic400Base;
 	struct Library *pcieBase;    /* NULL until first PCIe unit opens */

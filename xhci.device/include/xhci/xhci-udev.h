@@ -15,6 +15,17 @@
 #include <xhci/xhci-xfer.h>
 #include <xhci/ch9.h>
 
+/* Recognise the stack's CLEAR_FEATURE(ENDPOINT_HALT) on the direct path.
+ * Device-side halt clearing is entirely poseidon.library's job (class API or
+ * async recovery sweep); the driver never issues one, it only watches for the
+ * request where host-side endpoint state has to follow it. */
+static inline BOOL xhci_setup_is_clear_halt(const struct UhcdSetupData *setup)
+{
+	return setup->usd_RequestType == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
+		   setup->usd_Request == USB_REQ_CLEAR_FEATURE &&
+		   le16(setup->usd_Value) == USB_ENDPOINT_HALT;
+}
+
 /* Everything is aribtrary */
 #define USB_MAX_ENDPOINT_CONTEXTS 	31
 
@@ -87,6 +98,7 @@ struct udev_suspend {
  * a struct usb_device since it is not a device.
  */
 struct usb_device {
+	struct ExecBase *sysBase;		/* controller->sysBase, copied at alloc */
 	u8    xhci_address;				/* Device address as seen by xHCI */
 	u8	slot_id;		/* Slot ID for xHCI */
 	enum usb_device_speed speed;	/* full/low/high */
@@ -143,6 +155,12 @@ struct usb_device {
 	struct xhci_container_ctx *out_ctx;
 	/* Used for addressing devices and configuration changes */
 	struct xhci_container_ctx *in_ctx;
+	/* Input context of the one driver-originated context command, the
+	 * clear-halt toggle follow-up.  The xHC reads an input context when the
+	 * command executes, not when it is queued, and the stack's context ops -
+	 * which never overlap each other - may overlap that one: it cannot share
+	 * in_ctx. */
+	struct xhci_container_ctx *toggle_in_ctx;
 	
 	struct xhci_ctrl *controller; /* xHCI controller */
 };
@@ -167,7 +185,6 @@ void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive);
 void xhci_xfer_complete(struct usb_device *udev, struct xhci_xfer *io, s8 err, u32 actual);
 
 /* Send commands to device */
-void xhci_udev_clear_feature_halt(struct usb_device *udev, u8 ep_index);
 void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type);
 
 /* Port suspend (U3) sequencing (struct udev_suspend above) */

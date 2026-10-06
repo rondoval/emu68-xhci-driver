@@ -3,7 +3,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -45,6 +45,7 @@ static struct usb_device *xhci_udev_find_child_on_port(struct usb_device *hub, u
 /* Shared allocation core for both device kinds. */
 static struct usb_device *xhci_udev_alloc_common(struct xhci_ctrl *ctrl)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     struct usb_device *udev = pool_zalloc(ctrl->metaPool, sizeof(*udev));
     if (!udev)
     {
@@ -53,6 +54,7 @@ static struct usb_device *xhci_udev_alloc_common(struct xhci_ctrl *ctrl)
     }
 
     udev->controller = ctrl;
+    udev->sysBase = ctrl->sysBase;
 
     /* Allocate the (output) device context that will be used in the HC. */
     udev->out_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_DEVICE);
@@ -74,8 +76,17 @@ static struct usb_device *xhci_udev_alloc_common(struct xhci_ctrl *ctrl)
     KprintfT("in_ctx bytes=%lx size=%lu\n",
              (ULONG)udev->in_ctx->bytes, (ULONG)udev->in_ctx->size);
 
+    udev->toggle_in_ctx = xhci_alloc_container_ctx(ctrl, XHCI_CTX_TYPE_INPUT);
+    if (!udev->toggle_in_ctx)
+    {
+        Kprintf("Failed to allocate toggle-reset in context\n");
+        goto destroy_in_ctx;
+    }
+
     return udev;
 
+destroy_in_ctx:
+    xhci_free_container_ctx(ctrl, udev->in_ctx);
 destroy_out_ctx:
     xhci_free_container_ctx(ctrl, udev->out_ctx);
 free_udev:
@@ -129,6 +140,7 @@ void xhci_udev_free(struct usb_device *udev)
 {
     if (!udev)
         return;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
@@ -136,6 +148,8 @@ void xhci_udev_free(struct usb_device *udev)
 
     xhci_udev_flush(udev, UHIOERR_TIMEOUT);
 
+    if (udev->toggle_in_ctx)
+        xhci_free_container_ctx(udev->controller, udev->toggle_in_ctx);
     if (udev->in_ctx)
         xhci_free_container_ctx(udev->controller, udev->in_ctx);
     if (udev->out_ctx)
@@ -184,10 +198,8 @@ static void xhci_udev_suspend_clear(struct usb_device *udev)
 
 /**
  * The internal (fire-and-forget EP0) xfer completion callback, installed as
- * io.complete by the internal request builders (CLEAR_FEATURE(ENDPOINT_HALT),
- * CLEAR_TT_BUFFER).  Handles both success and failure: it frees the transient
- * payload and the xfer.  The owning device is recovered from io->owner_slot
- * (an internal request carries no other device key).
+ * io.complete by the internal request builders (CLEAR_TT_BUFFER).  Handles
+ * both success and failure: it frees the transient payload and the xfer.
  */
 static void xhci_udev_internal_complete(struct xhci_xfer *io)
 {
@@ -215,10 +227,15 @@ static void xhci_udev_internal_complete(struct xhci_xfer *io)
         slab_free(&ctrl->xfer_slab, io);
 }
 
-static void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
+/* Build and issue an internal (driver-originated) request.
+ *
+ * An internal request is always EP0 control traffic on udev: the endpoint it is
+ * *about* travels in wIndex, never in the ring it rides.  A control TD is only
+ * legal on a control ring, so it goes to DCI 0's context - the endpoint whose
+ * recovery prompted the request owns no part of the routing. */
+static void xhci_udev_send_control_request(struct usb_device *udev,
                                     u8 bmRequestType, u8 bRequest,
-                                    u16 wValue, u16 wIndex, u16 wLength,
-                                    BOOL enqueue)
+                                    u16 wValue, u16 wIndex, u16 wLength)
 {
     if (!udev || !udev->controller)
         return;
@@ -229,6 +246,7 @@ static void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
         return;
 
     io->ctrl = ctrl;
+    io->sysBase = ctrl->sysBase;
     io->complete = xhci_udev_internal_complete; /* fire-and-forget: free on completion */
     io->owner_slot = udev->slot_id;
     io->type = UHCD_EPTYPE_CONTROL;
@@ -240,29 +258,23 @@ static void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
     io->setup.usd_Index = le16(wIndex);
     io->setup.usd_Length = le16(wLength);
 
-    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
+    struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, 0);
     if (!ep_ctx)
     {
-        Kprintf("No ep context for ep index %d\n", ep_index);
+        Kprintf("No EP0 context on slot %lu\n", (ULONG)udev->slot_id);
         slab_free(&ctrl->xfer_slab, io);
         return;
     }
     io->timeout_ms = 1000;
     io->flags |= XHCI_XF_TIMEOUT;
 
-    if (enqueue)
-        /* defer sending */
-        xhci_ep_enqueue(ep_ctx, io);
-    else
+    s8 err = xhci_ep_submit(ep_ctx, io);
+    if (err != UHIOERR_NO_ERROR)
     {
-        s8 err = xhci_ep_submit(ep_ctx, io);
-        if (err != UHIOERR_NO_ERROR)
-        {
-            /* fire-and-forget: retire through the internal completer, which
-             * frees the payload and the xfer */
-            io->error = err;
-            xhci_xfer_reply(io);
-        }
+        /* fire-and-forget: retire through the internal completer, which
+         * frees the payload and the xfer */
+        io->error = err;
+        xhci_xfer_reply(io);
     }
 }
 
@@ -405,27 +417,6 @@ void xhci_udev_suspend_stop_done(struct usb_device *udev)
         xhci_udev_suspend_finish(udev);
 }
 
-/* Issue an internal CLEAR_FEATURE(ENDPOINT_HALT) to endpoint (by ep_index) on udev. Fire-and-forget. */
-void xhci_udev_clear_feature_halt(struct usb_device *udev, u8 ep_index)
-{
-    if (!udev || !udev->controller || ep_index == 0)
-        return;
-
-    /* Convert ep_index (DCI-1) to USB endpoint address (number + direction bit). */
-    u8 addr = xhci_ep_index_to_address(ep_index);
-
-    /* The next stack-issued clear-halt for this endpoint is a duplicate. */
-    xhci_ep_mark_halt_synced(xhci_ep_get_context_for_index(udev, ep_index));
-
-    xhci_udev_send_control_request(udev, ep_index,
-                                   USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT,
-                                   USB_REQ_CLEAR_FEATURE,
-                                   USB_ENDPOINT_HALT /* wValue */,
-                                   addr /* wIndex */,
-                                   0 /* wLength */,
-                                   TRUE /* enqueue */);
-}
-
 /* Issue an internal CLEAR_TT_BUFFER to the parent hub for control/bulk endpoints behind a TT. */
 void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type)
 {
@@ -452,24 +443,20 @@ void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type
              (ULONG)udev->slot_id, (ULONG)epnum, (LONG)ep_type);
 
     xhci_udev_send_control_request(hub,
-                                   0, /* ep_index 0 */
                                    USB_DIR_OUT | USB_RT_PORT,
                                    HUB_CLEAR_TT_BUFFER,
                                    devinfo,
                                    (u16)udev->parent_port,
-                                   0 /* wLength */,
-                                   TRUE /* enqueue */);
+                                   0 /* wLength */);
 
     /* Control endpoints require clearing both directions. */
     if (ep_type == USB_ENDPOINT_XFER_CONTROL)
         xhci_udev_send_control_request(hub,
-                                       0, /* ep_index 0 */
                                        USB_DIR_OUT | USB_RT_PORT,
                                        HUB_CLEAR_TT_BUFFER,
                                        devinfo ^ (1 << 15), /* toggle direction bit */
                                        (u16)udev->parent_port,
-                                       0 /* wLength */,
-                                       TRUE /* enqueue */);
+                                       0 /* wLength */);
 }
 
 s32 xhci_ep_type_for_index(struct usb_device *udev, u8 ep_index)

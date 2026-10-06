@@ -18,6 +18,7 @@
 struct ep_context
 {
     struct usb_device *udev; /* back reference to device */
+    struct ExecBase *sysBase; /* udev->sysBase, copied at create */
     u8 ep_index;             /* Endpoint context index (0-30) */
     enum ep_state state;     /* Current endpoint state */
     u32 max_packet_size;     /* Cached max packet size for this endpoint */
@@ -45,11 +46,6 @@ struct ep_context
      * from the stop's completion; once clear, the ring is known stopped and
      * recovery runs synchronously against the output-context dequeue. */
     BOOL suspend_stop_pending;
-
-    /* Driver-initiated STALL recovery already sent CLEAR_FEATURE(HALT) to the
-     * device; the next stack-issued clear-halt is a duplicate and is answered
-     * without a wire request (consumed by xhci_ep_consume_halt_synced). */
-    BOOL halt_cleared_internally;
 
     /* xHCI EP Context Interval decoded to microframes-per-ESIT; set for every
      * endpoint at context creation (needed before RT hooks register). */

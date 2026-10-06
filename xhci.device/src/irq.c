@@ -5,7 +5,7 @@
 #include <clib/bcmpcie_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define GIC400_BASE_NAME unit->device->gic400Base
 #include <proto/gic400.h>
@@ -14,6 +14,7 @@
 #endif
 
 #include <iomem.h>
+#include <intserver.h>
 #include <config.h>
 #include <debug.h>
 #ifdef PROFILE
@@ -40,6 +41,40 @@ static inline void xhci_irq_enable_runtime(struct xhci_ctrl *ctrl)
 	mmio_write32(ctrl->iman_base | IMAN_IP | IMAN_IE, &ctrl->ir_set->irq_pending); /* IE=1, clear IP */
 }
 
+/*
+ * The runtime gate: shut by the interrupt server, opened again by the unit
+ * task once it has drained the event ring.
+ *
+ * MSI and MSI-X mask the vector at the PCIe root complex (MaskIntVector: a
+ * register write inside the Pi) and leave the interrupter enabled; a message
+ * the xHC sends meanwhile latches there and fires on unmask.  The xHC clears
+ * IMAN.IP by itself once the message is out.
+ * INTx, and the attach without PCI, gate the interrupter (IMAN.IE), which
+ * deasserts the line - MaskIntVector on INTx is a config-space access and not
+ * allowed from an interrupt server.
+ */
+static inline void xhci_irq_mask(struct XHCIUnit *unit)
+{
+	if (unit->msi_enabled)
+	{
+		struct Library *pcielibBase = unit->device->pcieBase;
+		MaskIntVector(unit->xhci_ctrl->pci_dev, 0);
+	}
+	else
+		xhci_irq_disable_runtime(unit->xhci_ctrl);
+}
+
+static inline void xhci_irq_unmask(struct XHCIUnit *unit)
+{
+	if (unit->msi_enabled)
+	{
+		struct Library *pcielibBase = unit->device->pcieBase;
+		UnmaskIntVector(unit->xhci_ctrl->pci_dev, 0);
+	}
+	else
+		xhci_irq_enable_runtime(unit->xhci_ctrl);
+}
+
 static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
 {
 	KprintfT("[xhci] %s: %s CMD_EIE | CMD_HSEIE\n", __func__, enable ? "enabling" : "disabling");
@@ -51,16 +86,17 @@ static inline void xhci_irq_update_cmd(struct xhci_ctrl *ctrl, BOOL enable)
 	mmio_write32(cmd, &ctrl->hcor->or_usbcmd);
 }
 
-static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *unit asm("a1"), ULONG vector asm("d0"))
+static EMU68_INTSERVER(xhci_int_isr)
+ULONG xhci_int_isr(struct ExecBase *SysBase asm("a6"), struct XHCIUnit *unit asm("a1"),
+                   ULONG vector asm("d0"))
 {
-	(void)execBase;
 	(void)vector;
 
 	struct xhci_ctrl *ctrl = unit->xhci_ctrl;
 	ULONG status = mmio_read32(&ctrl->hcor->or_usbsts) & XHCI_IRQ_ACK_MASK;
 
-	/* USBSTS.EINT is the "is this interrupt ours?" check for a shared INTx line:
-	 * when it isn't set we return 0 and let the next interrupt server run. */
+	/* Nothing flagged, so the xHC is not the one asserting: report
+	 * not-handled (Z set) and let a shared line's chain walk continue. */
 	if (!status)
 		return 0;
 
@@ -69,11 +105,9 @@ static ULONG xhci_int_isr(struct ExecBase *execBase asm("a6"), struct XHCIUnit *
 		Kprintf("[xhci] %s: fatal status interrupt (USBSTS=0x%08lx)\n", __func__, status);
 	}
 
-	/* Acking USBSTS.EINT and gating the interrupter (IMAN) deasserts the xHC's
-	 * interrupt for MSI/MSI-X and INTx alike, so no PCIe-config
-	 * PCI_COMMAND.INTX_DISABLE masking is needed. */
+	/* Ack what was flagged, then shut the gate until the task has drained */
 	mmio_write32(status & XHCI_IRQ_ACK_MASK, &ctrl->hcor->or_usbsts);
-	xhci_irq_disable_runtime(ctrl);
+	xhci_irq_mask(unit);
 
 #ifdef PROFILE
 	/* XP_IRQ_TO_TASK start: overwritten (not accumulated) on coalesced IRQs,
@@ -108,9 +142,8 @@ static inline void xhci_irq_stop(struct xhci_ctrl *ctrl)
 
 void xhci_int_rearm(struct XHCIUnit *unit)
 {
-	/* Re-enabling the xHC interrupter (IMAN) rearms the source for MSI/MSI-X and
-	 * INTx alike; events that arrived while masked re-raise the interrupt. */
-	xhci_irq_enable_runtime(unit->xhci_ctrl);
+	/* Events that arrived while the gate was shut raise the interrupt again */
+	xhci_irq_unmask(unit);
 }
 
 static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
@@ -133,6 +166,7 @@ static s32 xhci_pci_int_enable(struct XHCIUnit *unit)
 		return -1;
 	}
 
+	unit->msi_enabled = (itype != PCI_IRQ_INTX);
 	Kprintf("[xhci] %s: using %s\n", __func__,
 			itype == PCI_IRQ_MSIX ? "MSI-X" : itype == PCI_IRQ_MSI ? "MSI"
 																   : "INTx");
@@ -145,6 +179,7 @@ s32 xhci_int_enable(struct XHCIUnit *unit)
 	xhci_setup_isr(unit);
 
 	s32 result = 0;
+	unit->msi_enabled = FALSE;
 	if (!unit->xhci_ctrl->pci_dev)
 		result = AddIntServerEx((ULONG)unit->irq_line, 0, FALSE, &unit->irq_isr);
 	else
