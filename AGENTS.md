@@ -2,13 +2,19 @@
 
 ## Build
 
-- Required installed dependencies: `emu68-common`, `emu68-pcie-library`, and `emu68-gic400-library`.
-- Preferred commands:
-  - `cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain.cmake -DCMAKE_PREFIX_PATH=/path/to/emu68-driver-stack -DCMAKE_INSTALL_PREFIX=/path/to/emu68-driver-stack`
-  - `cmake --build build`
-  - `cmake --install build`
-- Debug backend: pass `-DEMU68_DEBUG_BACKEND=serial` (default `pistorm` | `serial` | `off`); selected stack-wide via `emu68-common`, `serial` links `debug.lib` and is not ROM-able.
-- The installed binary goes to `DEVS/USBHardware/xhci.device` under the selected prefix.
+This repo is a submodule of the `emu68-driver-stack` superbuild, at
+`components/emu68-xhci-driver-legacy`. Build only through the stack's container
+wrapper — never host `cmake`, since build trees are configured at `/work` inside
+the toolchain container:
+
+```sh
+cd ../..    # emu68-driver-stack root
+./scripts/docker-build.sh --target emu68-xhci-driver-legacy
+```
+
+- The prefix must already carry `emu68-common` and `emu68-pcie-library`; gic400 headers arrive transitively via `Emu68PCIe::pcie_headers`, and `gic400.library` must be present at runtime.
+- Debug backend: `EMU68_CONFIGURE_ARGS="-DEMU68_DEBUG_BACKEND=serial"` (default `pistorm` | `serial` | `off`); selected stack-wide via `emu68-common`, `serial` links `debug.lib` and is not ROM-able.
+- The stack installs this flavor under `Storage/`, so the driver lands in `install/Storage/DEVS/USBHardware/xhci.device` — beside, not on top of, the context flavor's `install/DEVS/USBHardware/xhci.device`.
 
 ## Code Handling
 
@@ -25,6 +31,6 @@
 
 - Check Problems on changed files first.
 - If changes touch shared interfaces or build outputs, validate through `emu68-driver-stack`.
-- If changes are local to the driver, a repo-local build is appropriate once `build/` has been configured.
+- If changes are local to the driver, `./scripts/docker-build.sh --target emu68-xhci-driver-legacy` from the stack root is enough.
 - Keep the internal notes in `README-internal.md` in mind for timeout, abort, and queue-depth related work, but do not treat them as a design spec.
 

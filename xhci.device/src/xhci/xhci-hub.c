@@ -9,9 +9,11 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
+
+#include <stddef.h>
 
 #include <devices/hcd_api.h>
 
@@ -85,7 +87,7 @@ static void xhci_hub_cache_ss_hub_descriptor(struct usb_device *udev, struct usb
     if (len == 0 || len > actual)
         len = (u8)(actual < sizeof(struct usb_hub_descriptor) ? actual : sizeof(struct usb_hub_descriptor));
 
-    CopyMem(hub, &udev->ss_hub_desc, len);
+    memcpy(&udev->ss_hub_desc, hub, len);
     KprintfT("Cached SS hub descriptor for addr %lu with %lu ports\n",
              (ULONG)udev->virtual_address, (ULONG)hub->bNbrPorts);
 }
@@ -126,10 +128,9 @@ static u32 xhci_hub_build_usb2_hub_descriptor(struct usb_device *udev, u8 *buf, 
     memset(&hub, 0, sizeof(hub));
 
     const u8 ports = udev->hub_num_ports;
-    u32 needed_words = ((u32)ports + 1U + 7U) / 8U;
-    const u8 needed = (u8)(needed_words < sizeof(hub.u.hs.DeviceRemovable) ? needed_words : sizeof(hub.u.hs.DeviceRemovable));
+    const u8 bytes = USB_HUB_BITMAP_BYTES(ports < USB_MAXCHILDREN ? ports : USB_MAXCHILDREN);
 
-    hub.bLength = (u8)(7U + 2U * needed);
+    hub.bLength = (u8)(offsetof(struct usb_hub_descriptor, u) + 2U * bytes);
     hub.bDescriptorType = USB_DT_HUB;
     hub.bNbrPorts = ports;
 
@@ -137,11 +138,12 @@ static u32 xhci_hub_build_usb2_hub_descriptor(struct usb_device *udev, u8 *buf, 
     hub.bPwrOn2PwrGood = udev->ss_hub_desc.bPwrOn2PwrGood;
     hub.bHubContrCurrent = udev->ss_hub_desc.bHubContrCurrent;
 
-    for (u8 i = 0; i < needed; ++i)
-        hub.u.hs.PortPowerCtrlMask[i] = 0xFF;
+    /* DeviceRemovable stays zero: every port takes removable devices.
+     * PortPwrCtrlMask follows it, all ones as USB 2.0 asks. */
+    memset(hub.u.hs.bitmaps + bytes, 0xFF, bytes);
 
     u32 actual = max_len < hub.bLength ? max_len : hub.bLength;
-    CopyMem(&hub, buf, actual);
+    memcpy(buf, &hub, actual);
     return actual;
 }
 
@@ -245,6 +247,7 @@ BOOL xhci_hub_filter_emulated_ctrl_request(struct usb_device *udev, struct USBIO
 {
     if (!udev || !io || !udev->ss_hub_emulation)
         return FALSE;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct USBSetupPacket *setup = &io->setup;
     if (setup->bRequest != USB_REQ_CLEAR_FEATURE && setup->bRequest != USB_REQ_SET_FEATURE)

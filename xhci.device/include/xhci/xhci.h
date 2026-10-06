@@ -20,7 +20,6 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
 #include <proto/exec.h>
 #endif
 
@@ -116,6 +115,7 @@ struct xhci_scratchpad
 
 struct xhci_ctrl
 {
+	struct ExecBase *sysBase; /* the unit's, copied at attach */
 	struct xhci_hccr *hccr; /* R/O registers, not need for volatile */
 	struct xhci_hcor *hcor;
 	struct xhci_doorbell_array *dba;
@@ -169,15 +169,15 @@ struct xhci_ctrl
 /* Pre-DMA flush for a buffer.  @flags is passed straight to CachePreDMA: 0 for a
  * plain clean+invalidate, or DMA_ReadFromRAM for an OUT buffer (device reads RAM)
  * which only needs a clean. */
-inline void xhci_flush_cache(void *addr, ULONG len, ULONG flags)
-{
-	CachePreDMA((APTR)addr, &len, flags);
-}
+#define xhci_flush_cache(addr, len, flags) do {                               \
+	ULONG xhci_cache_len_ = (len);                                           \
+	CachePreDMA((APTR)(addr), &xhci_cache_len_, (flags));                    \
+} while (0)
 
-inline void xhci_inval_cache(void *addr, ULONG len)
-{
-	CachePostDMA((APTR)addr, &len, 0);
-}
+#define xhci_inval_cache(addr, len) do {                                     \
+	ULONG xhci_cache_len_ = (len);                                           \
+	CachePostDMA((APTR)(addr), &xhci_cache_len_, 0);                         \
+} while (0)
 
 static inline void *xhci_malloc_page_bounded(struct xhci_ctrl *ctrl, u32 size, u32 align)
 {
@@ -186,6 +186,7 @@ static inline void *xhci_malloc_page_bounded(struct xhci_ctrl *ctrl, u32 size, u
 	 * boundary), so rounding the alignment up to cover the size makes the buffer never
 	 * cross the controller PAGESIZE boundary.  align must be a power of two (callers pass
 	 * XHCI_ALIGNMENT); size <= page_size for every caller. */
+	struct ExecBase *SysBase = ctrl->sysBase;
 	u32 eff = round_up_pow2_u32(size);
 	if (eff < align)
 		eff = align;

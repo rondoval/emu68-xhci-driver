@@ -3,7 +3,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -13,6 +13,7 @@
 
 void beginIO(struct USBIORequest *io asm("a1"), struct XHCIDevice *base asm("a6") __attribute__((unused)))
 {
+    struct ExecBase *SysBase = base->sysBase;
     struct XHCIUnit *unit = (struct XHCIUnit *)io->req.io_Unit;
 
     io->req.io_Error = ERR_NO_ERROR;

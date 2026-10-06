@@ -3,7 +3,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -55,6 +55,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address)
 {
     if (!ctrl || virtual_address > USB_MAX_ADDRESS)
         return NULL;
+    struct ExecBase *SysBase = ctrl->sysBase;
 
     if (ctrl->devices_by_virtual_address[virtual_address])
         xhci_udev_free(ctrl->devices_by_virtual_address[virtual_address]);
@@ -68,6 +69,7 @@ struct usb_device *xhci_udev_alloc(struct xhci_ctrl *ctrl, u16 virtual_address)
 
     udev->virtual_address = virtual_address;
     udev->controller = ctrl;
+    udev->sysBase = ctrl->sysBase;
     udev->speed = ctrl->pending_parent_speed;
 
     _NewMinList(&udev->configurations);
@@ -144,6 +146,7 @@ void xhci_udev_free(struct usb_device *udev)
 {
     if (!udev)
         return;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct xhci_ctrl *ctrl = udev->controller;
     if (!ctrl)
@@ -195,6 +198,7 @@ static BOOL xhci_udev_fetch_hub_descriptor(struct usb_device *udev)
 {
     if (!udev || !udev->controller)
         return FALSE;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct xhci_ctrl *ctrl = udev->controller;
 
@@ -258,6 +262,7 @@ static BOOL xhci_udev_fetch_bos(struct usb_device *udev)
 {
     if (!udev || !udev->controller)
         return FALSE;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct xhci_ctrl *ctrl = udev->controller;
 
@@ -306,6 +311,7 @@ static BOOL xhci_udev_fetch_bos(struct usb_device *udev)
 /* Hooks for responding to requests for lower layer */
 void xhci_udev_io_reply_failed(struct xhci_ctrl *ctrl, struct USBIORequest *io, s8 err)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     if (io)
     {
         io->req.io_Error = err;
@@ -403,6 +409,7 @@ static void xhci_udev_op_clear(struct usb_device *udev)
  * SET_CONFIGURATION travels onward as the command's completion request). */
 static void xhci_udev_do_set_config(struct usb_device *udev, struct USBIORequest *req)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     const u8 config_value = (u8)(le16(req->setup.wValue) & 0xffU);
     s8 ret = xhci_set_configuration(udev, config_value);
     if (ret != ERR_NO_ERROR)
@@ -444,6 +451,7 @@ void xhci_udev_run_pending_set_config(struct usb_device *udev)
  * free; a header-validation give-up leaves *pbuf for the caller to free. */
 static BOOL xhci_udev_bos_prefetch_phase1(struct usb_device *udev, u8 **pbuf)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
     u8 *buf = *pbuf;
 
@@ -456,7 +464,7 @@ static BOOL xhci_udev_bos_prefetch_phase1(struct usb_device *udev, u8 **pbuf)
     u16 total = le16(hdr->wTotalLength);
     if (total <= (u16)sizeof(struct usb_bos_descriptor) || total > 512u)
     {
-        Kprintf("BOS wTotalLength %u out of range\n", (unsigned)total);
+        Kprintf("BOS wTotalLength %lu out of range\n", (unsigned)total);
         return FALSE;
     }
 
@@ -548,6 +556,7 @@ run_set_config:
  */
 static void xhci_udev_complete_internal(struct usb_device *udev, struct USBIORequest *io)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
 
     /* Hub descriptor pre-fetch completion: now run the full
@@ -597,6 +606,7 @@ void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
 {
     if (!udev || !udev->controller)
         return;
+    struct ExecBase *SysBase = udev->sysBase;
 
     struct xhci_ctrl *ctrl = udev->controller;
     struct USBIORequest *io = pool_zalloc(ctrl->metaPool, sizeof(*io));
@@ -618,7 +628,7 @@ void xhci_udev_send_control_request(struct usb_device *udev, u8 ep_index,
     struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
     if (!ep_ctx)
     {
-        Kprintf("No ep context for ep index %d\n", ep_index);
+        Kprintf("No ep context for ep index %ld\n", ep_index);
         pool_free(ctrl->metaPool, io);
         return;
     }
@@ -1222,6 +1232,7 @@ static void xhci_udev_parse_control_message(struct usb_device *udev, struct USBI
 
 void xhci_udev_io_reply_data(struct usb_device *udev, struct USBIORequest *io, s8 err, u32 actual)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     if (!io || !udev)
         return;
 
@@ -1298,6 +1309,7 @@ static BOOL xhci_udev_ctrl_set_config(struct usb_device *udev, struct USBIOReque
  * through the normal STALL path on the next transfer. */
 static BOOL xhci_udev_ctrl_clear_ep_halt(struct usb_device *udev, struct USBIORequest *io)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct USBSetupPacket *setup = &io->setup;
     if (!(setup->bmRequestType == (USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_ENDPOINT) &&
           setup->bRequest == USB_REQ_CLEAR_FEATURE &&
@@ -1350,6 +1362,7 @@ static BOOL xhci_udev_ctrl_hub_suspend(struct usb_device *udev, struct USBIORequ
 
 static s8 xhci_udev_send_ctrl_first(struct usb_device *udev, struct USBIORequest *io, u32 timeout_ms)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     KprintfT("bmReqType=%02lx bReq=%02lx wValue=%04lx wIndex=%04lx wLength=%04lx\n",
              (ULONG)io->setup.bmRequestType,
              (ULONG)io->setup.bRequest,

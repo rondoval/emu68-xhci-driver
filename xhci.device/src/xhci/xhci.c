@@ -19,6 +19,8 @@
  * The quirk devices support hasn't been given yet.
  */
 
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <exec/memory.h>
 
 #include <debug.h>
@@ -73,6 +75,7 @@ static u32 xhci_get_page_size(struct xhci_ctrl *ctrl)
  */
 static s32 xhci_scratchpad_alloc(struct xhci_ctrl *ctrl)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	struct xhci_hccr *hccr = ctrl->hccr;
 
 	u32 num_sp = HCS_MAX_SCRATCHPAD(mmio_read32(&hccr->cr_hcsparams2));
@@ -128,6 +131,7 @@ static void xhci_scratchpad_free(struct xhci_ctrl *ctrl)
 {
 	if (!ctrl->scratchpad)
 		return;
+	struct ExecBase *SysBase = ctrl->sysBase;
 
 	ctrl->dcbaa->dev_context_ptrs[0] = 0;
 
@@ -149,6 +153,7 @@ static void xhci_scratchpad_free(struct xhci_ctrl *ctrl)
 static s32 xhci_mem_init(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
 						 struct xhci_hcor *hcor)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	uint32_t val;
 
 	/* DCBAA initialization */
@@ -583,6 +588,7 @@ static void xhci_lowlevel_stop(struct xhci_ctrl *ctrl)
 
 s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hcor *hcor)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	KprintfT("ctrl=%lx, hccr=%lx, hcor=%lx\n", ctrl, hccr, hcor);
 
 	s32 ret = xhci_reset(hcor);
@@ -593,7 +599,7 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 	 * Emu68 (Pi-DRAM) RAM the PCIe engine can reach, so the DMA pool is region-restricted;
 	 * with no device tree there is no reachable region and we refuse to attach.  CPU-only
 	 * metadata uses a separate ordinary Exec pool. */
-	dma_mem_init(&ctrl->dma_ctx);
+	dma_mem_init(&ctrl->dma_ctx, SysBase);
 	ctrl->dmaPool = dma_pool_create(&ctrl->dma_ctx);
 	ctrl->metaPool = CreatePool(MEMF_FAST | MEMF_PUBLIC, 16384, 8192);
 	if (ctrl->dmaPool == NULL || ctrl->metaPool == NULL)
@@ -604,19 +610,19 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 	KprintfT("memory pools created: dma=%lx meta=%lx\n", (ULONG)ctrl->dmaPool, (ULONG)ctrl->metaPool);
 
 	xhci_td_slab_init(ctrl);
-	slab_cache_init(&ctrl->trb_addr_slab, ctrl->metaPool, NULL,
+	slab_cache_init(&ctrl->trb_addr_slab, SysBase, ctrl->metaPool, NULL,
 					XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t), DMA_ALIGN_MIN, 256);
 
 	/* Ring segments: one slab, slot = obj_align = seg_size (a power of two), so every
 	 * slot is self-aligned and never crosses a 64 KB page boundary.  quirks are set
 	 * before xhci_register, so the size is known here. */
 	u32 seg_size = (ctrl->quirks & XHCI_QUIRK_TRB_OVERFETCH) ? 2U * SEGMENT_SIZE : SEGMENT_SIZE;
-	slab_cache_init(&ctrl->seg_slab, ctrl->metaPool, ctrl->dmaPool, seg_size, seg_size, 8);
-	slab_cache_init(&ctrl->bounce_small, ctrl->metaPool, ctrl->dmaPool,
+	slab_cache_init(&ctrl->seg_slab, SysBase, ctrl->metaPool, ctrl->dmaPool, seg_size, seg_size, 8);
+	slab_cache_init(&ctrl->bounce_small, SysBase, ctrl->metaPool, ctrl->dmaPool,
 					XHCI_BOUNCE_SMALL_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_SMALL_CAP);
-	slab_cache_init(&ctrl->bounce_med, ctrl->metaPool, ctrl->dmaPool,
+	slab_cache_init(&ctrl->bounce_med, SysBase, ctrl->metaPool, ctrl->dmaPool,
 					XHCI_BOUNCE_MED_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_MED_CAP);
-	slab_cache_init(&ctrl->bounce_large, ctrl->metaPool, ctrl->dmaPool,
+	slab_cache_init(&ctrl->bounce_large, SysBase, ctrl->metaPool, ctrl->dmaPool,
 					XHCI_BOUNCE_LARGE_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_LARGE_CAP);
 
 	_NewMinList(&ctrl->pending_commands);
@@ -645,6 +651,7 @@ err:
 
 void xhci_deregister(struct xhci_ctrl *ctrl)
 {
+	struct ExecBase *SysBase = ctrl->sysBase;
 	xhci_lowlevel_stop(ctrl);
 	xhci_cleanup(ctrl);
 

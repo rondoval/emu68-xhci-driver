@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
+#define __NOLIBBASE__
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <debug.h>
 #include <config.h>
 
@@ -97,6 +99,21 @@ static inline struct pending_command *xhci_find_pending_command_by_dma(struct xh
     return NULL;
 }
 
+/* Only the head command executes, so the timeout clock is the head's: it
+ * starts when a command becomes the head, not when it was queued.  A command
+ * queued behind a slow or aborted one would otherwise reach the head with its
+ * time already spent and be aborted on the next poll. */
+static void xhci_start_head_command_clock(struct xhci_ctrl *ctrl)
+{
+    struct MinNode *head = ctrl->pending_commands.mlh_Head;
+    if (!head->mln_Succ)
+        return;
+
+    struct pending_command *cmd = (struct pending_command *)head;
+    cmd->deadline_us = get_time() + CMD_TIMEOUT_MS * 1000UL;
+    cmd->deadline_active = TRUE;
+}
+
 static void xhci_fail_timed_out_command(struct xhci_ctrl *ctrl, struct pending_command *cmd)
 {
     if (!cmd)
@@ -158,6 +175,7 @@ static void xhci_fail_timed_out_command(struct xhci_ctrl *ctrl, struct pending_c
  */
 static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot_id, u8 ep_index, trb_type cmd, struct USBIORequest *req, struct usb_device *udev)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
 
     dma_addr_t trb_dma = xhci_ring_enqueue_command(ctrl->cmd_ring, addr, slot_id, ep_index, cmd);
     if (trb_dma == NULL)
@@ -179,11 +197,10 @@ static void xhci_queue_command(struct xhci_ctrl *ctrl, dma_addr_t addr, u32 slot
     pending_cmd->ep_index = ep_index;
     pending_cmd->req = req;
     pending_cmd->type = cmd;
-    pending_cmd->deadline_us = get_time() + CMD_TIMEOUT_MS * 1000UL;
-    pending_cmd->deadline_active = TRUE;
-
     pending_cmd->complete = command_handlers[cmd];
     AddTailMinList(&ctrl->pending_commands, (struct MinNode *)pending_cmd);
+    if (ctrl->pending_commands.mlh_Head == (struct MinNode *)pending_cmd)
+        xhci_start_head_command_clock(ctrl); /* else it starts when this one becomes the head */
 
     KprintfT("Queued command type=%s trb_dma=%lx ptr=%lx slot=%lu ep=%lu vaddr=%ld pending=%lu abort=%ld\n",
              xhci_command_type_name(cmd),
@@ -437,7 +454,10 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
      * SET_FEATURE(U1/U2_ENABLE) until it is in the Configured state.  The MEL
      * Evaluate Context it issues resumes the sequence here. */
     if (cmd->type == TRB_EVAL_CONTEXT)
+    {
+        xhci_ep0_commit_max_packet(cmd->udev);
         xhci_udev_op_advance(cmd->udev, UDEV_OP_EVENT_MEL_EVAL_DONE);
+    }
 
     if (cmd->req)
     {
@@ -451,6 +471,7 @@ static void handle_config_ep(struct xhci_ctrl *ctrl, struct pending_command *cmd
 
 static void handle_enable_slot(struct xhci_ctrl *ctrl, struct pending_command *cmd, union xhci_trb *event)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     const u32 status = le32(event->event_cmd.status);
     const u32 flags = le32(event->event_cmd.flags);
 
@@ -668,6 +689,7 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
  */
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 {
+    struct ExecBase *SysBase = ctrl->sysBase;
     const xhci_comp_code comp = (xhci_comp_code)GET_COMP_CODE(le32(event->event_cmd.status));
     const dma_addr_t trb_addr = (dma_addr_t)le64(event->event_cmd.cmd_trb);
 
@@ -712,7 +734,10 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 
         /* Restart only if there are still pending commands. */
         if (ctrl->pending_commands.mlh_Head->mln_Succ)
+        {
+            xhci_start_head_command_clock(ctrl);
             xhci_db_ring(ctrl->dba, 0, DB_VALUE_HOST);
+        }
         return;
     }
 
@@ -733,6 +758,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
         Remove((struct Node *)cmd);
         xhci_fail_timed_out_command(ctrl, cmd);
         pool_free(ctrl->metaPool, cmd);
+        xhci_start_head_command_clock(ctrl);
         return;
     }
 
@@ -745,6 +771,7 @@ void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event)
 
         Remove((struct Node *)cmd);
         pool_free(ctrl->metaPool, cmd);
+        xhci_start_head_command_clock(ctrl);
         return;
     }
 
@@ -840,6 +867,7 @@ void xhci_reset_device(struct usb_device *udev)
  */
 void xhci_configure_endpoints(struct usb_device *udev, BOOL ctx_change, struct USBIORequest *req)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct xhci_ctrl *ctrl = udev->controller;
     struct xhci_container_ctx *in_ctx = udev->in_ctx;
 

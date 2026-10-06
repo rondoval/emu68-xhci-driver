@@ -5,7 +5,7 @@
 #include <clib/utility_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #define UTILITY_BASE_NAME ep_ctx->udev->controller->utilityBase
 #include <proto/utility.h>
@@ -39,6 +39,7 @@
 struct ep_context
 {
     struct usb_device *udev; /* back reference to device */
+    struct ExecBase *sysBase; /* udev->sysBase, copied at create */
     u8 ep_index;             /* Endpoint context index (0-30) */
     enum ep_state state;     /* Current endpoint state */
     u32 max_packet_size;     /* Cached max packet size for this endpoint */
@@ -122,13 +123,15 @@ static void xhci_ep_destroy_rt_staging_slab(struct ep_context *ep_ctx)
 
 BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     struct ep_context *ep_ctx = pool_zalloc(udev->controller->metaPool, sizeof(struct ep_context));
     if (!ep_ctx)
     {
-        Kprintf("Failed to allocate ep_context for EP %d\n", ep_index);
+        Kprintf("Failed to allocate ep_context for EP %ld\n", ep_index);
         return FALSE;
     }
     ep_ctx->udev = udev;
+    ep_ctx->sysBase = udev->sysBase;
     ep_ctx->ep_index = ep_index;
     xhci_ep_transition(ep_ctx, USB_DEV_EP_STATE_IDLE);
     ep_ctx->max_packet_size = max_packet_size;
@@ -139,7 +142,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
     ep_ctx->ring = xhci_ring_alloc(udev->controller, XHCI_INITIAL_SEGMENTS_PER_RING, /*link_trbs*/ TRUE, /*is_event_ring*/ FALSE, ep_index, max_packet_size);
     if (!ep_ctx->active_tds || !ep_ctx->ring)
     {
-        Kprintf("Failed to create resources for EP %d\n", ep_index);
+        Kprintf("Failed to create resources for EP %ld\n", ep_index);
         if (ep_ctx->active_tds)
             xhci_td_destroy_list(ep_ctx->active_tds, ERR_ALLOC_ERROR);
         if (ep_ctx->ring)
@@ -156,6 +159,7 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
 
 void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code)
 {
+    struct ExecBase *SysBase = udev->sysBase;
     for (int i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
     {
         struct ep_context *ep_ctx = udev->ep_context[i];
@@ -245,6 +249,7 @@ void xhci_ep_set_failed(struct ep_context *ep_ctx)
 
 void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     if (io->driver_private_flags & REQ_ENQUEUED)
         AddHeadMinList(&ep_ctx->pending_reqs, (struct MinNode *)io);
     else
@@ -260,6 +265,7 @@ void xhci_ep_enqueue(struct ep_context *ep_ctx, struct USBIORequest *io)
 
 static void xhci_ep_schedule_next(struct ep_context *ep_ctx)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)))
     {
@@ -305,6 +311,7 @@ void xhci_ep_set_idle(struct ep_context *ep_ctx)
 
 void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct USBIORequest *req, dma_addr_t *trb_addrs, u32 timeout_ms, u32 trb_count)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     if (!trb_addrs || trb_count == 0)
     {
         Kprintf("Invalid TRB list for EP %lu\n", (ULONG)ep_ctx->ep_index);
@@ -333,6 +340,7 @@ void xhci_ep_set_receiving(struct ep_context *ep_ctx, struct USBIORequest *req, 
 BOOL xhci_ep_set_receiving_rt(struct ep_context *ep_ctx, const struct xhci_dma_span *span,
                               u16 frame, u16 dir, BOOL staging, dma_addr_t *trb_addrs, u32 trb_count)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     if (!xhci_td_add_rt(ep_ctx->active_tds, span, frame, dir, staging, trb_addrs, trb_count))
     {
         Kprintf("Failed to add RT TD to active list\n");
@@ -371,6 +379,7 @@ static BOOL xhci_ep_has_stop_abort_requests(struct ep_context *ep_ctx)
 
 static BOOL xhci_ep_append_stop_abort_request(struct ep_context *ep_ctx, struct USBIORequest *abort_req)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     IOReqNode *node = pool_alloc(ep_ctx->udev->controller->metaPool, sizeof(*node));
     if (!node)
         return FALSE;
@@ -382,6 +391,7 @@ static BOOL xhci_ep_append_stop_abort_request(struct ep_context *ep_ctx, struct 
 
 static void xhci_ep_clear_stop_processing(struct ep_context *ep_ctx)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->stop_abort_reqs)) != NULL)
         pool_free(ep_ctx->udev->controller->metaPool, node);
@@ -564,6 +574,7 @@ inline static u32 xhci_ep_get_active_td_count(struct ep_context *ep_ctx)
 
 void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     struct MinNode *node;
     while ((node = RemHeadMinList(&ep_ctx->pending_reqs)) != NULL)
     {
@@ -668,6 +679,7 @@ static void xhci_ep_set_rt_stopped(struct ep_context *ep_ctx)
 
 s8 xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     if (!req || !ep_ctx)
         return FALSE;
 
@@ -709,6 +721,7 @@ s8 xhci_ep_rt_iso_add_handler(struct ep_context *ep_ctx, struct USBIORequest *re
 
 s8 xhci_ep_rt_iso_rem_handler(struct ep_context *ep_ctx, struct USBIORequest *req)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     if (!req || !ep_ctx)
     {
         Kprintf("Invalid parameters to remove RT ISO handler\n");
@@ -749,7 +762,7 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, APTR buffer, u32 length, u32 a
     if (rt_buffer_req.data)
     {
         u32 copy_len = act_len < rt_buffer_req.length ? act_len : rt_buffer_req.length;
-        CopyMem(buffer, rt_buffer_req.data, copy_len);
+        memcpy(rt_buffer_req.data, buffer, copy_len);
         rt_buffer_req.length = copy_len;
 
         CallHookPkt(ep_ctx->rt->hooks->input_done_hook, ep_ctx->rt->hooks, &rt_buffer_req);
@@ -912,6 +925,7 @@ static void xhci_ep_notify_rt_iso_stopped(struct ep_context *ep_ctx)
 {
     if (!ep_ctx || !ep_ctx->rt)
         return;
+    struct ExecBase *SysBase = ep_ctx->sysBase;
 
     struct USBIORequest *stop_req = ep_ctx->rt->stop_pending;
 
@@ -954,6 +968,7 @@ void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx)
 
 s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
 {
+    struct ExecBase *SysBase = ep_ctx->sysBase;
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_STOPPED)
     {
         Kprintf("EP not in RT_ISO_STOPPED\n");
@@ -976,7 +991,7 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
      * and the target inflight depth.  OUT endpoints have no staging buffer. */
     if (ep_ctx->rt->direction == DIRECTION_IN && ep_ctx->max_packet_size > 0)
     {
-        slab_cache_init(&ep_ctx->rt->in_staging_slab,
+        slab_cache_init(&ep_ctx->rt->in_staging_slab, SysBase,
                         ep_ctx->udev->controller->metaPool,
                         ep_ctx->udev->controller->dmaPool,
                         ep_ctx->max_packet_size,

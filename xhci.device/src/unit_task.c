@@ -4,7 +4,7 @@
 #include <clib/timer_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #include <proto/timer.h>
 #endif
@@ -23,6 +23,7 @@
 
 static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
 {
+    struct ExecBase *SysBase = unit->sysBase;
     // Initialize the built in msg port, we'll receive commands here
     _NewMinList((struct MinList *)&unit->unit.unit_MsgPort.mp_MsgList);
     unit->unit.unit_MsgPort.mp_SigTask = FindTask(NULL);
@@ -140,6 +141,7 @@ free_signals:
 
 s32 UnitTaskStart(struct XHCIUnit *unit)
 {
+    struct ExecBase *SysBase = unit->sysBase;
     KprintfT("[xhci] %s: xhci task starting\n", __func__);
 
     // Get all memory we need for the receiver task
@@ -211,6 +213,7 @@ void UnitTaskStop(struct XHCIUnit *unit)
 {
     if (!unit->task)
         return;
+    struct ExecBase *SysBase = unit->sysBase;
 
     KprintfT("[xhci] %s: xhci task stopping\n", __func__);
 

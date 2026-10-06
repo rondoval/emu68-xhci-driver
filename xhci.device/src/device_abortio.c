@@ -3,7 +3,7 @@
 #include <clib/exec_protos.h>
 #else
 #define __NOLIBBASE__
-#define EXEC_BASE_NAME (*(struct ExecBase **)4UL)
+#define EXEC_BASE_NAME SysBase /* a local in every function, from its context's sysBase */
 #include <proto/exec.h>
 #endif
 
@@ -17,6 +17,7 @@ static LONG post_abort_request(struct XHCIUnit *unit, struct USBIORequest *io)
 {
     if (!unit || !unit->memoryPool)
         return -1;
+    struct ExecBase *SysBase = unit->sysBase;
 
     struct USBIORequest *abort_req = pool_zalloc(unit->memoryPool, sizeof(*abort_req));
     if (!abort_req)

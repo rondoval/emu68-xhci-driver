@@ -15,9 +15,35 @@ Configuration-relevant changes across all releases, newest first:
   stack configuration accordingly.
 
 
+# Release notes — xhci.device 5.5
+
+Changes since v5.4.
+
+---
+
+## Improvements
+
+- **Cheaper interrupts with MSI and MSI-X.** On every interrupt the driver
+  used to switch the controller's interrupter off, and on again once it had
+  caught up with the events: two register reads and two writes over the PCIe
+  link. It now masks its interrupt vector inside the Pi's PCIe controller
+  instead. INTx is handled as before. The gain needs `bcmpcie.library` 2.5;
+  the driver still works with an older one.
+
+---
+
+## Bug fixes
+
+- **A root-hub request for a port that does not exist no longer crashes.**
+  A port-status, port-feature or error-count request naming port 0 or a port
+  beyond the root hub's count dereferenced a NULL pointer. It now fails with a
+  STALL, the Request Error a real hub returns.
+
+---
+
 # Release notes — xhci.device 5.4
 
-Changes since v5.3.
+Changes since v5.3/*\
 
 ---
 
