@@ -115,6 +115,11 @@ static void UnitTask(struct XHCIUnit *unit, struct Task *parent)
             drv_timer_consume(&tick);
 
             lock_prof_obtain(&unit->xhci_ctrl->lockProf, &unit->xhci_ctrl->xfer_lock);
+            /* Events no interrupt announced: an RT-ISO IN batch cut short by
+             * an allocation failure ends on a TD whose completion is logged
+             * silently (BEI).  Collected here, before they can look like
+             * timeouts. */
+            xhci_process_event_trb(unit->xhci_ctrl);
             xhci_process_command_timeouts(unit->xhci_ctrl);
             xhci_process_event_timeouts(unit->xhci_ctrl);
             lock_prof_release(&unit->xhci_ctrl->lockProf, &unit->xhci_ctrl->xfer_lock);
