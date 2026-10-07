@@ -50,7 +50,8 @@
 /* Commands — a block in the third-party command area. The NSD standard
  * keeps 0x4000-0x7FFF and 0xC000-0xFFFF for the OS; third parties get
  * 0x0000-0x3FFF and 0x8000-0xBFFF. Fleet allocations: nvme passthrough
- * 0x8020..0x8024, this block here, netdev 0x8900..0x891f.
+ * 0x8020..0x8024, this block here, netdev 0x8900..0x891f, usbvideo.device
+ * 0x8a00..0x8a1f.
  * NSCMD_DEVICEQUERY enumerates exactly the commands a driver implements; an
  * unimplemented one is rejected with IOERR_NOCMD.
  *
@@ -463,8 +464,12 @@ typedef LONG (*UhcdAbortFunc)(APTR hcd, APTR ep_token, APTR cookie);
  * NULL message, when the stream dies without a client STOP — endpoint
  * failure or device teardown.  On the done direction the buffer block's
  * flags carry UHCD_UBF_XFER_ERROR when the interval's transfer failed on
- * the wire.  The emulated root hubs have no iso endpoints, so these ops
- * REJECT reserved handles with UHIOERR_BADPARAMS. */
+ * the wire.  An IN interval that brought no data is not reported at all,
+ * unless it failed or was missed and uih_Flags asks for those
+ * (UHCD_IHF_IN_ERRORS): then the IN hook pair is called for it with length
+ * 0 and UHCD_UBF_XFER_ERROR, in stream order.  An HCD that does not know
+ * the flag ignores it.  The emulated root hubs have no iso endpoints, so
+ * these ops REJECT reserved handles with UHIOERR_BADPARAMS. */
 struct USBIsoHooks
 {
     struct Hook *uih_OutRequestHook;    /* OUT: fill the next span to send */
@@ -473,10 +478,13 @@ struct USBIsoHooks
     struct Hook *uih_InDoneHook;        /* IN:  span filled (consume) */
     struct Hook *uih_ReleaseHook;       /* stream died without STOP; may be NULL */
     ULONG        uih_MaxPrefetch;       /* OUT: max bytes pulled ahead (0 = HCD default) */
-    UWORD        uih_Flags;             /* none defined yet */
+    UWORD        uih_Flags;             /* UHCD_IHF_* */
     UWORD        uih_Pad;
     APTR         uih_Object;            /* hook object (a2) for every call */
 };
+
+#define UHCD_IHF_IN_ERRORS      (1 << 0)    /* IN: report failed and missed intervals
+                                               that brought no data (see above) */
 
 /* The buffer-block flag UHCD_UBF_XFER_ERROR (set by the HCD on *_done calls
  * when the interval failed on the wire) lives in usbhcd_common.h. */

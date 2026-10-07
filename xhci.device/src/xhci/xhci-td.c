@@ -538,53 +538,11 @@ void xhci_td_abort_recovery(TransferDescriptorList *td_list,
                                stopped_deq_ptr & ~(dma_addr_t)EP_CTX_CYCLE_MASK);
 }
 
-/*
- * Complete - or defer - the TD containing trb_addr for a transfer event.
- *
- * A short packet on a non-final TRB records the exact transferred length
- * (bytes in the preceding data TRBs plus the short TRB's consumed bytes) and
- * keeps the TD: the controller always follows up with an event for the TD's
- * final TRB (xHCI 4.10.1.1), which consumes the TD with the recorded length.
- * *deferred tells this apart from "no TD found" (both return FALSE).
- *
- * On consumption out->act_len is the exact transferred byte count; the per-TRB
- * event residue is only trusted when no mid-TD short was seen.
- */
-BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr,
-                             u32 residue, BOOL short_packet,
-                             struct xhci_td_completion *out, BOOL *deferred)
+/* Take a TD off its list and hand its payload to the completion path. */
+static void td_consume(TransferDescriptorList *td_list, struct xhci_td *td, u32 act_len,
+                       struct xhci_td_completion *out)
 {
-    *deferred = FALSE;
-
-    if (!td_list)
-        return FALSE;
     struct ExecBase *SysBase = td_list->sysBase;
-
-    s32 idx;
-    struct xhci_td *td = find_td_by_trb(td_list, trb_addr, &idx);
-    if (!td)
-        return FALSE;
-
-    if (short_packet && (u32)idx + 1 < td->trb_count)
-    {
-        const struct xhci_generic_trb *trb = (const struct xhci_generic_trb *)(uintptr_t)trb_addr;
-        u32 trb_len = TRB_LEN(le32(trb->field[2]));
-        td->short_act_len = td_sum_trb_lengths(td, (u32)idx) +
-                            ((trb_len > residue) ? trb_len - residue : 0);
-        td->short_seen = TRUE;
-        *deferred = TRUE;
-        KprintfT("mid-TD short at TRB %ld/%lu: act_len=%lu\n",
-                 (LONG)idx, (ULONG)td->trb_count, (ULONG)td->short_act_len);
-        return FALSE;
-    }
-
-    u32 act_len;
-    if (td->short_seen)
-        act_len = td->short_act_len;
-    else if (td->length > residue)
-        act_len = td->length - residue;
-    else
-        act_len = 0;
 
     out->rt = td->is_rt_iso;
     out->act_len = act_len;
@@ -616,6 +574,58 @@ BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_add
     RemoveMinNode((struct MinNode *)td);
     xhci_td_decrease_queued(td_list, td);
     xhci_td_free(td_list, td);
+}
+
+/*
+ * Complete - or defer - the TD containing trb_addr for a transfer event.
+ *
+ * A short packet on a non-final TRB records the exact transferred length
+ * (bytes in the preceding data TRBs plus the short TRB's consumed bytes) and
+ * keeps the TD: the controller always follows up with an event for the TD's
+ * final TRB (xHCI 4.10.1.1), which consumes the TD with the recorded length.
+ * *deferred tells this apart from "no TD found" (both return FALSE).
+ *
+ * On consumption out->act_len is the exact transferred byte count; the per-TRB
+ * event residue is only trusted when no mid-TD short was seen.
+ */
+BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr,
+                             u32 residue, BOOL short_packet,
+                             struct xhci_td_completion *out, BOOL *deferred)
+{
+    *deferred = FALSE;
+
+    if (!td_list)
+        return FALSE;
+
+    s32 idx;
+    struct xhci_td *td = find_td_by_trb(td_list, trb_addr, &idx);
+    if (!td)
+        return FALSE;
+
+    if (short_packet && (u32)idx + 1 < td->trb_count)
+    {
+        const struct xhci_generic_trb *trb = (const struct xhci_generic_trb *)(uintptr_t)trb_addr;
+        u32 trb_len = TRB_LEN(le32(trb->field[2]));
+        td->short_act_len = td_sum_trb_lengths(td, (u32)idx) +
+                            ((trb_len > residue) ? trb_len - residue : 0);
+        td->short_seen = TRUE;
+        *deferred = TRUE;
+        KprintfT("mid-TD short at TRB %ld/%lu: act_len=%lu\n",
+                 (LONG)idx, (ULONG)td->trb_count, (ULONG)td->short_act_len);
+        return FALSE;
+    }
+
+    u32 act_len;
+    if (td->short_seen)
+        act_len = td->short_act_len;
+    else if (td->length > residue)
+        act_len = td->length - residue;
+    else
+        act_len = 0;
+
+    td_consume(td_list, td, act_len, out);
+    return TRUE;
+}
 
     return TRUE;
 }

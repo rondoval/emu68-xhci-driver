@@ -138,6 +138,9 @@ typedef enum
 #define TRB_IOC BIT(5)
 /* The buffer pointer contains immediate data */
 #define TRB_IDT BIT(6)
+/* Block Event Interrupt (xHCI 1.0+): the IOC event of this TRB is logged on
+ * the event ring without asserting the interrupt */
+#define TRB_BEI BIT(9)
 
 /* Control transfer TRB specific fields */
 #define TRB_DIR_IN BIT(16)
