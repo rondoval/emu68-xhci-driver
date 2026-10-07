@@ -62,12 +62,14 @@ enum xhci_submit_status xhci_submit_td(struct usb_device *udev, struct ep_contex
                                        u32 timeout_ms, s8 *err);
 
 /* RT ISO TD: no request object - the TD itself carries the payload.
- * staging_in marks an IN buffer owned by the endpoint's staging slab
- * (freed on completion/teardown).  Rides the endpoint's default ring —
- * RT-ISO endpoints never have streams. */
+ * An IN buffer belongs to the endpoint's staging slab (freed on
+ * completion/teardown).  A silent TD completes without raising an
+ * interrupt (BEI): its event waits on the ring for the next TD that does
+ * raise one.  The doorbell is the caller's:
+ * xhci_submit_giveback() after a run of TDs.  Rides the endpoint's
+ * default ring — RT-ISO endpoints never have streams. */
 s8 xhci_submit_rt_td(struct usb_device *udev, struct ep_context *ep_ctx,
-                     APTR buffer, u32 length,
-                     u16 frame, u16 dir, BOOL staging_in, BOOL defer_doorbell);
+                     APTR buffer, u32 length, u16 frame, u16 dir, BOOL silent);
 
 /* Room check against the endpoint's DEFAULT ring only (RT-ISO backpressure). */
 BOOL xhci_submit_has_room(struct ep_context *ep_ctx, u32 needed_trbs);

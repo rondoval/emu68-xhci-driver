@@ -421,6 +421,10 @@ inline static u32 xhci_td_remainder(u32 transferred,
  *                         stage.  Chain TRBs are always NORMAL.
  * @param isp              TRB_ISP or 0; applied to chained TRBs, and - inside
  *                         a control TD - to the last data TRB as well.
+ * @param ioc_bits         TRB_BEI or 0: goes with the IOC, onto the TRB that
+ *                         ends a standalone TD - the one whose event it is
+ *                         about, which is the first TRB only if the TD has
+ *                         one.  Unused within a control TD.
  * @param within_td        TRUE for a control data stage: the setup TRB owns
  *                         the deferred cycle-bit giveback, the status TD
  *                         carries the IOC, and more TRBs follow the last one.
@@ -428,7 +432,7 @@ inline static u32 xhci_td_remainder(u32 transferred,
 inline static void xhci_ring_enqueue_data_trbs(struct xhci_ring *ep_ring, dma_addr_t addr, u32 length,
 											   u32 num_trbs, u32 trb_buff_len,
 											   dma_addr_t *td_trb_addrs,
-											   u32 first_type_bits, u32 isp, BOOL within_td)
+											   u32 first_type_bits, u32 isp, u32 ioc_bits, BOOL within_td)
 {
 	const u32 chain_trb_type_bits = TRB_TYPE(TRB_NORMAL);
 
@@ -466,7 +470,7 @@ inline static void xhci_ring_enqueue_data_trbs(struct xhci_ring *ep_ring, dma_ad
 		if (num_trbs > 1)
 			field3 |= TRB_CHAIN | isp;
 		else
-			field3 |= within_td ? isp : TRB_IOC;
+			field3 |= within_td ? isp : (TRB_IOC | ioc_bits);
 
 		u32 remainder = xhci_td_remainder(running_total, trb_buff_len,
 										  length, ep_ring->max_packet_size,
@@ -499,7 +503,7 @@ inline static void xhci_ring_enqueue_control_trbs(struct xhci_ring *ep_ring, str
 		xhci_ring_enqueue_data_trbs(ep_ring, addr, io->data_length,
 									num_trbs - 2, trb_buff_len, &td_trb_addrs[1],
 									TRB_TYPE(TRB_DATA) | (in ? TRB_DIR_IN : 0),
-									in ? TRB_ISP : 0, TRUE);
+									in ? TRB_ISP : 0, 0, TRUE);
 	}
 
 	td_trb_addrs[num_trbs - 1] = xhci_ring_enqueue_status_trb(ep_ring, io);
@@ -516,7 +520,7 @@ inline static void xhci_ring_enqueue_non_control_trbs(struct xhci_ring *ep_ring,
 								num_trbs, trb_buff_len, td_trb_addrs,
 								is_iso ? (TRB_TYPE(TRB_ISOC) | iso_extra_bits) : TRB_TYPE(TRB_NORMAL),
 								(io->direction == XHCI_DIR_IN && !is_iso) ? TRB_ISP : 0,
-								FALSE);
+								0, FALSE);
 }
 
 inline static void xhci_ring_finalize_first_trb(struct usb_device *udev, struct xhci_ring *ep_ring, struct xhci_generic_trb *start_trb, BOOL defer_doorbell)
@@ -745,14 +749,15 @@ enum xhci_submit_status xhci_submit_td(struct usb_device *udev, struct ep_contex
 /*
  * RT ISO TD submission: no request object - the TD itself owns the mapped
  * span and carries {frame, dir, staging}.  Mirrors the data-stage portion of
- * xhci_submit_td for a single ISOC TD; the doorbell is deferred to the
- * scheduler's per-run xhci_submit_giveback() when defer_doorbell is set.
+ * xhci_submit_td for a single ISOC TD.  An IN buffer is always one of the
+ * endpoint's staging slab; the doorbell is always left to the scheduler's
+ * per-run xhci_submit_giveback().
  */
 s8 xhci_submit_rt_td(struct usb_device *udev, struct ep_context *ep_ctx,
-                     APTR buffer, u32 length,
-                     u16 frame, u16 dir, BOOL staging_in, BOOL defer_doorbell)
+                     APTR buffer, u32 length, u16 frame, u16 dir, BOOL silent)
 {
 	struct xhci_ctrl *ctrl = udev->controller;
+	const BOOL staging_in = (dir == XHCI_DIR_IN);
 
 	struct xhci_ring *ep_ring = xhci_ep_get_ring(ep_ctx);
 	if (!ep_ring)
@@ -792,7 +797,7 @@ s8 xhci_submit_rt_td(struct usb_device *udev, struct ep_context *ep_ctx,
 	u32 iso_bits = (ctrl->cfc_supported ? TRB_FRAME_ID(frame) : TRB_SIA) |
 				   iso_burst_bits(udev, ep_ctx, length);
 	xhci_ring_enqueue_data_trbs(ep_ring, addr, length, num_trbs, trb_buff_len, td_trb_addrs,
-								TRB_TYPE(TRB_ISOC) | iso_bits, 0, FALSE);
+								TRB_TYPE(TRB_ISOC) | iso_bits, 0, silent ? TRB_BEI : 0, FALSE);
 
 	if (!xhci_ep_set_receiving_rt(ep_ctx, &span, frame, dir, staging_in, td_trb_addrs, num_trbs))
 	{
@@ -803,6 +808,6 @@ s8 xhci_submit_rt_td(struct usb_device *udev, struct ep_context *ep_ctx,
 		return UHIOERR_OUTOFMEMORY;
 	}
 
-	xhci_ring_finalize_first_trb(udev, ep_ring, (struct xhci_generic_trb *)td_trb_addrs[0], defer_doorbell);
+	xhci_ring_finalize_first_trb(udev, ep_ring, (struct xhci_generic_trb *)td_trb_addrs[0], TRUE);
 	return UHIOERR_NO_ERROR;
 }

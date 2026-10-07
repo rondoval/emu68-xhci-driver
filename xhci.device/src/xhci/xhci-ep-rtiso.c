@@ -337,8 +337,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         u32 length = rt_buffer_req.length;
         s8 ret = xhci_submit_rt_td(ep_ctx->udev, ep_ctx,
                                    (APTR)((u8 *)rt_buffer_req.data + offset), length,
-                                   frame, XHCI_DIR_OUT, FALSE,
-                                   TRUE /* RT ISO defers doorbell to per-run giveback */);
+                                   frame, XHCI_DIR_OUT, FALSE);
         if (ret != UHIOERR_NO_ERROR)
         {
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
@@ -356,10 +355,25 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
     xhci_submit_giveback(ep_ctx->udev, ep_ctx);
 }
 
+/*
+ * The pipeline is topped up a batch at a time, and only the last TD of a
+ * batch raises its completion interrupt (the others carry BEI): an endpoint
+ * served every microframe would otherwise interrupt 8000 times a second,
+ * data or no data.  A batch is one frame's worth of TDs, so the hooks run at
+ * most a millisecond late - against a pipeline RT_ISO_IN_TARGET_FRAMES deep.
+ * The TD queued last always interrupts, so a stream that stops drains without
+ * help; a pass cut short by a failure may end on a silent TD, whose event the
+ * unit task's tick collects.  With one TD per batch (an endpoint served once
+ * a frame or less, or a pre-1.0 controller) none of this changes anything.
+ */
 static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 {
-    u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
-    while (inflight < ep_ctx->rt->inflight_tds_target)
+    const u32 batch_mask = ep_ctx->rt->in_irq_batch_mask;
+    const u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
+    if (inflight + batch_mask >= ep_ctx->rt->inflight_tds_target)
+        return;
+
+    for (u32 remaining = ep_ctx->rt->inflight_tds_target - inflight; remaining; --remaining)
     {
         /* Same backpressure rule as the OUT path: bail before alloc if no room. */
         if (!rt_ensure_room(ep_ctx))
@@ -386,15 +400,13 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 
         s8 ret = xhci_submit_rt_td(ep_ctx->udev, ep_ctx,
                                    staging, td_length, frame, XHCI_DIR_IN,
-                                   TRUE /* staging buffer, freed on completion */,
-                                   TRUE /* RT ISO defers doorbell to per-run giveback */);
+                                   ((remaining - 1U) & batch_mask) != 0 /* all but the last of a batch */);
         if (ret != UHIOERR_NO_ERROR)
         {
             slab_free(&ep_ctx->rt->in_staging_slab, staging);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
-        ++inflight;
 
         rt_advance(ep_ctx, td_length);
         KprintfT("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
@@ -470,6 +482,12 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
     const u32 uframes_per_td = ep_ctx->rt_uframes_per_esit ? (u32)ep_ctx->rt_uframes_per_esit : 1U;
     const u32 target_uframes = RT_ISO_IN_TARGET_FRAMES * 8U;
     ep_ctx->rt->inflight_tds_target = (target_uframes + uframes_per_td - 1U) / uframes_per_td;
+
+    /* One completion interrupt per frame: 8, 4 or 2 TDs for an endpoint served
+     * 8, 4 or 2 times a frame (the interval is a power of two), else 1. */
+    const u32 tds_per_frame = 8U / uframes_per_td;
+    ep_ctx->rt->in_irq_batch_mask =
+        (tds_per_frame > 1U && ep_ctx->udev->controller->hci_version >= 0x100) ? tds_per_frame - 1U : 0;
 
     /* Build the per-endpoint IN staging slab now that we know both the TD length
      * and the target inflight depth.  OUT endpoints have no staging buffer.

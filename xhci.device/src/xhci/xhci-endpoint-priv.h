@@ -107,6 +107,10 @@ struct rt_iso_state
     u32 inflight_tds_target; /* target number of inflight TDs based on scheduling horizon */
     u32 inflight_bytes;
 
+    /* IN: TDs per completion interrupt - 1 (a power of two - 1).  0 = every
+     * TD interrupts; see xhci_ep_schedule_rt_iso_in. */
+    u32 in_irq_batch_mask;
+
     u32 ist; /* IST decoded to microframes, cached at RT ISO start */
 
     /* IN staging slab: created in xhci_ep_rt_iso_start, one object per TD
