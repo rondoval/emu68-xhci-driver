@@ -587,6 +587,13 @@ static void td_consume(TransferDescriptorList *td_list, struct xhci_td *td, u32 
  *
  * On consumption out->act_len is the exact transferred byte count; the per-TRB
  * event residue is only trusted when no mid-TD short was seen.
+ *
+ * An iso ring retires its TDs in queue order, one event each.  An event that
+ * names a TD behind the oldest one therefore says the controller passed over
+ * the TDs before it without serving them (Missed Service Error, xHCI
+ * 4.10.3.2 - a 1.0 controller may report it without naming any TD).  Those
+ * come out first, oldest first and one a call, with out->missed set and
+ * nothing transferred: the caller calls again until it has the event's own TD.
  */
 BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr,
                              u32 residue, BOOL short_packet,
@@ -601,6 +608,14 @@ BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_add
     struct xhci_td *td = find_td_by_trb(td_list, trb_addr, &idx);
     if (!td)
         return FALSE;
+
+    struct xhci_td *oldest = (struct xhci_td *)td_list->list.mlh_Head;
+    out->missed = td->is_rt_iso && td != oldest;
+    if (out->missed)
+    {
+        td_consume(td_list, oldest, 0, out);
+        return TRUE;
+    }
 
     if (short_packet && (u32)idx + 1 < td->trb_count)
     {
@@ -624,9 +639,6 @@ BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_add
         act_len = 0;
 
     td_consume(td_list, td, act_len, out);
-    return TRUE;
-}
-
     return TRUE;
 }
 

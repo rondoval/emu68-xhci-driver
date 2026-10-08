@@ -224,23 +224,29 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, APTR buffer, u32 length, u32 a
 {
     struct USBIsoHooks *hooks = ep_ctx->rt->hooks;
 
-    /* Pull a destination buffer from the class, copy staged DMA into it, then signal completion. */
-    struct USBBufferRequest rt_buffer_req;
-    rt_buffer_req.frame = rt_frame;
-    rt_buffer_req.flags = 0;
-    rt_buffer_req.length = act_len;
-    rt_buffer_req.data = NULL;
-
-    CallHookPkt(hooks->uih_InRequestHook, RT_HOOK_OBJ(hooks), &rt_buffer_req);
-
-    if (rt_buffer_req.data)
+    /* An interval that brought nothing is routine on a fast endpoint and no
+     * business of the class - unless it failed and the class asked to hear of
+     * those (UHCD_IHF_IN_ERRORS). */
+    if (act_len > 0 || (ubr_flags && (hooks->uih_Flags & UHCD_IHF_IN_ERRORS)))
     {
-        u32 copy_len = act_len < rt_buffer_req.length ? act_len : rt_buffer_req.length;
-        memcpy(rt_buffer_req.data, buffer, copy_len);
-        rt_buffer_req.length = copy_len;
-        rt_buffer_req.flags = ubr_flags; /* done direction carries the wire status */
+        /* Pull a destination buffer from the class, copy staged DMA into it, then signal completion. */
+        struct USBBufferRequest rt_buffer_req;
+        rt_buffer_req.frame = rt_frame;
+        rt_buffer_req.flags = 0;
+        rt_buffer_req.length = act_len;
+        rt_buffer_req.data = NULL;
 
-        CallHookPkt(hooks->uih_InDoneHook, RT_HOOK_OBJ(hooks), &rt_buffer_req);
+        CallHookPkt(hooks->uih_InRequestHook, RT_HOOK_OBJ(hooks), &rt_buffer_req);
+
+        if (rt_buffer_req.data)
+        {
+            u32 copy_len = act_len < rt_buffer_req.length ? act_len : rt_buffer_req.length;
+            memcpy(rt_buffer_req.data, buffer, copy_len);
+            rt_buffer_req.length = copy_len;
+            rt_buffer_req.flags = ubr_flags; /* done direction carries the wire status */
+
+            CallHookPkt(hooks->uih_InDoneHook, RT_HOOK_OBJ(hooks), &rt_buffer_req);
+        }
     }
 
     xhci_ep_rt_iso_update_counters(ep_ctx, length);

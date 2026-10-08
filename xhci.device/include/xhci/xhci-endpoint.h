@@ -34,6 +34,7 @@ struct xhci_ring;
 struct xhci_td_completion
 {
     BOOL rt;
+    BOOL missed;              /* rt: passed over by the controller; the event's own TD is still queued */
     struct xhci_xfer *req; /* !rt */
     APTR rt_buffer;           /* rt: CPU buffer (staging for IN, class buffer for OUT) */
     u32 rt_length;            /* rt: submitted length */

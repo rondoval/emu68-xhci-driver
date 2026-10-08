@@ -53,7 +53,7 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
 #define ep_handle_default(udev, ep_ctx, event) ((void)0)
 #endif
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
-static void ep_handle_rt_iso(struct ep_context *ep_ctx, const struct xhci_td_completion *done, xhci_comp_code comp);
+static void rt_iso_deliver(struct ep_context *ep_ctx, const struct xhci_td_completion *done, xhci_comp_code comp);
 static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void ep_handle_suspended(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
@@ -330,30 +330,43 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     /* A short packet on a non-final TRB only records the exact transferred
      * length; the controller follows up with the final-TRB event, which
      * completes the TD (and, for control TDs, the status stage).  All other
-     * events consume the TD with an exact act_len. */
+     * events consume the TD with an exact act_len.
+     * On an iso stream the TDs the controller passed over on the way to the
+     * event's own come out first, as failed intervals, so the class sees the
+     * stream in order. */
     struct xhci_td_completion done;
     BOOL deferred;
-    if (!xhci_ep_complete_by_trb(ep_ctx, (dma_addr_t)trb_addr,
-                                 EVENT_TRB_LEN(transfer_len),
-                                 comp == COMP_SHORT_TX,
-                                 &done, &deferred))
+    do
     {
-        if (!deferred)
-            Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %lu\n",
-                    (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
-        return;
-    }
+        if (!xhci_ep_complete_by_trb(ep_ctx, (dma_addr_t)trb_addr,
+                                     EVENT_TRB_LEN(transfer_len),
+                                     comp == COMP_SHORT_TX,
+                                     &done, &deferred))
+        {
+            if (!deferred)
+                Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %lu\n",
+                        (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
+            return;
+        }
+
+        if (done.rt)
+        {
+            const xhci_comp_code td_comp = done.missed ? COMP_MISSED_INT : comp;
+            if (td_comp == COMP_MISSED_INT)
+                Kprintf("RT ISO missed-service (%s) addr=%lu ep=%lu frame=%lu len=%lu\n",
+                        done.missed ? "skipped" : "reported",
+                        (ULONG)udev->slot_id,
+                        (ULONG)ep_index,
+                        (ULONG)done.rt_frame,
+                        (ULONG)done.rt_length);
+
+            rt_iso_deliver(ep_ctx, &done, td_comp);
+        }
+    } while (done.missed);
 
     if (done.rt)
     {
-        if (comp == COMP_MISSED_INT)
-            Kprintf("RT ISO missed-service addr=%lu ep=%lu frame=%lu len=%lu\n",
-                    (ULONG)udev->slot_id,
-                    (ULONG)ep_index,
-                    (ULONG)done.rt_frame,
-                    (ULONG)done.rt_length);
-
-        ep_handle_rt_iso(ep_ctx, &done, comp);
+        xhci_ep_schedule_rt_iso(ep_ctx);
         return;
     }
 
@@ -393,25 +406,24 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     xhci_ep_set_idle(ep_ctx);
 }
 
-static void ep_handle_rt_iso(struct ep_context *ep_ctx, const struct xhci_td_completion *done, xhci_comp_code comp)
+/* Hand one retired RT ISO TD to the stream's hooks. */
+static void rt_iso_deliver(struct ep_context *ep_ctx, const struct xhci_td_completion *done, xhci_comp_code comp)
 {
     /* the *_done hooks' buffer request reports the wire status (§10.3) */
     const u16 ubr_flags = (comp == COMP_SUCCESS || comp == COMP_SHORT_TX ||
                            comp == COMP_STOP || comp == COMP_STOP_INVAL || comp == COMP_STOP_SHORT)
                               ? 0
                               : UHCD_UBF_XFER_ERROR;
+    /* a missed interval moved nothing, whatever its event's length field says */
+    const u32 act_len = (comp == COMP_MISSED_INT) ? 0 : done->act_len;
 
     if (done->rt_dir == XHCI_DIR_IN)
     {
-        if (done->act_len > 0)
-            xhci_ep_rt_iso_in(ep_ctx, done->rt_buffer, done->rt_length, done->act_len, done->rt_frame, ubr_flags);
-
+        xhci_ep_rt_iso_in(ep_ctx, done->rt_buffer, done->rt_length, act_len, done->rt_frame, ubr_flags);
         xhci_ep_free_rt_iso_buffer(ep_ctx, done->rt_buffer);
     }
     else
-        xhci_ep_rt_iso_out(ep_ctx, done->rt_buffer, done->rt_length, done->act_len, done->rt_frame, ubr_flags);
-
-    xhci_ep_schedule_rt_iso(ep_ctx);
+        xhci_ep_rt_iso_out(ep_ctx, done->rt_buffer, done->rt_length, act_len, done->rt_frame, ubr_flags);
 }
 
 /* Stop Endpoint completions ahead of a port suspend (U3): the TD stays queued
