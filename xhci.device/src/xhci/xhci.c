@@ -707,3 +707,14 @@ void xhci_deregister(struct xhci_ctrl *ctrl)
 
 	memset(ctrl, 0, sizeof(struct xhci_ctrl));
 }
+
+void xhci_sleep_unlocked(struct xhci_ctrl *ctrl, u32 milliseconds)
+{
+	struct ExecBase *SysBase = ctrl->sysBase;
+	if (milliseconds == 0 || !ctrl->sleep_timer.req)
+		return;
+
+	lock_prof_release(&ctrl->lockProf, &ctrl->xfer_lock);
+	drv_timer_sleep_ms(&ctrl->sleep_timer, milliseconds);
+	lock_prof_obtain(&ctrl->lockProf, &ctrl->xfer_lock);
+}

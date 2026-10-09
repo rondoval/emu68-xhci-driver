@@ -199,7 +199,8 @@ static void xhci_udev_suspend_clear(struct usb_device *udev)
 /**
  * The internal (fire-and-forget EP0) xfer completion callback, installed as
  * io.complete by the internal request builders (CLEAR_TT_BUFFER).  Handles
- * both success and failure: it frees the transient payload and the xfer.
+ * both success and failure: it tells the endpoint the request was about, if
+ * one waits for it, and frees the transient payload and the xfer.
  */
 static void xhci_udev_internal_complete(struct xhci_xfer *io)
 {
@@ -221,6 +222,17 @@ static void xhci_udev_internal_complete(struct xhci_xfer *io)
                     (ULONG)io->setup.usd_Request, (ULONG)le16(io->setup.usd_Value), (LONG)io->error);
     }
 
+    /* By slot and index, not by pointer: the device may be gone by now.  (A
+     * slot handed out anew within the request's timeout could see another
+     * endpoint's TT hold lifted early - which only costs that one the wait.) */
+    if (ctrl && io->about_slot)
+    {
+        struct usb_device *about = ctrl->devices_by_slot_id[io->about_slot];
+        struct ep_context *ep_ctx = about ? xhci_ep_get_context_for_index(about, io->about_ep) : NULL;
+        if (ep_ctx)
+            xhci_ep_tt_cleared(ep_ctx);
+    }
+
     if (ctrl && io->data)
         dma_free(ctrl->dmaPool, io->data);
     if (ctrl)
@@ -230,20 +242,26 @@ static void xhci_udev_internal_complete(struct xhci_xfer *io)
 /* Build and issue an internal (driver-originated) request.
  *
  * An internal request is always EP0 control traffic on udev: the endpoint it is
- * *about* travels in wIndex, never in the ring it rides.  A control TD is only
- * legal on a control ring, so it goes to DCI 0's context - the endpoint whose
- * recovery prompted the request owns no part of the routing. */
-static void xhci_udev_send_control_request(struct usb_device *udev,
+ * *about* travels in the setup packet, never in the ring it rides.  A control
+ * TD is only legal on a control ring, so it goes to DCI 0's context - the
+ * endpoint whose recovery prompted the request owns no part of the routing.
+ *
+ * about_slot / about_ep name an endpoint that waits for the request (slot 0 =
+ * none): it hears of the completion through xhci_ep_tt_cleared().  TRUE = the
+ * request went out, or failed at once - either way its completion has been or
+ * will be delivered; FALSE = there never was a request. */
+static BOOL xhci_udev_send_control_request(struct usb_device *udev,
                                     u8 bmRequestType, u8 bRequest,
-                                    u16 wValue, u16 wIndex, u16 wLength)
+                                    u16 wValue, u16 wIndex, u16 wLength,
+                                    u8 about_slot, u8 about_ep)
 {
     if (!udev || !udev->controller)
-        return;
+        return FALSE;
 
     struct xhci_ctrl *ctrl = udev->controller;
     struct xhci_xfer *io = slab_zalloc(&ctrl->xfer_slab);
     if (!io)
-        return;
+        return FALSE;
 
     io->ctrl = ctrl;
     io->sysBase = ctrl->sysBase;
@@ -263,10 +281,12 @@ static void xhci_udev_send_control_request(struct usb_device *udev,
     {
         Kprintf("No EP0 context on slot %lu\n", (ULONG)udev->slot_id);
         slab_free(&ctrl->xfer_slab, io);
-        return;
+        return FALSE;
     }
     io->timeout_ms = 1000;
     io->flags |= XHCI_XF_TIMEOUT;
+    io->about_slot = about_slot;
+    io->about_ep = about_ep;
 
     s8 err = xhci_ep_submit(ep_ctx, io);
     if (err != UHIOERR_NO_ERROR)
@@ -276,6 +296,7 @@ static void xhci_udev_send_control_request(struct usb_device *udev,
         io->error = err;
         xhci_xfer_reply(io);
     }
+    return TRUE;
 }
 
 inline static u8 xhci_ep_index_to_address(u8 ep_index)
@@ -297,10 +318,10 @@ inline static u8 xhci_ep_index_to_address(u8 ep_index)
  * usbcore does).
  *
  * Aborts while suspended keep the completion contract: the endpoint stays
- * SUSPENDED and the targeted TDs are retired via the regular stop-recovery
- * mechanics against the output-context dequeue - synchronously once the
- * suspend stop completed, else from that completion (ep_ctx tracks it in
- * suspend_stop_pending).  No doorbell rings until xhci_ep_resume().
+ * parked and the targeted TDs are retired by the regular recovery against the
+ * saved dequeue pointers - at once when the rings are stopped already, else
+ * when the suspend's Stop Endpoint has completed.  No doorbell rings until
+ * xhci_ep_resume().
  */
 
 /* Abort an in-flight suspend sequence, replying the stashed request so the
@@ -323,6 +344,8 @@ void xhci_udev_suspend_cancel(struct usb_device *udev, s8 err)
 /* Tail of the suspend sequence, run when the last Stop Endpoint completes. */
 static void xhci_udev_suspend_finish(struct usb_device *udev)
 {
+    udev->suspend.stopped_us = get_time(); /* the last stop is in */
+
     u8 port = udev->suspend.u3_port;
     struct xhci_xfer *req = udev->suspend.stash;
     xhci_udev_suspend_clear(udev);
@@ -367,6 +390,10 @@ BOOL xhci_udev_suspend_device(struct usb_device *udev, u8 root_port, struct xhci
         if (udev->ep_context[i] && xhci_ep_request_suspend(udev->ep_context[i]))
             stops++;
 
+    /* now if nothing had to be stopped; else xhci_udev_suspend_finish() says
+     * when the last stop was in */
+    udev->suspend.stopped_us = get_time();
+
     if (stops == 0)
         return FALSE; /* nothing to wait for; caller acts synchronously */
 
@@ -389,9 +416,22 @@ BOOL xhci_udev_suspend_port(struct usb_device *hub_udev, u8 port)
 }
 
 /* Restart the device's stopped endpoint rings after its port returned to U0
- * (xhci_ep_resume is a no-op on endpoints that were never suspended). */
+ * (xhci_ep_resume is a no-op on endpoints that were never suspended).
+ *
+ * An endpoint stopped for a suspend stays stopped for at least 10 ms (xHCI
+ * 6.4.3.8, the Suspend flag of Stop Endpoint).  A resume the stack starts
+ * comes later than that by itself; a device that wakes itself over a
+ * SuperSpeed link right after being suspended may not.  What is left of the
+ * 10 ms is waited out here, the one place every restart passes.  (The stamp
+ * of a suspend long past can look recent once in 71 minutes, when the
+ * microsecond clock wraps: that costs one needless wait.) */
+#define SUSPEND_STOPPED_MIN_US 10000U
 void xhci_udev_resume_device(struct usb_device *udev)
 {
+    const u32 stopped_for_us = get_time() - udev->suspend.stopped_us;
+    if (stopped_for_us < SUSPEND_STOPPED_MIN_US)
+        xhci_sleep_unlocked(udev->controller, (SUSPEND_STOPPED_MIN_US - stopped_for_us + 999U) / 1000U);
+
     for (u8 i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
         if (udev->ep_context[i])
             xhci_ep_resume(udev->ep_context[i]);
@@ -408,29 +448,38 @@ void xhci_udev_resume_port(struct usb_device *hub_udev, u8 port)
     xhci_udev_resume_device(child);
 }
 
-/* One Stop Endpoint completion (handle_stop_ring on a SUSPENDED endpoint):
- * counts toward the drain; a completion with no sequence in flight (cancelled
- * suspend, device gone) is ignored. */
+/* One endpoint the suspend sequence waited for is parked (or failed): counts
+ * toward the drain; a call with no sequence in flight (cancelled suspend,
+ * device gone) is ignored. */
 void xhci_udev_suspend_stop_done(struct usb_device *udev)
 {
     if (udev->suspend.stops_pending != 0 && --udev->suspend.stops_pending == 0)
         xhci_udev_suspend_finish(udev);
 }
 
-/* Issue an internal CLEAR_TT_BUFFER to the parent hub for control/bulk endpoints behind a TT. */
-void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type)
+/* After a halt, clear what the failed transfer left in the buffer of the hub's
+ * transaction translator (xHCI 4.6.8; the request: USB 2.0 11.24.2.3, defined
+ * for control and bulk endpoints only).  It goes to the hub that holds the
+ * translator, which need not be the device's parent, and names the
+ * translator by port - port 1 on a hub that has a single one.
+ *
+ * TRUE = the endpoint hears through xhci_ep_tt_cleared() when the hub is
+ * done, or has heard already; FALSE = there is no translator, or nothing went
+ * out. */
+BOOL xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, s32 ep_type)
 {
-    if (!udev || !udev->parent)
-        return;
-
-    /* Only applies to control or bulk endpoints behind a TT. */
     if (ep_type != USB_ENDPOINT_XFER_CONTROL && ep_type != USB_ENDPOINT_XFER_BULK)
-        return;
+        return FALSE;
 
-    struct usb_device *hub = udev->parent;
+    u8 tt_port;
+    struct usb_device *hub = xhci_tt_hub(udev, &tt_port);
+    if (!hub)
+        return FALSE;
+    if (!xhci_hub_multi_tt_enabled(hub))
+        tt_port = 1;
 
-    u16 epnum = (u16)EP_INDEX_TO_ENDPOINT(ep_index);
-    BOOL out = (ep_index & 0x1) != 0;
+    const u16 epnum = (u16)EP_INDEX_TO_ENDPOINT(ep_index);
+    const BOOL out = (ep_index & 0x1) != 0;
 
     u16 devinfo = epnum;
     devinfo |= (u16)((u16)udev->xhci_address << 4);
@@ -438,25 +487,28 @@ void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type
     if (!out)
         devinfo |= 1U << 15;
 
-    KprintfT("CLEAR_TT_BUFFER to hub slot %lu port %lu (dev slot %lu ep %lu type %ld)\n",
-             (ULONG)hub->slot_id, (ULONG)udev->parent_port,
+    KprintfT("CLEAR_TT_BUFFER to hub slot %lu TT port %lu (dev slot %lu ep %lu type %ld)\n",
+             (ULONG)hub->slot_id, (ULONG)tt_port,
              (ULONG)udev->slot_id, (ULONG)epnum, (LONG)ep_type);
 
-    xhci_udev_send_control_request(hub,
-                                   USB_DIR_OUT | USB_RT_PORT,
-                                   HUB_CLEAR_TT_BUFFER,
-                                   devinfo,
-                                   (u16)udev->parent_port,
-                                   0 /* wLength */);
-
-    /* Control endpoints require clearing both directions. */
+    /* A control endpoint has a buffer for either direction: one request each,
+     * in order on the hub's EP0, and the endpoint waits for the last. */
     if (ep_type == USB_ENDPOINT_XFER_CONTROL)
         xhci_udev_send_control_request(hub,
                                        USB_DIR_OUT | USB_RT_PORT,
                                        HUB_CLEAR_TT_BUFFER,
-                                       devinfo ^ (1 << 15), /* toggle direction bit */
-                                       (u16)udev->parent_port,
-                                       0 /* wLength */);
+                                       devinfo ^ (1 << 15), /* the other direction */
+                                       tt_port,
+                                       0 /* wLength */,
+                                       0, 0);
+
+    return xhci_udev_send_control_request(hub,
+                                          USB_DIR_OUT | USB_RT_PORT,
+                                          HUB_CLEAR_TT_BUFFER,
+                                          devinfo,
+                                          tt_port,
+                                          0 /* wLength */,
+                                          udev->slot_id, ep_index);
 }
 
 s32 xhci_ep_type_for_index(struct usb_device *udev, u8 ep_index)

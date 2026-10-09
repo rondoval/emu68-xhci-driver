@@ -267,7 +267,7 @@ u32 xhci_find_root_port(struct usb_device *udev)
 /* TRUE if hub is a HS multi-TT hub with its multi-TT interface selected:
  * bDeviceProtocol == 2 (capability) and the active altsetting of the hub
  * interface has bInterfaceProtocol == 2. */
-static BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub)
+BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub)
 {
     /* The stack supplies the enabled MTT state explicitly
        (NSCMD_USB_UPDATE_HUB): 2 = multi-TT interface selected. */
@@ -354,6 +354,31 @@ static void ctx_pack_slot_speed_route(struct usb_device *udev, struct xhci_slot_
     slot_ctx->dev_info = le32(dev_info);
 }
 
+/* The hub whose transaction translator serves a low or full speed device: the
+ * nearest high-speed hub up the tree.  *tt_port is the port of that hub the
+ * device hangs off, directly or through full-speed hubs.  NULL = none (a
+ * device of another speed, or one that sits on a root port or under a
+ * full-speed hub that does). */
+struct usb_device *xhci_tt_hub(struct usb_device *udev, u8 *tt_port)
+{
+    if (udev->speed != USB_SPEED_LOW && udev->speed != USB_SPEED_FULL)
+        return NULL;
+
+    u8 port = udev->parent_port;
+
+    for (struct usb_device *hub = udev->parent; hub; hub = hub->parent)
+    {
+        if (hub->is_hub && hub->speed >= USB_SPEED_HIGH)
+        {
+            *tt_port = port;
+            return hub;
+        }
+        port = hub->parent_port;
+    }
+
+    return NULL;
+}
+
 /* Root-hub port into dev_info2; for LS/FS devices behind a high-speed hub,
  * the TT fields (and the DEV_MTT mirror of the hub's enabled multi-TT mode,
  * xHCI 6.2.2 — safe at address time: the hub class selects the TT mode
@@ -374,29 +399,22 @@ static void ctx_pack_tt_info(struct usb_device *udev, struct xhci_slot_ctx *slot
     u32 tt_info = 0;
     if (udev->speed == USB_SPEED_LOW || udev->speed == USB_SPEED_FULL)
     {
-        struct usb_device *tt_hub = udev->parent;
-        u8 parent_port = udev->parent_port;
+        u8 tt_port;
+        struct usb_device *tt_hub = xhci_tt_hub(udev, &tt_port);
 
-        while (tt_hub)
+        if (tt_hub)
         {
-            if (tt_hub->is_hub && tt_hub->speed >= USB_SPEED_HIGH)
-            {
-                tt_info = TT_SLOT(tt_hub->slot_id) | TT_PORT(parent_port);
+            tt_info = TT_SLOT(tt_hub->slot_id) | TT_PORT(tt_port);
 
-                BOOL mtt = xhci_hub_multi_tt_enabled(tt_hub);
-                if (mtt)
-                    slot_ctx->dev_info |= le32(DEV_MTT);
+            BOOL mtt = xhci_hub_multi_tt_enabled(tt_hub);
+            if (mtt)
+                slot_ctx->dev_info |= le32(DEV_MTT);
 
-                KprintfT("tt_slot=%lu tt_port=%lu tt_info=%08lx mtt=%ld\n",
-                         (ULONG)tt_hub->slot_id, (ULONG)parent_port, (ULONG)tt_info,
-                         (LONG)mtt);
-                break;
-            }
-            parent_port = tt_hub->parent_port;
-            tt_hub = tt_hub->parent;
+            KprintfT("tt_slot=%lu tt_port=%lu tt_info=%08lx mtt=%ld\n",
+                     (ULONG)tt_hub->slot_id, (ULONG)tt_port, (ULONG)tt_info,
+                     (LONG)mtt);
         }
-
-        if (!tt_hub)
+        else
             Kprintf("Low or full speed device slot %lu not behind a high-speed hub???\n", (ULONG)udev->slot_id);
     }
 

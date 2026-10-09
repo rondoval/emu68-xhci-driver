@@ -239,6 +239,13 @@ void xhci_setup_addressable_virt_dev(struct usb_device *udev);
 
 /* Walk the device tree to the root-hub port this device hangs off. */
 u32 xhci_find_root_port(struct usb_device *udev);
+/* The high-speed hub whose transaction translator serves a low or full speed
+ * device, and that hub's port the device hangs off; NULL = none, which
+ * includes every device of another speed. */
+struct usb_device *xhci_tt_hub(struct usb_device *udev, u8 *tt_port);
+/* TRUE = the hub runs one translator per port (its multi-TT interface is
+ * selected), FALSE = one for all of them. */
+BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub);
 
 void xhci_update_mel_in_input_ctx(struct usb_device *udev);
 /* Build an input slot context and issue Evaluate Context to latch MAX_EXIT.

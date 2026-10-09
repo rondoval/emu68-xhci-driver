@@ -21,6 +21,7 @@
 
 #include <xhci/xhci-ring.h>
 #include <xhci/xhci.h>
+#include <xhci/xhci-context.h>
 #include "xhci-ring-priv.h"
 
 #ifdef DEBUG
@@ -525,6 +526,20 @@ void xhci_ring_patch_trbs_to_noop(struct xhci_ring *ring, dma_addr_t *trb_addrs,
 		trb->generic.field[2] = 0;
 		trb->generic.field[3] = le32(TRB_TYPE(TRB_TR_NOOP) | cycle);
 		cache_pre_dma(trb, sizeof(*trb), DMA_ReadFromRAM);
+
+		/* The TD went on in another segment: the Link TRB in between carries
+		 * the TD's chain bit (inc_enq), and a No Op TRB may not follow a
+		 * chained TRB (xHCI 4.11.7).  It becomes a Link TD of its own. */
+		union xhci_trb *link = trb + 1;
+		if (index + 1 < trb_count && trb_addrs[index + 1] != (dma_addr_t)(uintptr_t)link)
+		{
+			cache_post_dma(link, sizeof(*link), 0);
+			if (TRB_TYPE_LINK_LE32(link->link.control))
+			{
+				link->link.control &= le32(~TRB_CHAIN);
+				cache_pre_dma(link, sizeof(*link), DMA_ReadFromRAM);
+			}
+		}
 	}
 }
 
@@ -533,21 +548,29 @@ void xhci_ring_set_max_packet_size(struct xhci_ring *ring, u32 max_packet_size)
 	ring->max_packet_size = max_packet_size;
 }
 
-dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u8 ep_index, u16 stream_id, trb_type cmd)
+dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, trb_type cmd, u32 slot_id, u64 address,
+									 const struct xhci_ep_cmd *ep)
 {
 	prepare_ring(ring);
 
+	u32 field2 = 0;
 	u32 field3 = TRB_TYPE(cmd) | SLOT_ID_FOR_TRB(slot_id) | ring->cycle_state;
 
-	/*
-	 * Only 'reset endpoint', 'stop endpoint' and 'set TR dequeue pointer'
-	 * commands need endpoint id encoded.
-	 */
-	if (cmd >= TRB_RESET_EP && cmd <= TRB_SET_DEQ)
-		field3 |= EP_ID_FOR_TRB(ep_index);
+	if (ep)
+	{
+		field3 |= EP_ID_FOR_TRB(ep->ep_index) | ep->flags;
 
-	/* Set TR Dequeue carries the stream ring being repositioned (6.4.3.9). */
-	u32 field2 = (cmd == TRB_SET_DEQ) ? STREAM_ID_FOR_TRB(stream_id) : 0;
+		/* Set TR Dequeue names the ring it repositions (xHCI 6.4.3.9).  The
+		 * default ring needs nothing more.  A stream's ring is named by its
+		 * stream id, and the new dequeue pointer then carries the Stream
+		 * Context Type in bits 3:1 - a TRB is 16 bytes, so those bits are
+		 * free, and bit 0 is the cycle state the caller put there. */
+		if (ep->ring && ep->ring->stream_id)
+		{
+			field2 = STREAM_ID_FOR_TRB(ep->ring->stream_id);
+			address |= SCT_FOR_CTX(SCT_PRI_TR);
+		}
+	}
 
 	dma_addr_t trb_dma = xhci_ring_enqueue_trb(ring, FALSE,
 											   u64_lo32(address), /* field0 */

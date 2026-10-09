@@ -54,16 +54,16 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
 #endif
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void rt_iso_deliver(struct ep_context *ep_ctx, const struct xhci_td_completion *done, xhci_comp_code comp);
-static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
-static void ep_handle_suspended(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 
+/* IDLE, PARKED and FAILED expect no transfer event: the default handler logs
+ * one.  RECOVERING does: the "stopped" event of a Stop Endpoint, and the
+ * completions of TDs that finished before the stop took effect. */
 static const ep_state_handler ep_state_dispatch[] = {
-    [USB_DEV_EP_STATE_IDLE] = NULL, /* use default handler */
+    [USB_DEV_EP_STATE_IDLE] = NULL,
     [USB_DEV_EP_STATE_RECEIVING] = ep_handle_receiving_generic,
-    [USB_DEV_EP_STATE_ABORTING] = ep_handle_aborting,
-    [USB_DEV_EP_STATE_RESETTING] = NULL,
+    [USB_DEV_EP_STATE_RECOVERING] = ep_handle_receiving_generic,
+    [USB_DEV_EP_STATE_PARKED] = NULL,
     [USB_DEV_EP_STATE_FAILED] = NULL,
-    [USB_DEV_EP_STATE_SUSPENDED] = ep_handle_suspended,
     [USB_DEV_EP_STATE_RT_ISO_STOPPED] = NULL,
     [USB_DEV_EP_STATE_RT_ISO_RUNNING] = ep_handle_receiving_generic,
     [USB_DEV_EP_STATE_RT_ISO_STOPPING] = ep_handle_receiving_generic};
@@ -197,11 +197,8 @@ void xhci_process_event_timeouts(struct xhci_ctrl *ctrl)
         for (u8 ep_index = 0; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ep_index++)
         {
             struct ep_context *ep_ctx = xhci_ep_get_context_for_index(udev, ep_index);
-            if (ep_ctx && xhci_ep_is_expired(ep_ctx))
-            {
-                KprintfT("XHCI TD timeout on slot %lu ep %lu\n", (ULONG)udev->slot_id, (ULONG)ep_index);
-                xhci_ep_request_timeout_recovery(ep_ctx);
-            }
+            if (ep_ctx)
+                xhci_ep_check_timeouts(ep_ctx);
         }
     }
 }
@@ -259,12 +256,45 @@ inline static s8 translate_status(xhci_comp_code comp)
         KprintfT("Split transaction error\n");
         status = UHIOERR_SPLITERROR;
         break;
+    case COMP_ISSUES:
+    case COMP_STREAM_ERR:
+    case COMP_STRID_ERR:
+        /* Event Lost Error: the controller could not report all of the TD's
+         * events (xHCI 4.10.1).  Invalid Stream Type / ID Error: the stream
+         * a packet named has no valid context (xHCI 4.12.2.1).  Either way
+         * the controller halted the endpoint and what the transfer did is
+         * unknown - to the stack the same as a transaction error: clear the
+         * halt, try again. */
+        Kprintf("Endpoint halted by the controller, completion code %lu\n", (ULONG)comp);
+        status = UHIOERR_XACTERROR;
+        break;
     default:
         Kprintf("Unhandled completion code %lu\n", (ULONG)comp);
         status = UHIOERR_HOSTERROR;
     }
 
     return status;
+}
+
+/* Did the controller halt the endpoint on this event?  After these nothing
+ * more runs on it until it is recovered (xHCI 4.8.3).  An isoch endpoint
+ * never halts: an error fails that one TD and the ring runs on. */
+static BOOL comp_halts_endpoint(xhci_comp_code comp, u8 xfer_type)
+{
+    switch (comp)
+    {
+    case COMP_STALL:
+    case COMP_STREAM_ERR: /* Invalid Stream Type Error */
+    case COMP_STRID_ERR:  /* Invalid Stream ID Error */
+    case COMP_ISSUES:     /* Event Lost Error */
+        return TRUE;
+    case COMP_BABBLE:
+    case COMP_TX_ERR:
+    case COMP_SPLIT_ERR:
+        return xfer_type != UHCD_EPTYPE_ISO;
+    default:
+        return FALSE;
+    }
 }
 
 /*
@@ -299,6 +329,16 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
     const u32 transfer_len = le32(event->trans_event.transfer_len);
     const xhci_comp_code comp = GET_COMP_CODE(transfer_len);
 
+    /* While the endpoint is being stopped or re-armed its TDs still complete:
+     * a transfer that finished before the stop took effect is answered like
+     * any other.  Two things differ.  The endpoint's state is not this
+     * handler's to change then.  And the "stopped" event of the Stop Endpoint
+     * itself names a TD that is still queued: what becomes of that one is
+     * for the recovery to decide. */
+    const BOOL recovering = xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_RECOVERING;
+    if (recovering && (comp == COMP_STOP || comp == COMP_STOP_INVAL || comp == COMP_STOP_SHORT))
+        return;
+
 #ifdef DEBUG_CONTEXT
     KprintfT("event flags=%08lx xfer_len=%08lx buf=%08lx%08lx\n",
              (ULONG)flags,
@@ -326,6 +366,17 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
 
         return;
     }
+    if ((comp == COMP_UNDERRUN || comp == COMP_OVERRUN) &&
+        xhci_ep_get_state(ep_ctx) == USB_DEV_EP_STATE_RT_ISO_STOPPING)
+    {
+        xhci_ep_rt_iso_ring_empty(ep_ctx);
+        return;
+    }
+
+    /* A transaction error may have been a passing one: the same transaction
+     * is tried again a few times before the transfer is failed for it. */
+    if (comp == COMP_TX_ERR && xhci_ep_soft_retry(ep_ctx))
+        return;
 
     /* A short packet on a non-final TRB only records the exact transferred
      * length; the controller follows up with the final-TRB event, which
@@ -343,9 +394,26 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
                                      comp == COMP_SHORT_TX,
                                      &done, &deferred))
         {
-            if (!deferred)
-                Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %lu\n",
-                        (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
+            if (deferred)
+                return;
+
+            Kprintf("No TD found for TRB %08lx%08lx  %08lx %08lx on EP %lu\n",
+                    (ULONG)u64_hi32(trb_addr), (ULONG)u64_lo32(trb_addr), (ULONG)flags, (ULONG)transfer_len, (ULONG)ep_index);
+
+            /* A halt that no transfer of ours accounts for.  Stream protocol
+             * errors are reported that way, and so is a stall or a transaction
+             * error while a stream pipe is being primed: their events name no
+             * TRB (xHCI 4.17.4).  With no transfer to retire and to tell the
+             * stack through, the endpoint is given up: everything on it is
+             * answered, and the next configuration builds it anew.  (The
+             * transfer type does not matter here: the endpoint context says
+             * whether it is halted.) */
+            if (comp_halts_endpoint(comp, UHCD_EPTYPE_BULK) &&
+                xhci_read_hw_ep_state(udev, ep_index) == EP_STATE_HALTED)
+            {
+                Kprintf("EP %lu halted (completion code %lu) with no transfer named\n", (ULONG)ep_index, (ULONG)comp);
+                xhci_ep_set_failed(ep_ctx);
+            }
             return;
         }
 
@@ -366,7 +434,8 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
 
     if (done.rt)
     {
-        xhci_ep_schedule_rt_iso(ep_ctx);
+        if (!recovering)
+            xhci_ep_schedule_rt_iso(ep_ctx);
         return;
     }
 
@@ -384,15 +453,27 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
         status = UHIOERR_RUNTPACKET;
     }
 
-    /* Isoch endpoints never halt: an error there fails that one TD and the
-     * ring runs on - a reset would flush every queued TD with it. */
-    BOOL halted = (comp == COMP_STALL) ||
-                  ((comp == COMP_BABBLE || comp == COMP_SPLIT_ERR || comp == COMP_TX_ERR) &&
-                   req->type != UHCD_EPTYPE_ISO);
+    /* A TRB Error "should" leave the endpoint in the Error state, which only
+     * a Set TR Dequeue ends (xHCI 4.8.3) - the same recovery without the
+     * reset.  A controller that carries on instead needs none. */
+    const BOOL halted = comp_halts_endpoint(comp, req->type) ||
+                        (comp == COMP_TRB_ERR && xhci_read_hw_ep_state(udev, ep_index) == EP_STATE_ERROR);
+    if (halted && recovering)
+    {
+        /* A halt on top of a recovery that is under way is not sorted out -
+         * it would take a reset in the middle of a stop sequence.  The
+         * transfer keeps its error and the endpoint is given up. */
+        xhci_xfer_complete(udev, req, status, act_len);
+        xhci_ep_set_failed(ep_ctx);
+        return;
+    }
     if (halted)
     {
-        xhci_xfer_complete(udev, req, status, act_len);
-        xhci_reset_ep(udev, ep_index);
+        /* answered by the recovery, once the endpoint is ready for the
+         * stack's clear-halt */
+        req->error = status;
+        req->actual = act_len;
+        xhci_ep_halted(ep_ctx, req);
         return;
     }
 
@@ -403,7 +484,8 @@ static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_conte
                       xhci_ep_clear_halt_follow(udev, req);
     if (!handed_off)
         xhci_xfer_complete(udev, req, status, act_len);
-    xhci_ep_set_idle(ep_ctx);
+    if (!recovering)
+        xhci_ep_set_idle(ep_ctx);
 }
 
 /* Hand one retired RT ISO TD to the stream's hooks. */
@@ -424,56 +506,4 @@ static void rt_iso_deliver(struct ep_context *ep_ctx, const struct xhci_td_compl
     }
     else
         xhci_ep_rt_iso_out(ep_ctx, done->rt_buffer, done->rt_length, act_len, done->rt_frame, ubr_flags);
-}
-
-/* Stop Endpoint completions ahead of a port suspend (U3): the TD stays queued
- * on the ring for the resume - drop the event quietly. */
-static void ep_handle_suspended(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
-{
-#ifndef DEBUG
-    /* only referenced by debug logging / the default handler */
-    (void)udev;
-    (void)ep_ctx;
-#endif
-    const xhci_comp_code comp = GET_COMP_CODE(le32(event->trans_event.transfer_len));
-
-    if (comp == COMP_STOP || comp == COMP_STOP_INVAL || comp == COMP_STOP_SHORT)
-    {
-        KprintfT("slot %lu EP %lu stopped for suspend (comp=%lu)\n",
-                 (ULONG)udev->slot_id,
-                 (ULONG)xhci_ep_get_ep_index(ep_ctx), (ULONG)comp);
-        return;
-    }
-
-    ep_handle_default(udev, ep_ctx, event);
-}
-
-static void ep_handle_aborting(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
-{
-    (void)ep_ctx;
-
-    u32 flags = le32(event->trans_event.flags);
-    if (TRB_TO_SLOT_ID(flags) != udev->slot_id)
-    {
-        Kprintf("Expected a TRB for slot %lu, got %lu\n", (ULONG)udev->slot_id, (ULONG)TRB_TO_SLOT_ID(flags));
-        return;
-    }
-
-    const xhci_comp_code comp = GET_COMP_CODE(le32(event->trans_event.transfer_len));
-    switch(comp)
-    {
-        case COMP_STOP:
-            KprintfT("Transfer stopped successfully\n");
-            break;
-        case COMP_STOP_INVAL:
-            KprintfT("Transfer stopped with invalid length\n");
-            break;
-        case COMP_STOP_SHORT:
-            KprintfT("Transfer stopped after short packet\n");
-            break;
-        default:
-            Kprintf("Expected a TRB with STOP, got %lu\n", (ULONG)comp);
-    }
-
-    /* no state change - that is done by handle_abort_stop_ring */
 }

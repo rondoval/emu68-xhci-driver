@@ -23,18 +23,58 @@ Changes since v6.3.
 
 The isochronous IN path learns what USB video cameras need.
 
+---
+
+## Improvements
+
+- **Fast isochronous IN endpoints cost far less CPU.** An endpoint served
+  every microframe, such as a high-speed webcam, raised 8000 interrupts a
+  second. Its completions are now handled once a millisecond: a camera
+  stream on a Pi 4 takes about a quarter of the CPU instead of about 70 %.
+  USB audio is unaffected.
+- **A class can be told about lost isochronous IN intervals.** With a new
+  flag in its hook block, a class's hooks are also called for an interval
+  that failed or was skipped. The video class uses it to recognise a damaged
+  picture. Needs Poseidon for AmigaOS 6.3.
+- **A halted endpoint loses one transfer, not all of them.** When a device
+  refuses a transfer, or the controller stops an endpoint over a bus error,
+  only that transfer comes back with the error. The others stay queued and
+  go out once Poseidon has cleared the halt on the device - on a control
+  endpoint at once.
+- **A passing bus error no longer fails a transfer.** A failed transaction
+  on a bulk or interrupt endpoint is tried again, up to three more rounds,
+  before any error is reported.
 
 ---
 
 ## Bug fixes
 
+- **Transfers left waiting after an abort or a timeout.** When one of
+  several queued transfers was aborted or timed out, the others were not
+  restarted until something new was sent to the endpoint.
+- **A transfer finishing just as its endpoint was stopped was lost.** It was
+  never reported. A keyboard whose key press coincided with its suspend
+  could stay deaf after the resume.
+- **A resume right after a suspend could be lost,** leaving the device
+  asleep. The driver now waits until the port is suspended, and the 10 ms
+  the specification asks for, before it resumes it.
+- **Endpoints the controller halted for its own reasons stayed halted.**
+  They are now recovered like any other halt.
+- **Low and full speed devices behind a hub.** After a failed transfer the
+  hub has to be told to drop it. That request could go to the wrong hub or
+  name the wrong port, and the driver did not wait for the answer.
+- **A small buffer leak on aborts.** A transfer aborted while it was still
+  waiting for its endpoint kept its transfer buffer.
+- **Stopping an isochronous stream could wait for ever.** The stop waits for
+  the transfers in flight, but transfers the controller skipped at the very
+  end never completed. It could happen when a device was unplugged while it
+  streamed.
+- **Isochronous streams keep their full pipeline after missed service
+  intervals.** Skipped transfers were never retired, so each such event
+  left the stream less room until it was restarted.
 - **Isochronous IN endpoints that send several packets per interval now
-  work.** A high-speed high-bandwidth endpoint (two or three packets per
-  microframe, as HD webcams use) or a bursting SuperSpeed one was asked for a
-  single packet per service interval, so everything after the first packet was
-  lost, and the packet count of the transfer went into the wrong field. Each
-  transfer now covers the whole payload of an interval. USB audio, at one
-  packet per interval, behaves as before.
+  work.** HD webcams and bursting SuperSpeed endpoints lost everything after
+  the first packet.
 
 ---
 

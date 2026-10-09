@@ -148,6 +148,14 @@ typedef enum
 #define TRB_DATA_OUT 2
 #define TRB_DATA_IN 3
 
+/* Stop Endpoint Command TRB: Suspend - the endpoint is stopped because its
+ * device is about to be suspended (xHCI 4.6.9, 6.4.3.8) */
+#define TRB_SP BIT(23)
+/* Reset Endpoint Command TRB: Transfer State Preserve - the data toggle or
+ * sequence number stays as it is and the next doorbell retries the failed
+ * transaction (xHCI 4.6.8, 4.6.8.1) */
+#define TRB_TSP BIT(9)
+
 /* Isochronous TRB specific fields */
 #define TRB_FRAME_ID(p) (((u32)(p) & 0x7ffU) << 20)
 #define TRB_SIA BIT(31)
@@ -313,7 +321,21 @@ u32 xhci_ring_get_deq_ptr_for_trb(struct xhci_ring *ring, dma_addr_t trb_addr);
 void xhci_ring_set_max_packet_size(struct xhci_ring *ring, u32 max_packet_size);
 void xhci_ring_patch_trbs_to_noop(struct xhci_ring *ring, dma_addr_t *trb_addrs, u32 trb_count, u32 start_index);
 
-dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, u64 address, u32 slot_id, u8 ep_index, u16 stream_id, trb_type cmd);
+/* The endpoint part of a command.  Only Stop Endpoint, Reset Endpoint and Set
+ * TR Dequeue have one. */
+struct xhci_ep_cmd
+{
+	u8 ep_index;
+	u32 flags;					  /* the command's own control-word bits: TRB_SP, TRB_TSP */
+	const struct xhci_ring *ring; /* Set TR Dequeue: the transfer ring it repositions; else NULL */
+};
+
+/* Put one command on the command ring.  address is what the command points at
+ * (an input context, a new dequeue pointer; 0 if nothing); ep is NULL for a
+ * command that addresses no endpoint.  The ring layer adds what addresses a
+ * stream's ring. */
+dma_addr_t xhci_ring_enqueue_command(struct xhci_ring *ring, trb_type cmd, u32 slot_id, u64 address,
+									 const struct xhci_ep_cmd *ep);
 void xhci_ring_setup_erst(struct xhci_ring *ring, struct xhci_erst *erst, struct xhci_intr_reg *ir_set);
 
 #endif /* __XHCI_RING_H */

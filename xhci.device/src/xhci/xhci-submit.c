@@ -279,19 +279,19 @@ inline static void prime_first_trb(struct xhci_ring *ring, struct xhci_generic_t
 	cache_pre_dma(start_trb, sizeof(struct xhci_generic_trb), DMA_ReadFromRAM);
 }
 
-/* Ring an endpoint's doorbell without touching the ring contents - used to
- * restart a Stopped endpoint whose TDs are still queued (e.g. after a port
- * resume from U3).  stream_id targets one stream ring; 0 = the default ring. */
-void xhci_submit_kick_ep(struct usb_device *udev, u8 ep_index, u16 stream_id)
+/* Ring the doorbell for one transfer ring without touching its contents: the
+ * controller (re)starts working on what is queued there.  stream_id is 0 on a
+ * default ring. */
+void xhci_submit_ring_doorbell(struct usb_device *udev, struct xhci_ring *ring)
 {
-	xhci_db_ring(udev->controller->dba, udev->slot_id, DB_VALUE(ep_index, stream_id));
+	xhci_db_ring(udev->controller->dba, udev->slot_id, DB_VALUE(ring->ep_index, ring->stream_id));
 }
 
 inline static void giveback_first_trb(struct usb_device *udev, struct xhci_ring *ring,
 									  struct xhci_generic_trb *start_trb)
 {
 	prime_first_trb(ring, start_trb);
-	xhci_submit_kick_ep(udev, ring->ep_index, ring->stream_id);
+	xhci_submit_ring_doorbell(udev, ring);
 }
 
 void xhci_submit_giveback(struct usb_device *udev, struct ep_context *ep_ctx)

@@ -414,130 +414,6 @@ static inline BOOL td_is_recovery_abort(struct xhci_td *td,
     return td_req_is_recovery_abort(abort_reqs, td->u.req);
 }
 
-static void td_resolve_recovery_deq_ptr(TransferDescriptorList *td_list,
-                                        struct xhci_ring *ring,
-                                        IOReqList *abort_reqs,
-                                        u32 now_us,
-                                        dma_addr_t stopped_deq_ptr,
-                                        dma_addr_t *resolved_deq_ptr)
-{
-    const dma_addr_t stopped_trb_addr = stopped_deq_ptr & ~(dma_addr_t)EP_CTX_CYCLE_MASK;
-    *resolved_deq_ptr = 0;
-
-    /* Locate the TD the hardware stopped in. */
-    struct MinNode *node = td_list->list.mlh_Head;
-    while (node && node->mln_Succ)
-    {
-        if (td_find_trb_index((struct xhci_td *)node, stopped_trb_addr) >= 0)
-            break;
-        node = node->mln_Succ;
-    }
-
-    if (!node || !node->mln_Succ)
-    {
-        Kprintf("Stopped TRB address %lx not found in any TD\n", (ULONG)stopped_trb_addr);
-        return;
-    }
-
-    /* Re-arm at the first TD from the stop point onward that survives recovery:
-     * the exact TRB the hardware halted on for the stopped TD, or a later
-     * survivor's first TRB.  Take the cycle bit from the TRB itself, not the EP
-     * context's DCS - the VL805 writes that field back wrong (Linux
-     * XHCI_EP_CTX_BROKEN_DCS), and the TRB's cycle is what the consumer must
-     * match anyway. */
-    for (; node && node->mln_Succ; node = node->mln_Succ)
-    {
-        struct xhci_td *td = (struct xhci_td *)node;
-        if (td_is_recovery_abort(td, abort_reqs, now_us))
-            continue;
-
-        dma_addr_t entry_trb = (td_find_trb_index(td, stopped_trb_addr) >= 0)
-                                   ? stopped_trb_addr
-                                   : td->trb_addrs[0];
-        *resolved_deq_ptr = xhci_ring_get_deq_ptr_for_trb(ring, entry_trb);
-        return;
-    }
-
-    /* Everything from the stop point onward is being aborted: re-arm past it. */
-    *resolved_deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
-}
-
-static void td_abort_recovery_requests(TransferDescriptorList *td_list,
-                                       IOReqList *abort_reqs,
-                                       u32 now_us,
-                                       dma_addr_t stopped_trb_addr)
-{
-    struct ExecBase *SysBase = td_list->sysBase;
-    struct MinNode *node = td_list->list.mlh_Head;
-
-    while (node && node->mln_Succ)
-    {
-        struct xhci_td *td = (struct xhci_td *)node;
-        struct MinNode *next = node->mln_Succ;
-        BOOL recovery_abort = td_is_recovery_abort(td, abort_reqs, now_us);
-
-        if (recovery_abort)
-        {
-            /* Bytes already moved by the TRBs the hardware fully consumed.
-             * Poseidon's bulk streams continue on NAK_TIMEOUT with a non-zero
-             * actual, so report the partial transfer rather than
-             * discarding it (the in-progress TRB counts as untransferred -
-             * conservative lower bound). */
-            u32 actual = 0;
-            s32 stopped_idx = td_find_trb_index(td, stopped_trb_addr);
-            if (stopped_idx > 0)
-                actual = td_sum_trb_lengths(td, (u32)stopped_idx);
-
-            /* stopped_idx < 0 = the HW dequeue never entered this TD: the
-             * transfer wedged before the controller fetched it (doorbell /
-             * enqueue side), as opposed to a device that NAKed a fetched TD. */
-            Kprintf("recovery abort TD: first TRB %08lx, HW stopped %08lx (idx %ld), actual %lu, %s\n",
-                    (ULONG)td->trb_addrs[0], (ULONG)stopped_trb_addr, (LONG)stopped_idx,
-                    actual, td_is_expired_at(td, now_us) ? "expired" : "aborted");
-
-            xhci_ring_patch_trbs_to_noop(td_list->ring, td->trb_addrs, td->trb_count, 0);
-
-            RemoveMinNode((struct MinNode *)td);
-            xhci_td_decrease_queued(td_list, td);
-            /* A deadline expiry is a NAK timeout, not "device dead": the
-             * stack weighs UHIOERR_TIMEOUT three times worse. */
-            td_unmap_and_reply(td_list, td,
-                               td_is_expired_at(td, now_us) ? UHIOERR_NAKTIMEOUT : IOERR_ABORTED,
-                               actual);
-            xhci_td_free(td_list, td);
-        }
-
-        node = next;
-    }
-}
-
-dma_addr_t xhci_td_resolve_recovery(TransferDescriptorList *td_list,
-                                    struct xhci_ring *ring,
-                                    IOReqList *abort_reqs,
-                                    u32 now_us,
-                                    dma_addr_t stopped_deq_ptr)
-{
-    if (!td_list || !ring || !stopped_deq_ptr)
-        return 0;
-
-    dma_addr_t new_deq = 0;
-    td_resolve_recovery_deq_ptr(td_list, ring, abort_reqs, now_us,
-                                stopped_deq_ptr, &new_deq);
-    return new_deq;
-}
-
-void xhci_td_abort_recovery(TransferDescriptorList *td_list,
-                            IOReqList *abort_reqs,
-                            u32 now_us,
-                            dma_addr_t stopped_deq_ptr)
-{
-    if (!td_list)
-        return;
-
-    td_abort_recovery_requests(td_list, abort_reqs, now_us,
-                               stopped_deq_ptr & ~(dma_addr_t)EP_CTX_CYCLE_MASK);
-}
-
 /* Take a TD off its list and hand its payload to the completion path. */
 static void td_consume(TransferDescriptorList *td_list, struct xhci_td *td, u32 act_len,
                        struct xhci_td_completion *out)
@@ -590,8 +466,10 @@ static void td_consume(TransferDescriptorList *td_list, struct xhci_td *td, u32 
  *
  * An iso ring retires its TDs in queue order, one event each.  An event that
  * names a TD behind the oldest one therefore says the controller passed over
- * the TDs before it without serving them (Missed Service Error, xHCI
- * 4.10.3.2 - a 1.0 controller may report it without naming any TD).  Those
+ * the TDs before it without serving them, and without saying so: xHCI
+ * 4.10.3.2 lets a controller without the Contiguous Frame ID capability skip
+ * the Missed Service Error event of a missed interval, and any controller
+ * drop those events while its event ring is full.  The passed-over TDs
  * come out first, oldest first and one a call, with out->missed set and
  * nothing transferred: the caller calls again until it has the event's own TD.
  */
@@ -642,6 +520,28 @@ BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_add
     return TRUE;
 }
 
+/*
+ * The one place a dequeue pointer for a transfer ring is made.
+ *
+ * A stopped endpoint keeps its own position, and a doorbell makes it carry on
+ * from there.  The pointer only has to be moved when the TD the controller
+ * stopped in is no longer on the list - it failed with a halt, or it was
+ * retired.  Then the ring goes on at the oldest TD left, or at the software
+ * enqueue if none is left.
+ *
+ * The cycle bit comes from the TRB itself, not from the endpoint context's
+ * DCS: the VL805 writes that field back wrong (Linux XHCI_EP_CTX_BROKEN_DCS),
+ * and the TRB's cycle is what the controller has to match anyway.
+ */
+dma_addr_t xhci_td_first_deq(TransferDescriptorList *td_list)
+{
+    struct xhci_td *oldest = (struct xhci_td *)td_list->list.mlh_Head;
+    if (oldest->node.mln_Succ)
+        return xhci_ring_get_deq_ptr_for_trb(td_list->ring, oldest->trb_addrs[0]);
+
+    return xhci_ring_get_new_dequeue_ptr(td_list->ring);
+}
+
 void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
 {
     if (!td_list)
@@ -660,18 +560,64 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
     td_list->queued_tds = 0;
 }
 
-BOOL xhci_td_has_recovery_victim(TransferDescriptorList *td_list,
-                                 IOReqList *abort_reqs, u32 now_us)
+/*
+ * Retire TDs of a stopped ring, and say whether the ring has to be re-armed.
+ *
+ * The victims are the TDs of the listed requests and the TDs past their
+ * deadline - or, with all, every TD.  A victim's TRBs become No-Ops, which
+ * the controller steps over, and its request is answered: UHIOERR_NAKTIMEOUT
+ * for an expired one (a deadline is a NAK timeout, not "device dead" - the
+ * stack weighs UHIOERR_TIMEOUT three times worse), IOERR_ABORTED otherwise.
+ * Either way with the bytes its fully consumed TRBs moved: Poseidon's bulk
+ * streams go on after a NAK timeout with a non-zero actual.  The TRB the
+ * controller was working on counts as not moved.
+ *
+ * stopped_deq is where the controller stopped on this ring.  If that is still
+ * inside a TD of the list, the controller carries on by itself and 0 is
+ * returned; so it is when nothing was retired.  Otherwise the TD it stopped
+ * in is gone and the return value is where to re-arm (xhci_td_first_deq).
+ */
+dma_addr_t xhci_td_retire(TransferDescriptorList *td_list, IOReqList *abort_reqs, u32 now_us,
+                          dma_addr_t stopped_deq, BOOL all)
 {
     if (!td_list)
-        return FALSE;
+        return 0;
+    struct ExecBase *SysBase = td_list->sysBase;
 
-    for (struct MinNode *n = td_list->list.mlh_Head; n && n->mln_Succ; n = n->mln_Succ)
+    const dma_addr_t stopped_trb = stopped_deq & ~(dma_addr_t)EP_CTX_CYCLE_MASK;
+    BOOL retired = FALSE;
+    BOOL stopped_in_survivor = FALSE;
+
+    struct MinNode *next;
+    for (struct MinNode *node = td_list->list.mlh_Head; (next = node->mln_Succ) != NULL; node = next)
     {
-        if (td_is_recovery_abort((struct xhci_td *)n, abort_reqs, now_us))
-            return TRUE;
+        struct xhci_td *td = (struct xhci_td *)node;
+        const s32 stopped_idx = td_find_trb_index(td, stopped_trb);
+
+        if (!all && !td_is_recovery_abort(td, abort_reqs, now_us))
+        {
+            stopped_in_survivor |= stopped_idx >= 0;
+            continue;
+        }
+
+        const BOOL expired = td_is_expired_at(td, now_us);
+        const u32 actual = (stopped_idx > 0) ? td_sum_trb_lengths(td, (u32)stopped_idx) : 0;
+
+        /* stopped_idx < 0: the controller never reached this TD */
+        Kprintf("retiring TD: first TRB %08lx, stopped at %08lx (index %ld), actual %lu, %s\n",
+                (ULONG)td->trb_addrs[0], (ULONG)stopped_trb, (LONG)stopped_idx,
+                actual, expired ? "expired" : "aborted");
+
+        xhci_ring_patch_trbs_to_noop(td_list->ring, td->trb_addrs, td->trb_count, 0);
+        RemoveMinNode(node);
+        xhci_td_decrease_queued(td_list, td);
+        td_unmap_and_reply(td_list, td, expired ? UHIOERR_NAKTIMEOUT : IOERR_ABORTED, actual);
+        xhci_td_free(td_list, td);
+        retired = TRUE;
     }
 
-    return FALSE;
-}
+    if (!retired || stopped_in_survivor)
+        return 0;
 
+    return xhci_td_first_deq(td_list);
+}

@@ -441,6 +441,17 @@ static void xhci_ep_notify_rt_iso_stopped(struct ep_context *ep_ctx)
     xhci_xfer_reply(stop_req); /* the STOP_STREAM shadow copies back to its client */
 }
 
+/* The controller reports the ring empty while the stream is being stopped.
+ * A stop waits for the TDs in flight to complete - but TDs the controller
+ * passed over only leave the list when a later TD's event names them, and
+ * after the last one there is no later TD.  Whatever is still tracked now
+ * will never complete: drop it, which lets the stop finish. */
+void xhci_ep_rt_iso_ring_empty(struct ep_context *ep_ctx)
+{
+    xhci_td_fail_all(ep_default_tds(ep_ctx), IOERR_ABORTED);
+    xhci_ep_schedule_rt_iso(ep_ctx); /* not running and nothing in flight: stopped */
+}
+
 void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx)
 {
     if (ep_ctx->state != USB_DEV_EP_STATE_RT_ISO_RUNNING)

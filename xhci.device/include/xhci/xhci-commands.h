@@ -10,6 +10,7 @@
 
 #include <types.h>
 #include <xhci/xhci-xfer.h>
+#include <xhci/xhci-ring.h>
 
 struct xhci_ctrl;
 struct usb_device;
@@ -20,14 +21,13 @@ union xhci_trb;
 void xhci_dispatch_command_event(struct xhci_ctrl *ctrl, union xhci_trb *event);
 void xhci_process_command_timeouts(struct xhci_ctrl *ctrl);
 
-void xhci_reset_ep(struct usb_device *udev, u8 ep_index);
-void xhci_stop_ring(struct usb_device *udev, u8 ep_index);
-/* Set TR Deq for one ring (endpoint must be Stopped or in Error); stream_id
- * 0 = the default ring. */
-void xhci_set_deq_pointer(struct usb_device *udev, u8 ep_index, u32 deq_ptr, u16 stream_id);
-/* Reset every transfer ring of the endpoint to its software enqueue position
- * — the ring-flush half of every recovery path. */
-void xhci_flush_ep_rings(struct usb_device *udev, struct ep_context *ep_ctx);
+/* One command of an endpoint's recovery: Stop Endpoint, Reset Endpoint (ring
+ * NULL, deq 0) or Set TR Dequeue for one of its transfer rings.  flags are
+ * the command's own TRB bits: TRB_SP on the Stop Endpoint ahead of a suspend,
+ * TRB_TSP on the Reset Endpoint of a soft retry, else 0.  The endpoint sequences these itself (xhci-endpoint.c); its
+ * completion - or its timeout - comes back as xhci_ep_command_done().
+ * FALSE = nothing went out. */
+BOOL xhci_queue_ep_command(struct usb_device *udev, u8 ep_index, trb_type cmd, u32 flags, struct xhci_ring *ring, dma_addr_t deq);
 /* Configure Endpoint / Evaluate Context carrying in_ctx.  TRUE = queued (req,
  * if any, is retired by the command); FALSE = nothing went out and req is
  * still the caller's. */

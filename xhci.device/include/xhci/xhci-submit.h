@@ -79,9 +79,9 @@ BOOL xhci_submit_has_room(struct ep_context *ep_ctx, u32 needed_trbs);
  * endpoints never have streams. */
 void xhci_submit_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
 
-/* Ring an endpoint's doorbell without touching the ring contents - restarts
- * a Stopped endpoint whose TDs are still queued (e.g. after a port resume
- * from U3).  stream_id targets one stream ring; 0 = the default ring. */
-void xhci_submit_kick_ep(struct usb_device *udev, u8 ep_index, u16 stream_id);
+/* Ring the doorbell for one transfer ring without touching its contents: the
+ * controller (re)starts working on what is queued there.  The ring knows its
+ * endpoint and, on a stream endpoint, its stream. */
+void xhci_submit_ring_doorbell(struct usb_device *udev, struct xhci_ring *ring);
 
 #endif /* __XHCI_SUBMIT_H */

@@ -87,6 +87,8 @@ struct xhci_xfer
     void *dma_address;          /* bounce pointer (valid when REQ_DMA_MAPPED) */
     APTR cookie;                /* direct-path demux key (the stack's pipe) */
     u8   owner_slot;            /* internal EP0 requests: owning slot id (device key) */
+    u8   about_slot;            /* internal EP0 requests: the endpoint the request is */
+    u8   about_ep;              /* about, told when it completes; slot 0 = none */
 };
 
 /* node must sit at offset 0: the pending-list links the xfer by &xf->node, and

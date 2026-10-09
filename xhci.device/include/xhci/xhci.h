@@ -198,7 +198,7 @@ struct xhci_ctrl
 	u32 iman_base;
 
 	/* The unit task's persistent sleep timer for the root-hub port waits
-	 * (rh_sleep_unlocked).  MsgPorts are task-bound, so the unit task alone
+	 * (xhci_sleep_unlocked).  MsgPorts are task-bound, so the unit task alone
 	 * opens and closes it — every port handler runs on the unit task.  req ==
 	 * NULL (timer.device unavailable) degrades the waits to hot polls. */
 	struct drv_timer sleep_timer;
@@ -287,5 +287,16 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr,
  * @ctrl:	Controller
  */
 void xhci_reset_quiesce(struct xhci_ctrl *ctrl);
+
+/* Sleep on the unit task's persistent sleep timer with the transfer-plane
+ * lock RELEASED.  Unit task only, holding xfer_lock exactly once (the port
+ * handlers and the lifecycle ops).  Direct submits and aborts proceed during
+ * the wait - which is the point: a port reset or resume does not stall the
+ * whole transfer plane - so whatever the caller read from the hardware
+ * before is read again after.  Nothing the unit task does itself can happen
+ * meanwhile: no event is processed, no device comes or goes.  (The timer is
+ * task-bound, which is why the unit task owns it - see ctrl->sleep_timer;
+ * without one the wait degrades to no wait.) */
+void xhci_sleep_unlocked(struct xhci_ctrl *ctrl, u32 milliseconds);
 
 #endif /* HOST_XHCI_H_ */

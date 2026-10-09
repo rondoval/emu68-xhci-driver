@@ -9,15 +9,26 @@
 #define __XHCI_ENDPOINT_H__
 
 #include <xhci/xhci-xfer.h>
+#include <xhci/xhci-ring.h>
 
+/*
+ * The driver's view of an endpoint.
+ *
+ * IDLE and RECEIVING: the controller may work on the rings (nothing queued /
+ * TDs queued).  RECOVERING and PARKED: it does not - a command that stops,
+ * resets or re-arms the endpoint is in flight, or the rings are stopped and
+ * something holds the endpoint (EP_HOLD_*: its port is suspended, or after a
+ * halt the device's endpoint or the hub's TT buffer is not cleared yet).  In
+ * both, new transfers wait in the pending queue and the TDs on the rings stay
+ * where they are.
+ */
 enum ep_state
 {
     USB_DEV_EP_STATE_IDLE = 0,
     USB_DEV_EP_STATE_RECEIVING,
-    USB_DEV_EP_STATE_ABORTING,
-    USB_DEV_EP_STATE_RESETTING,
+    USB_DEV_EP_STATE_RECOVERING,
+    USB_DEV_EP_STATE_PARKED,
     USB_DEV_EP_STATE_FAILED,
-    USB_DEV_EP_STATE_SUSPENDED, /* rings stopped for port U3; TDs stay queued for resume */
     USB_DEV_EP_STATE_RT_ISO_STOPPED,
     USB_DEV_EP_STATE_RT_ISO_RUNNING,
     USB_DEV_EP_STATE_RT_ISO_STOPPING
@@ -61,13 +72,6 @@ u8 xhci_ep_streams_max_pstreams(struct ep_context *ep_ctx);
 dma_addr_t xhci_ep_streams_array_dma(struct ep_context *ep_ctx);
 s8 xhci_ep_streams_build(struct ep_context *ep_ctx, u16 num_streams, u8 max_pstreams_cap);
 void xhci_ep_streams_destroy(struct ep_context *ep_ctx, s8 reply_code);
-/* Set TR Dequeue bookkeeping shared by every recovery/flush (coarse = every
- * ring, surgical = victim rings only; a plain endpoint is just count 1): the
- * issuer counts one command per targeted ring and handle_set_deq consumes
- * them. */
-void xhci_ep_setdeq_begin(struct ep_context *ep_ctx, u16 count);
-BOOL xhci_ep_setdeq_consume(struct ep_context *ep_ctx); /* TRUE = last one */
-
 void xhci_ep_set_max_packet_size(struct ep_context *ep_ctx, u32 max_packet_size);
 u32 xhci_ep_get_max_packet_size(struct ep_context *ep_ctx);
 u8 xhci_ep_get_max_burst(struct ep_context *ep_ctx);
@@ -78,9 +82,6 @@ u8 xhci_ep_get_hw_type(struct ep_context *ep_ctx);
 
 void xhci_ep_set_failed(struct ep_context *ep_ctx);
 void xhci_ep_set_idle(struct ep_context *ep_ctx);
-/* set_idle plus a kick of the stream rings still holding TDs — the restart
- * at the end of every ring flush (tail of handle_set_deq). */
-void xhci_ep_flush_complete(struct ep_context *ep_ctx);
 /* Both variants: FALSE = the endpoint is FAILED and trb_addrs is already
  * freed — the caller must not touch the ring or the array, and still owns
  * the request's/span's disposal.  The TD lands on ep_ring's own list. */
@@ -88,47 +89,59 @@ BOOL xhci_ep_set_receiving(struct ep_context *ep_ctx, struct xhci_ring *ep_ring,
                            struct xhci_xfer *req, dma_addr_t *trb_addrs, u32 timeout_ms, u32 trb_count);
 BOOL xhci_ep_set_receiving_rt(struct ep_context *ep_ctx, const struct xhci_dma_span *span,
                               u16 frame, u16 dir, BOOL staging, dma_addr_t *trb_addrs, u32 trb_count);
-void xhci_ep_set_resetting(struct ep_context *ep_ctx);
-void xhci_ep_set_aborting(struct ep_context *ep_ctx);
 
-void xhci_ep_request_timeout_recovery(struct ep_context *ep_ctx);
+/*
+ * Recovery.  Whatever takes TDs off a ring that the controller may be working
+ * on - an abort, a NAK timeout, a flush, a halt - needs the endpoint stopped
+ * first, and so does a port suspend.  The endpoint sequences that itself and
+ * deals with the stopped rings in one place (ep_service() in
+ * xhci-endpoint.c).  These are the ways in.
+ */
+
+/* A transfer was answered with a halt (STALL, or one the controller raised).
+ * req is that transfer, its TD already off the ring's list and its error and
+ * actual set.  Only this transfer is retired: it is answered once the host
+ * side is recovered, and what was queued behind it stays queued.  A bulk or
+ * interrupt endpoint then sends nothing until the stack's
+ * CLEAR_FEATURE(ENDPOINT_HALT) has completed (xhci_ep_clear_halt_follow), a
+ * control or bulk endpoint behind a transaction translator nothing until the
+ * hub has cleared its buffer (xhci_ep_tt_cleared) - or until 2 seconds have
+ * passed without either. */
+void xhci_ep_halted(struct ep_context *ep_ctx, struct xhci_xfer *req);
+/* A transfer event said USB Transaction Error: try the same transaction again
+ * without anybody hearing of it, up to three times per transfer (bulk and
+ * interrupt, not behind a TT).  The event's TD is left alone.  TRUE = the
+ * event is dealt with; FALSE = no retry, go on and treat it as a halt. */
+BOOL xhci_ep_soft_retry(struct ep_context *ep_ctx);
+/* The CLEAR_TT_BUFFER the recovery of a halt sent to the hub is done, whatever
+ * came of it. */
+void xhci_ep_tt_cleared(struct ep_context *ep_ctx);
+/* One of the endpoint's own commands (xhci_queue_ep_command) completed - or
+ * failed, or timed out: ok FALSE. */
+void xhci_ep_command_done(struct ep_context *ep_ctx, trb_type cmd, BOOL ok);
+/* Abort the in-flight or queued direct transfer with this cookie (a wish;
+ * xhci_direct_abort). */
+void xhci_ep_abort_cookie(struct ep_context *ep_ctx, APTR cookie);
+/* The unit task's tick: retire the TDs past their NAK deadline, and let an
+ * endpoint run on that has waited too long for a halt to be cleared. */
+void xhci_ep_check_timeouts(struct ep_context *ep_ctx);
+/* CMD_FLUSH: give up every TD on the rings (IOERR_ABORTED).  The pending
+ * queue is the caller's: xhci_ep_flush(). */
 void xhci_ep_request_stop(struct ep_context *ep_ctx);
-/* xhci_ep_process_stop() outcome.  The old BOOL collapsed two genuinely
- * different FALSE dispositions. */
-enum ep_stop_outcome
-{
-    EP_STOP_PLAIN = 0, /* not a surgical recovery - an ordinary Stop Endpoint
-                        * (CMD_FLUSH, request_stop): retire everything */
-    EP_STOP_HANDLED,   /* surgical recovery done, its Set TR Deq already issued */
-    EP_STOP_ANOMALY    /* stopped dequeue inside no tracked TD: the driver's model
-                        * of the ring is wrong - degrade to whole-endpoint recovery */
-};
-
-/* Whole-endpoint recovery for a stopped endpoint (EP_STOP_ANOMALY): retire the
- * in-flight TDs in place, re-arm the rings, keep the endpoint. */
-void xhci_ep_degrade_coarse(struct ep_context *ep_ctx);
-
-/* Surgical abort/timeout recovery over the endpoint's rings: rings without a
- * victim are skipped whole; on each victim ring the victims' TRBs are
- * No-Op'd, their requests replied, and one Set TR Deq re-arms the ring —
- * survivors on the same ring keep running.  EP_STOP_HANDLED = the stop was
- * consumed (commands queued, or a raced-out abort restarted the endpoint
- * synchronously); the other outcomes hand the endpoint back to the caller,
- * PLAIN for the ordinary-stop retire and ANOMALY for the coarse degrade — the caller runs the coarse ordinary-stop recovery. */
-enum ep_stop_outcome xhci_ep_process_stop(struct ep_context *ep_ctx);
+/* The device is being torn down: nothing new reaches the rings from here on;
+ * what is on them is answered when the context goes. */
+void xhci_ep_quiesce(struct ep_context *ep_ctx);
+/* Port suspend and resume.  request_suspend: TRUE = a Stop Endpoint went out
+ * and xhci_udev_suspend_stop_done() is called once the endpoint is parked.
+ * The TDs stay on the rings and run on after xhci_ep_resume(). */
 BOOL xhci_ep_request_suspend(struct ep_context *ep_ctx);
-/* The suspend path's Stop Endpoint completed (handle_stop_ring, SUSPENDED
- * branch): run any abort/timeout recovery queued while the stop sequenced. */
-void xhci_ep_suspend_stop_complete(struct ep_context *ep_ctx);
-
-/* A successful EP0 transfer: if it was a CLEAR_FEATURE(ENDPOINT_HALT), make the
- * xHC's data toggle for the target endpoint follow the device's.  TRUE = req
- * was handed to a Configure Endpoint command that will retire it; FALSE = reply
- * it as usual. */
-BOOL xhci_ep_clear_halt_follow(struct usb_device *udev, struct xhci_xfer *req);
 void xhci_ep_resume(struct ep_context *ep_ctx);
+/* A successful EP0 transfer: if it was a CLEAR_FEATURE(ENDPOINT_HALT), release
+ * what a halted target endpoint kept, or make the xHC's data toggle for a
+ * healthy one follow the device's.  TRUE = req was handed to a Configure
+ * Endpoint command that will retire it; FALSE = reply it as usual. */
+BOOL xhci_ep_clear_halt_follow(struct usb_device *udev, struct xhci_xfer *req);
 
-BOOL xhci_ep_is_expired(struct ep_context *ep_ctx);
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx);
 u8 xhci_ep_get_ep_index(struct ep_context *ep_ctx);
 u32 xhci_ep_get_active_trb_count(struct ep_context *ep_ctx);
@@ -141,10 +154,6 @@ struct xhci_ring *xhci_ep_get_ring(struct ep_context *ep_ctx);
  * (an LSA endpoint has no default ring). */
 struct xhci_ring *xhci_ep_get_ring_for_stream(struct ep_context *ep_ctx, u16 stream_id);
 
-/* Abort the in-flight or queued direct transfer with this cookie (a wish;
- * xhci_direct_abort). */
-void xhci_ep_abort_cookie(struct ep_context *ep_ctx, APTR cookie);
-
 BOOL xhci_ep_complete_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr,
                              u32 residue, BOOL short_packet,
                              struct xhci_td_completion *out, BOOL *deferred);
@@ -155,6 +164,7 @@ BOOL xhci_ep_complete_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr,
  * (XHCI_XF_TIMEOUT + timeout_ms). */
 s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io);
 
+/* Answer everything in the pending queue (never on a ring) with reply_code. */
 void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code);
 
 /* RT ISO functions.  The iso hooks are passed by typed parameter (not packed
@@ -171,6 +181,8 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, APTR buffer, u32 length, u32 a
 void xhci_ep_rt_iso_out(struct ep_context *ep_ctx, APTR buffer, u32 length, u32 act_len, u16 rt_frame, u16 ubr_flags);
 
 void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx);
+/* A ring underrun / overrun event arrived for a stream that is being stopped. */
+void xhci_ep_rt_iso_ring_empty(struct ep_context *ep_ctx);
 
 /* Free a staging IN buffer back to the endpoint's per-endpoint slab. */
 void xhci_ep_free_rt_iso_buffer(struct ep_context *ep_ctx, APTR data_buffer);

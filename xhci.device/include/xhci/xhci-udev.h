@@ -82,6 +82,8 @@ struct udev_suspend {
 	u8 stops_pending;
 	u8 u3_port;
 	struct xhci_xfer *stash; /* request to reply when the stops drain */
+	u32 stopped_us;          /* when the endpoints were last stopped for a suspend;
+	                          * outlives the sequence (xhci_udev_resume_device) */
 };
 
 /**
@@ -185,7 +187,7 @@ void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive);
 void xhci_xfer_complete(struct usb_device *udev, struct xhci_xfer *io, s8 err, u32 actual);
 
 /* Send commands to device */
-void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type);
+BOOL xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, s32 ep_type);
 
 /* Port suspend (U3) sequencing (struct udev_suspend above) */
 BOOL xhci_udev_suspend_device(struct usb_device *udev, u8 root_port, struct xhci_xfer *deferred_req);
