@@ -44,7 +44,7 @@ cd ../..    # emu68-driver-stack root
 ## Neptune context HCD ABI (matched pair)
 
 This driver and the Neptune stack (`rondoval/neptune`, an incompatible fork of the
-Poseidon USB stack; local checkout `poseidon-backport`) evolve together. That repo's
+Poseidon USB stack; local checkout `neptune`) evolve together. That repo's
 `docs/neptune-context-hcd-abi.md` governs the ABI (`NSCMD_*` lifecycle ops,
 `UHCF_CONTEXT` = BIT(5), `UHIOERR_NO_BANDWIDTH` = 14), alongside `implementation-plan.md`. The ABI is Neptune's own,
 not Poseidon's; this driver implements neither Poseidon's V3 interface nor
