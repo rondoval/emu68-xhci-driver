@@ -2,10 +2,12 @@
 
 Configuration-relevant changes across all releases, newest first:
 
-* **5.x is the compatibility line.**  It speaks the classic Poseidon HCD ABI, so
-  it drives **classic Poseidon 4.x** and also works with **Poseidon for AmigaOS
-  6.x**, which retains that ABI.  On Poseidon 6.x prefer the driver's **6.x**
-  line — it is faster there — maintained on the
+* **5.x is the compatibility line.**  It speaks the classic V1/V2 `IOUsbHWReq`
+  interface, so it drives **classic Poseidon 4.x** and also works with
+  **[Neptune](https://github.com/rondoval/neptune) 6.x** (an incompatible fork
+  of the Poseidon USB stack; 6.0–6.2 were published as "Poseidon for AmigaOS",
+  the name older notes below use), which retains that interface.  On Neptune
+  prefer the driver's **6.x** line — it is faster there — maintained on the
   [`context_release` branch](https://github.com/rondoval/emu68-xhci-driver/tree/context_release).
 * **From 4.4 or later:** no configuration changes are required.
 * **From 3.x:** `bcmpcie.library` must be installed in `LIBS:` for PCIe-based

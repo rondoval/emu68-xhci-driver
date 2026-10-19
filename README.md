@@ -11,9 +11,11 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 [Das U-Boot](https://source.denx.de/u-boot/u-boot).
 
 > **Which line do you need?** `xhci.device` **5.x** — this line — is the compatibility
-> line: it speaks the classic Poseidon HCD ABI, so it drives **classic Poseidon 4.x** and
-> also works with **Poseidon for AmigaOS 6.x**, which keeps that ABI alongside its own.
-> On Poseidon 4.x this is your only option. On Poseidon 6.x prefer the driver's **6.x**
+> line: it speaks the classic V1/V2 `IOUsbHWReq` interface, so it drives **classic
+> Poseidon 4.x** and also works with [**Neptune**](https://github.com/rondoval/neptune)
+> **6.x** (an incompatible fork of the Poseidon USB stack, released as "Poseidon for
+> AmigaOS" up to 6.2), which keeps that interface alongside its own.
+> On Poseidon 4.x this is your only option. On Neptune prefer the driver's **6.x**
 > line — through this one, SuperSpeed devices still go through the USB 2.0 emulation and
 > run slower, whereas the 6.x line hands the stack real USB 3.0 devices and adds bulk
 > streams. It is maintained on the
@@ -44,8 +46,8 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 ## Requirements
 
 - AmigaOS 3.1 or later (Kickstart V39 minimum).
-- **Classic Poseidon 4.x**, or **Poseidon for AmigaOS 6.x** — this line works with both,
-  though on 6.x the 6.x driver line is faster. See the note above.
+- **Classic Poseidon 4.x**, or **Neptune 6.x** — this line works with both, though on
+  Neptune the 6.x driver line is faster. See the note above.
 - [PiStorm32-lite](https://github.com/PiStorm/pistorm32-lite) with a Raspberry Pi 4B or CM4.
 - Emu68 1.1 alpha.1 or later — needed to map the PCIe BAR window into the lower 4 GB.
 - `gic400.library` — [emu68-gic400-library](https://github.com/rondoval/emu68-gic400-library).
@@ -70,7 +72,7 @@ ports. On a CM4, unit 1 exists only if you have attached a PCIe xHCI card.
 - **Real-time isochronous audio may glitch**, and non-RT isochronous transfers are
   untested. AHI 4.x is not supported yet.
 - **No USB 3.0 bulk streams** — the fast UAS path for mass storage is only in the 6.x
-  line, so USB 3.0 storage is slower here even under Poseidon 6.x.
+  line, so USB 3.0 storage is slower here even under Neptune.
 - **USB 3.0 link power management does nothing on the Pi 4B's own ports** — the VL805
   never enters U1/U2 by fixed firmware policy, exactly as under Linux. It works on the
   downstream links of external SuperSpeed hubs.
