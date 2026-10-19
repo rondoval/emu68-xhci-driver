@@ -568,7 +568,7 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
  * the controller steps over, and its request is answered: UHIOERR_NAKTIMEOUT
  * for an expired one (a deadline is a NAK timeout, not "device dead" - the
  * stack weighs UHIOERR_TIMEOUT three times worse), IOERR_ABORTED otherwise.
- * Either way with the bytes its fully consumed TRBs moved: Poseidon's bulk
+ * Either way with the bytes its fully consumed TRBs moved: Neptune's bulk
  * streams go on after a NAK timeout with a non-zero actual.  The TRB the
  * controller was working on counts as not moved.
  *

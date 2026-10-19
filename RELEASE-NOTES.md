@@ -2,10 +2,14 @@
 
 Configuration-relevant changes across all releases, newest first:
 
-* **6.x requires Poseidon for AmigaOS 6.x**, whose context HCD ABI is the only
-  one this line implements.  **Still on classic Poseidon 4.x?  Do not upgrade
-  to 6.x** — use the driver's **5.x** line instead, which speaks the classic
-  Poseidon HCD ABI and is maintained on the
+* **6.x requires [Neptune](https://github.com/rondoval/neptune) 6.x**, whose
+  context HCD interface is the only one this line implements.  Neptune is an
+  incompatible fork of the Poseidon USB stack; its 6.0–6.2 releases were
+  published as "Poseidon for AmigaOS", and older notes below use that name.
+  The context interface is Neptune's own, not part of Poseidon's API.
+  **On Poseidon (classic 4.x or AROS 5.x)?  Do not upgrade to 6.x** — use the
+  driver's **5.x** line instead, which speaks the classic V1/V2 `IOUsbHWReq`
+  interface and is maintained on the
   [`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main).
   The two lines are alternatives, not a sequence: pick the one that matches
   your USB stack.
@@ -35,11 +39,11 @@ The isochronous IN path learns what USB video cameras need.
 - **A class can be told about lost isochronous IN intervals.** With a new
   flag in its hook block, a class's hooks are also called for an interval
   that failed or was skipped. The video class uses it to recognise a damaged
-  picture. Needs Poseidon for AmigaOS 6.3.
+  picture. Needs Neptune 6.3.
 - **A halted endpoint loses one transfer, not all of them.** When a device
   refuses a transfer, or the controller stops an endpoint over a bus error,
   only that transfer comes back with the error. The others stay queued and
-  go out once Poseidon has cleared the halt on the device - on a control
+  go out once Neptune has cleared the halt on the device - on a control
   endpoint at once.
 - **A passing bus error no longer fails a transfer.** A failed transaction
   on a bulk or interrupt endpoint is tried again, up to three more rounds,

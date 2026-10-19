@@ -8,7 +8,7 @@
  * for the why.
  *
  * The wire queue depth is capped by the massstorage 'UAS queue depth'
- * slider, which is latched at bind — change it in Trident and replug the
+ * slider, which is latched at bind — change it in Neptune USB and replug the
  * drive between sweep configurations; QD= here only sets how many requests
  * this tool keeps outstanding.
  */
@@ -134,7 +134,7 @@ static void db_usage(void)
         "            (massstorage NCM_MAXTAGS). Default 1,2,4,8,16. This is only what\n"
         "            diskbench keeps outstanding; the wire depth is capped by the\n"
         "            massstorage 'UAS queue depth' slider, which latches at bind, so\n"
-        "            change it in Trident and replug the drive between sweeps.\n"
+        "            change it in Neptune USB and replug the drive between sweeps.\n"
         "  SIZE=     fs test file size, and the dev engine's random-read working set.\n"
         "            1M..1G, default 256M. Pick something past the drive's own cache.\n"
         "  SECS=     Measured seconds per point, 1..600, default 3. Each point also\n"

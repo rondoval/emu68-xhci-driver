@@ -1,15 +1,15 @@
 #ifndef DEVICES_USBHCD_CONTEXT_H
 #define DEVICES_USBHCD_CONTEXT_H
 /*
-**  usbhcd_context.h — the context HCD ABI (lifecycle ops + transfers)
+**  usbhcd_context.h - the context HCD ABI (lifecycle ops + transfers)
 **
 **  The xHCI-native half of the two-ABI split: explicit device/endpoint
 **  lifecycle operations and handle-keyed transfers for hardware-managed
 **  controllers. This ABI has its own commands and its own request structs;
 **  the only surface it shares with the legacy per-transfer wire format
-**  (usbhardware.h V1+V2, which stays frozen for classic HCDs) — the
+**  (usbhardware.h V1+V2, which stays frozen for classic HCDs) - the
 **  UHIOERR_ error value pool, the UHA_Capabilities capability tag and bits,
-**  and the iso buffer-block flag pool — lives in the shared header
+**  and the iso buffer-block flag pool - lives in the shared header
 **  usbhcd_common.h, included below. A driver opts in with the UHCF_CONTEXT
 **  capability bit and advertises the individual commands it implements
 **  through NSCMD_DEVICEQUERY (NewStyle Device).
@@ -47,7 +47,7 @@
 #endif
 
 /* ------------------------------------------------------------------------ */
-/* Commands — a block in the third-party command area. The NSD standard
+/* Commands - a block in the third-party command area. The NSD standard
  * keeps 0x4000-0x7FFF and 0xC000-0xFFFF for the OS; third parties get
  * 0x0000-0x3FFF and 0x8000-0xBFFF. Fleet allocations: nvme passthrough
  * 0x8020..0x8024, this block here, netdev 0x8900..0x891f, usbvideo.device
@@ -56,7 +56,7 @@
  * unimplemented one is rejected with IOERR_NOCMD.
  *
  * Each op below is marked [M] mandatory or [O] optional:
- *   [M] a UHCF_CONTEXT driver MUST implement it — the stack rejects the
+ *   [M] a UHCF_CONTEXT driver MUST implement it - the stack rejects the
  *       context backend and falls back to the legacy ABI otherwise (the gate
  *       is UHCD_MANDATORY_CMD_MASK below).
  *   [O] optional: the stack probes for it via NSD and degrades gracefully when
@@ -106,14 +106,14 @@
 /* Device handles. The HCD allocates handles at NSCMD_USB_CREATE_DEVICE and
  * the stack treats them as opaque. Handle values >= UHCD_HANDLE_RESERVED are
  * reserved for emulated devices; the HCD never allocates them for real slots
- * and ignores them where a real device is required (e.g. cdo_TTHubHandle —
+ * and ignores them where a real device is required (e.g. cdo_TTHubHandle -
  * root ports have no external TT, the xHC translates itself).
  *
- * The root hub(s) are emulated by the HCD — they have no hardware slot — so
+ * The root hub(s) are emulated by the HCD - they have no hardware slot - so
  * their create performs no hardware work, and EVERY implemented lifecycle op
  * on a root-hub handle (destroy, update-EP0, configure/deconfigure,
  * update-hub) is a successful no-op: the stack drives the root devices
- * through the same code path as any other device — including the endpoint
+ * through the same code path as any other device - including the endpoint
  * tokens their create/configure ops return, whose submits the HCD routes to
  * the root-hub emulation.
  *
@@ -213,7 +213,7 @@ struct UhcdUpdateEp0            /* NSCMD_USB_UPDATE_EP0 */
 {
     ULONG   ueo_DeviceHandle;
     UWORD   ueo_Ep0MaxPkt;      /* validated bMaxPacketSize0 in BYTES.  The
-                                   stack validates per speed — LS: 8, FS:
+                                   stack validates per speed - LS: 8, FS:
                                    8/16/32/64, HS: 64, SS+: always 512 (the SS
                                    descriptor byte is the exponent; never pass
                                    it through raw).  The HCD rejects anything
@@ -231,7 +231,7 @@ struct UhcdEndpointDesc         /* one endpoint of a configure op */
     UBYTE   ed_Interval;        /* encoded (as in the endpoint descriptor) */
     UBYTE   ed_MaxBurst;        /* SS companion; 0 otherwise */
     UBYTE   ed_Mult;            /* SS isoch */
-    UBYTE   ed_IfClass;         /* bInterfaceClass of the owning interface — REQUIRED
+    UBYTE   ed_IfClass;         /* bInterfaceClass of the owning interface - REQUIRED
                                    when known: controller quirks key on it (e.g. the
                                    VL805 SS-bulk-OUT mass-storage burst quirk is NOT
                                    applied when this is 0/unknown) */
@@ -245,7 +245,7 @@ struct UhcdEndpointDesc         /* one endpoint of a configure op */
  * contexts and transfer rings for the ceo_Add[] set and drops the endpoints
  * named in ceo_DropAddresses[]. The stack fills ceo_Add straight from its
  * parsed config/interface/endpoint tree; on success the HCD writes each added
- * endpoint's submit token back into its ceo_Add[] entry (ed_Token — the block
+ * endpoint's submit token back into its ceo_Add[] entry (ed_Token - the block
  * is referenced, not copied, and must stay valid for the whole op). Dropping
  * an endpoint invalidates its token and retires its in-flight transfers.
  * A plain SET_CONFIGURATION populates only ceo_Add; a SET_INTERFACE populates
@@ -288,7 +288,7 @@ struct UhcdResetDevice          /* NSCMD_USB_RESET_DEVICE */
 
 /* Endpoint-ring quiesce around a port suspend (xHCI 4.15.1: all endpoints
  * stopped before the port is directed to U3).  The port transition itself is
- * NOT part of the op — the stack's hub class drives the link (external hub
+ * NOT part of the op - the stack's hub class drives the link (external hub
  * port or root-hub view alike): suspend = SET_SUSPEND(1), then the port to
  * U3; resume = port to U0, then SET_SUSPEND(0).  Idempotent both ways; a
  * root-hub handle is a successful no-op. */
@@ -333,17 +333,17 @@ struct UhcdSetLinkPower         /* NSCMD_USB_SET_LINK_POWER */
     UWORD   slo_OutU1Pel;       /* U1 Path Exit Latency (µs) */
     UWORD   slo_OutU2Sel;       /* U2 System Exit Latency (µs) */
     UWORD   slo_OutU2Pel;       /* U2 Path Exit Latency (µs) */
-    UWORD   slo_OutFlags;       /* UHCD_LPO_* — which wire transfers the stack should issue */
+    UWORD   slo_OutFlags;       /* UHCD_LPO_* - which wire transfers the stack should issue */
 };
 
-/* slo_Flags — capability facts from the device's BOS descriptor */
+/* slo_Flags - capability facts from the device's BOS descriptor */
 #define UHCD_LPF_USB2_LPM       (1 << 0)    /* USB2-ext: LPM (L1) capable */
 #define UHCD_LPF_BESL           (1 << 1)    /* USB2-ext: BESL/alt-HIRD supported */
 #define UHCD_LPF_BESL_BASELINE  (1 << 2)    /* slo_BeslBaseline is valid */
 #define UHCD_LPF_BESL_DEEP      (1 << 3)    /* slo_BeslDeep is valid */
 #define UHCD_LPF_LTM            (1 << 4)    /* SS cap: LTM capable */
 
-/* slo_OutFlags — the device/hub control transfers the stack issues after a
+/* slo_OutFlags - the device/hub control transfers the stack issues after a
  * successful op (io_Error == 0).  Port timeouts are conveyed by the nonzero
  * slo_OutU1/U2Timeout fields, not a flag. */
 #define UHCD_LPO_SET_SEL        (1 << 0)    /* send SET_SEL (SEL/PEL valid, ≥1 state enabled) */
@@ -361,7 +361,7 @@ UHCD_ABI_ASSERT(sizeof(struct UhcdSetLinkPower) == 38);
  * selects its ring by the stream_id argument (1..N; 0 is then invalid).
  * FREE_STREAMS returns the endpoint to its default single ring; it requires
  * an idle endpoint and is idempotent.  Without a successful alloc the
- * endpoint stays single-ring and the submit's stream_id rides along ignored —
+ * endpoint stays single-ring and the submit's stream_id rides along ignored -
  * a stack over a driver without these ops keeps the pre-streams behavior.
  * A driver only lists the ops in its NSD response when the controller
  * actually supports streams (xHCI: HCCPARAMS1.MaxPSASize > 0).  The emulated
@@ -376,14 +376,14 @@ struct UhcdStreams              /* NSCMD_USB_ALLOC_STREAMS / FREE_STREAMS */
 };
 
 /* ------------------------------------------------------------------------ */
-/* The transfer path — every control/bulk/interrupt/iso transfer is a direct
+/* The transfer path - every control/bulk/interrupt/iso transfer is a direct
  * call into the HCD; no IORequest travels.
  *
  * NSCMD_USB_ATTACH (IOStdReq framing, io_Data -> UhcdAttach) is issued once
  * per open, right after the NSD scan: the stack passes its completion hook
  * and the HCD returns its three transfer entries plus an opaque controller
  * context, passed back as the first argument of every entry (HCDs are
- * ROM-able and carry no writable data — the context is their only anchor).
+ * ROM-able and carry no writable data - the context is their only anchor).
  * Re-attach replaces the hook.  The entries use the plain C (stack-argument)
  * calling convention; they are callable from any task, never from
  * interrupts.
@@ -392,7 +392,7 @@ struct UhcdStreams              /* NSCMD_USB_ALLOC_STREAMS / FREE_STREAMS */
  * CREATE_DEVICE yields the device's EP0 token (cdo_Ep0Token, root hubs
  * included), CONFIGURE_ENDPOINTS yields one token per added endpoint
  * (ed_Token).  A token is valid from delivery until its endpoint is dropped
- * or its device destroyed; a stale token is safe — the entries fail it with
+ * or its device destroyed; a stale token is safe - the entries fail it with
  * UHIOERR_TIMEOUT (device-gone semantics).
  *
  *   LONG err = submit(hcd, ep_token, data, length, naktimeout_ms,
@@ -444,7 +444,7 @@ typedef LONG (*UhcdCtrlSubmitFunc)(APTR hcd, APTR ep0_token,
 typedef LONG (*UhcdAbortFunc)(APTR hcd, APTR ep_token, APTR cookie);
 
 /* ------------------------------------------------------------------------ */
-/* Clock-driven iso hooks — isochronous endpoints only.
+/* Clock-driven iso hooks - isochronous endpoints only.
  *
  * NSCMD_USB_REGISTER_HOOKS installs a struct USBIsoHooks on an iso endpoint,
  * NSCMD_USB_UNREGISTER_HOOKS removes it (same block passed back),
@@ -455,13 +455,13 @@ typedef LONG (*UhcdAbortFunc)(APTR hcd, APTR ep_token, APTR cookie);
  *
  *   CallHookPkt(hook, uih_Object, &buffer_request)
  *
- * where buffer_request is the classic 12-byte iso buffer block (Poseidon's
- * struct IOUsbHWBufferReq == the driver's struct USBBufferRequest — this
+ * where buffer_request is the classic 12-byte iso buffer block (Neptune's
+ * struct IOUsbHWBufferReq == the driver's struct USBBufferRequest - this
  * header deliberately names neither: {u8 *data; u32 length; u16 frame;
- * u16 flags}).  uih_Object is caller-chosen (Poseidon passes the classic
+ * u16 flags}).  uih_Object is caller-chosen (Neptune passes the classic
  * IOUsbHWRTIso block so existing class hooks run unchanged).  The hooks
  * must be non-blocking.  uih_ReleaseHook (may be NULL) fires once, with a
- * NULL message, when the stream dies without a client STOP — endpoint
+ * NULL message, when the stream dies without a client STOP - endpoint
  * failure or device teardown.  On the done direction the buffer block's
  * flags carry UHCD_UBF_XFER_ERROR when the interval's transfer failed on
  * the wire.  An IN interval that brought no data is not reported at all,

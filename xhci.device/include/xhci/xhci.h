@@ -169,7 +169,7 @@ struct xhci_ctrl
 #define XHCI_BOUNCE_MED_SIZE (32 * 1024) /* covers ≤32KiB bulk reads */
 #define XHCI_BOUNCE_MED_CAP 8
 #define XHCI_BOUNCE_LARGE_SIZE (2 * 1024 * 1024) /* mass storage 2MB transfers */
-#define XHCI_BOUNCE_LARGE_CAP 2					 /* Poseidon 1 bulk/EP */
+#define XHCI_BOUNCE_LARGE_CAP 2					 /* Neptune: 1 bulk/EP */
 	struct slab_cache td_slab;					 /* one struct xhci_td per slot */
 	struct slab_cache xfer_slab;				 /* one struct xhci_xfer per slot (direct + internal xfers) */
 	struct slab_cache trb_addr_slab;			 /* XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t) per slot */

@@ -1,7 +1,7 @@
 #ifndef DEVICES_USBHCD_COMMON_H
 #define DEVICES_USBHCD_COMMON_H
 /*
-**  usbhcd_common.h — values shared by the two USB HCD ABIs
+**  usbhcd_common.h - values shared by the two USB HCD ABIs
 **
 **  The legacy per-transfer ABI (usbhardware.h) and the context lifecycle ABI
 **  (usbhcd_context.h) share a narrow value surface: the io_Error value pool,
@@ -11,8 +11,8 @@
 **  This header is the single source of truth for those values so none of
 **  them is ever defined twice.
 **
-**  VENDORED HEADER — the source of truth is
-**  poseidon-backport/include/devices/usbhcd_common.h; the copy in
+**  VENDORED HEADER - the source of truth is
+**  neptune/include/devices/usbhcd_common.h; the copy in
 **  emu68-xhci-driver/xhci.device/include/devices/ must stay identical.
 */
 
@@ -67,7 +67,7 @@
 #define UHCMD_QUERYDEVICE       (CMD_NONSTD + 0)
 #define UHCMD_USBRESET          (CMD_NONSTD + 1)
 
-/* UHA_State is LEGACY-ABI ONLY — the context stack never queries operational
+/* UHA_State is LEGACY-ABI ONLY - the context stack never queries operational
  * state; its value bits (UHSB_/UHSF_) live in the legacy usbhardware.h. */
 #define UHA_Dummy               (TAG_USER  + 0x4711)
 #define UHA_State               (UHA_Dummy + 0x01) /* legacy ABI only */
@@ -93,7 +93,7 @@
  * namespace: bits 0..4 and 31 belong to the legacy ABI, bit 5 (CONTEXT) to
  * the context ABI.
  *
- * NOTE: bit 4 is the CLASSIC UHCF_USB2OTG — the two namespaces share the tag,
+ * NOTE: bit 4 is the CLASSIC UHCF_USB2OTG - the two namespaces share the tag,
  * so bit 4 must never be reused. */
 #define UHCB_USB20              0       /* Host controller supports USB 2.0 Highspeed          */
 #define UHCB_ISO                1       /* HCD supports ISO transfers                          */
@@ -112,8 +112,8 @@
 #define UHCF_USB30              (1UL << UHCB_USB30)
 
 /* ------------------------------------------------------------------------ */
-/* Iso buffer-block flag pool (ubr_Flags of the 12-byte iso buffer block —
- * Poseidon's struct IOUsbHWBufferReq == the driver's struct USBBufferRequest).
+/* Iso buffer-block flag pool (ubr_Flags of the 12-byte iso buffer block -
+ * Neptune's struct IOUsbHWBufferReq == the driver's struct USBBufferRequest).
  * Bit 0 (CONTBUFFER) is the classic scatter/gather flag; bit 14 (XFER_ERROR)
  * is set by the HCD on a *_done call when the interval failed on the wire. */
 #define UBFB_CONTBUFFER         0       /* more buffer to copy (scatter/gather) */

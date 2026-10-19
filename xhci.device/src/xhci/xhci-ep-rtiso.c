@@ -43,7 +43,7 @@
 #define KprintfT(fmt, ...) PrintPistorm("[xhci-rtiso] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-/* Hook object for every iso hook call: the registrant's uih_Object (Poseidon
+/* Hook object for every iso hook call: the registrant's uih_Object (Neptune
  * passes the classic IOUsbHWRTIso block so class hooks run unchanged), the
  * hooks block itself as fallback. */
 #define RT_HOOK_OBJ(hooks) ((hooks)->uih_Object ? (hooks)->uih_Object : (APTR)(hooks))

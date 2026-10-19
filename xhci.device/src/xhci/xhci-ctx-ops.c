@@ -21,7 +21,7 @@
  * endpoint tokens where the op returns tokens), and root-hub transfers route
  * to the matching protocol-pure view through the direct path's deferral.
  *
- * Design: poseidon-backport/docs/poseidon-context-hcd-abi.md.
+ * Design: neptune/docs/neptune-context-hcd-abi.md.
  */
 
 #ifdef __INTELLISENSE__

@@ -20,7 +20,7 @@
 #define LIB_MIN_VERSION 39 /* we use memory pools */
 
 /* Below bcmpcie.library (-41), which we OpenLibrary() from our resident init, and
- * above the Poseidon ROM set (-45 and below) that psdAddHardware()es us.  Negative
+ * above the Neptune ROM set (-45 and below) that psdAddHardware()es us.  Negative
  * because the Emu68 module window - devicetree.resource and friends, which live in
  * Emu68's own Z3 board ROM - only opens at `romboot` (-40); see pcie_private.h.
  * Only matters in a Kickstart ROM: RamLib ignores this field for a DEVS: copy. */

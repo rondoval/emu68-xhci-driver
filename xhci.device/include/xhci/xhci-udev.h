@@ -16,7 +16,7 @@
 #include <xhci/ch9.h>
 
 /* Recognise the stack's CLEAR_FEATURE(ENDPOINT_HALT) on the direct path.
- * Device-side halt clearing is entirely poseidon.library's job (class API or
+ * Device-side halt clearing is entirely neptune.library's job (class API or
  * async recovery sweep); the driver never issues one, it only watches for the
  * request where host-side endpoint state has to follow it. */
 static inline BOOL xhci_setup_is_clear_halt(const struct UhcdSetupData *setup)

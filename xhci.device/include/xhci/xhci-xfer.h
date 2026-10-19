@@ -102,7 +102,7 @@ typedef char xhci_xfer_node_first_assert[offsetof(struct xhci_xfer, node) == 0 ?
 static inline void xhci_xfer_reply(struct xhci_xfer *xf) { xf->complete(xf); }
 
 /* The classic 12-byte iso buffer block handed to the clock-driven iso hooks
- * (== Poseidon's struct IOUsbHWBufferReq).  The context ABI deliberately leaves
+ * (== Neptune's struct IOUsbHWBufferReq).  The context ABI deliberately leaves
  * this type anonymous (usbhcd_context.h), so each side names it privately; its
  * ubr_Flags bits live in usbhcd_common.h. */
 struct USBBufferRequest
