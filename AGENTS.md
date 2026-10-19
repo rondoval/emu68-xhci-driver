@@ -46,9 +46,8 @@ cd ../..    # emu68-driver-stack root
 This driver and the Neptune stack (`rondoval/neptune`, an incompatible fork of the
 Poseidon USB stack; local checkout `poseidon-backport`) evolve together. That repo's
 `docs/neptune-context-hcd-abi.md` governs the ABI (`NSCMD_*` lifecycle ops,
-`UHCF_CONTEXT` = BIT(5), `UHIOERR_NO_BANDWIDTH` = 14), alongside
-`neptune-vs-xhci-driver-model.md` and `implementation-plan.md`. The ABI is Neptune's own,
-not Poseidon's; this driver implements neither Poseidon's V3 `IOUsbHWReq` extension nor
+`UHCF_CONTEXT` = BIT(5), `UHIOERR_NO_BANDWIDTH` = 14), alongside `implementation-plan.md`. The ABI is Neptune's own,
+not Poseidon's; this driver implements neither Poseidon's V3 interface nor
 the legacy per-transfer commands.
 
 - The context ABI is the **only** client ABI; legacy `CMD_REQUEST_*` and classic

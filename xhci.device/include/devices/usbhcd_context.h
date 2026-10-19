@@ -274,7 +274,7 @@ struct UhcdUpdateHub            /* NSCMD_USB_UPDATE_HUB */
     UWORD   uho_NumPorts;
     UWORD   uho_TTThinkTime;
     UBYTE   uho_MultiTT;
-    UBYTE   uho_HdrDecLat;      /* SS hubs: bHubHdrDecLat (0.1 µs units, as in
+    UBYTE   uho_HdrDecLat;      /* SS hubs: bHubHdrDecLat (0.1 us units, as in
                                    the SS hub descriptor); 0 otherwise.  Feeds
                                    the HCD's U1/U2 exit-latency computation for
                                    devices downstream of this hub. */
@@ -308,7 +308,7 @@ struct UhcdSetSuspend           /* NSCMD_USB_SET_SUSPEND */
  * SET_SEL, SET_FEATURE(U1/U2/LTM_ENABLE) to the device and
  * SetPortFeature(U1/U2_TIMEOUT) to the parent hub itself.  The slo_U1/U2Timeout
  * and slo_MaxExitLatency IN fields are OVERRIDES: 0 = the HCD computes them.
- * Devices reject U1/U2_ENABLE until configured (USB 3.2 §9.4.9), so issue this
+ * Devices reject U1/U2_ENABLE until configured (USB 3.2 section 9.4.9), so issue this
  * op only after the wire SET_CONFIGURATION completed.  The op replies only once
  * the MEL Evaluate Context has been latched: io_Error == 0 means the controller
  * state is in place and the slo_Out* fields are valid, so the stack should issue
@@ -319,20 +319,20 @@ struct UhcdSetLinkPower         /* NSCMD_USB_SET_LINK_POWER */
     UWORD   slo_Flags;          /* UHCD_LPF_* capability facts from the BOS */
     UWORD   slo_U1Enable;       /* policy: allow U1 on the upstream link */
     UWORD   slo_U2Enable;       /* policy: allow U2 */
-    UWORD   slo_U1DevExitLat;   /* BOS SS cap bU1DevExitLat (µs); 0 = U1 incapable */
-    UWORD   slo_U2DevExitLat;   /* BOS SS cap wU2DevExitLat (µs); 0 = U2 incapable */
+    UWORD   slo_U1DevExitLat;   /* BOS SS cap bU1DevExitLat (us); 0 = U1 incapable */
+    UWORD   slo_U2DevExitLat;   /* BOS SS cap wU2DevExitLat (us); 0 = U2 incapable */
     UBYTE   slo_BeslBaseline;   /* BOS USB2-ext; valid if UHCD_LPF_BESL_BASELINE */
     UBYTE   slo_BeslDeep;       /* BOS USB2-ext; valid if UHCD_LPF_BESL_DEEP */
     UWORD   slo_U1Timeout;      /* IN override; 0 = HCD computes */
     UWORD   slo_U2Timeout;      /* IN override; 0 = HCD computes */
-    ULONG   slo_MaxExitLatency; /* IN override MEL (µs); 0 = HCD computes */
+    ULONG   slo_MaxExitLatency; /* IN override MEL (us); 0 = HCD computes */
     /* --- OUT: HCD-computed wire parameters, read back by the stack --- */
     UWORD   slo_OutU1Timeout;   /* hub-encoded U1 inactivity timeout; 0 = state off */
     UWORD   slo_OutU2Timeout;   /* hub-encoded U2 inactivity timeout; 0 = state off */
-    UWORD   slo_OutU1Sel;       /* U1 System Exit Latency (µs) for the SET_SEL payload */
-    UWORD   slo_OutU1Pel;       /* U1 Path Exit Latency (µs) */
-    UWORD   slo_OutU2Sel;       /* U2 System Exit Latency (µs) */
-    UWORD   slo_OutU2Pel;       /* U2 Path Exit Latency (µs) */
+    UWORD   slo_OutU1Sel;       /* U1 System Exit Latency (us) for the SET_SEL payload */
+    UWORD   slo_OutU1Pel;       /* U1 Path Exit Latency (us) */
+    UWORD   slo_OutU2Sel;       /* U2 System Exit Latency (us) */
+    UWORD   slo_OutU2Pel;       /* U2 Path Exit Latency (us) */
     UWORD   slo_OutFlags;       /* UHCD_LPO_* - which wire transfers the stack should issue */
 };
 
@@ -346,7 +346,7 @@ struct UhcdSetLinkPower         /* NSCMD_USB_SET_LINK_POWER */
 /* slo_OutFlags - the device/hub control transfers the stack issues after a
  * successful op (io_Error == 0).  Port timeouts are conveyed by the nonzero
  * slo_OutU1/U2Timeout fields, not a flag. */
-#define UHCD_LPO_SET_SEL        (1 << 0)    /* send SET_SEL (SEL/PEL valid, ≥1 state enabled) */
+#define UHCD_LPO_SET_SEL        (1 << 0)    /* send SET_SEL (SEL/PEL valid, >=1 state enabled) */
 #define UHCD_LPO_U1_INIT        (1 << 1)    /* send SET_FEATURE(U1_ENABLE) (device may initiate) */
 #define UHCD_LPO_U2_INIT        (1 << 2)    /* send SET_FEATURE(U2_ENABLE) */
 #define UHCD_LPO_LTM            (1 << 3)    /* send SET_FEATURE(LTM_ENABLE) */
