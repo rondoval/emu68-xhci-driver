@@ -45,17 +45,17 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 		return -1;
 	}
 
-	APTR key = DT_OpenKey((CONST_STRPTR) "/scb/xhci");
+	APTR key = DT_OpenSymbol(DeviceTreeBase, (CONST_STRPTR) "xhci"); /* /scb/xhci@7e9c0000; no alias names it */
 	if (key == NULL)
 	{
-		Kprintf("[bcm-xhci] %s: Failed to open key %s\n", __func__, "/scb/xhci");
+		Kprintf("[bcm-xhci] %s: no node labelled xhci\n", __func__);
 		return -1;
 	}
 
 	CONST_STRPTR status = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "status"));
 	if (status != NULL && _Stricmp(status, (CONST_STRPTR) "disabled") == 0)
 	{
-		Kprintf("[bcm-xhci] %s: Node %s is disabled\n", __func__, "/scb/xhci");
+		Kprintf("[bcm-xhci] %s: Node %s is disabled\n", __func__, DT_GetKeyName(key));
 		DT_CloseKey(key);
 		return -1;
 	}
