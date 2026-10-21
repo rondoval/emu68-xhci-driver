@@ -221,6 +221,8 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
     {
         Kprintf("[xhci] %s: Invalid request length %lu\n", __func__, (ULONG)io->req.io_Message.mn_Length);
         io->req.io_Error = IOERR_OPENFAIL;
+        io->req.io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+        io->req.io_Unit = NULL;
         return;
     }
 
@@ -244,6 +246,8 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
         {
             Kprintf("[xhci]%s: Failed to allocate unit\n", __func__);
             io->req.io_Error = IOERR_OPENFAIL;
+            io->req.io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+            io->req.io_Unit = NULL;
             return;
         }
         unit->sysBase = base->sysBase;
@@ -256,6 +260,8 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
     {
         KprintfT("[xhci] %s: Unit is already open, we only support exclusive access\n", __func__);
         io->req.io_Error = IOERR_UNITBUSY;
+        io->req.io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+        io->req.io_Unit = NULL;
         return;
     }
 
@@ -263,6 +269,8 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
     if (firstOpen && xhci_open_libraries(base) != 0)
     {
         io->req.io_Error = IOERR_OPENFAIL;
+        io->req.io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+        io->req.io_Unit = NULL;
         if (createdUnit)
         {
             RemoveMinNode((struct MinNode *)unit);
@@ -285,6 +293,8 @@ void openLib(struct USBIORequest *io asm("a1"), LONG unitNumber asm("d0"),
     {
         Kprintf("[xhci] %s: Failed to open unit, error code %ld\n", __func__, result);
         io->req.io_Error = IOERR_OPENFAIL;
+        io->req.io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+        io->req.io_Unit = NULL;
 
         RemoveMinNode((struct MinNode *)unit);
         FreeMem(unit, sizeof(struct XHCIUnit));
