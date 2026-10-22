@@ -4,7 +4,7 @@
 #define XHCI_DEVICE_CONFIG_H
 
 #ifndef DEVICE_NAME
-#define DEVICE_NAME "xhci.device"
+#define DEVICE_NAME "xhci-legacy.device"
 #endif
 
 #ifndef DEVICE_IDSTRING

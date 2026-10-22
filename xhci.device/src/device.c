@@ -202,7 +202,7 @@ APTR initFunction(struct XHCIDevice *base asm("d0"), ULONG segList asm("a0"), st
     base->pcieBase = NULL;
 
     if (!reset_guard_install(&base->resetGuard, SysBase, xhci_reset_prepare, base,
-                             (CONST_STRPTR)"xhci.device"))
+                             (CONST_STRPTR)deviceName))
         Kprintf("[xhci] %s: reset guard install failed\n", __func__);
 
     return base;

@@ -2,6 +2,12 @@
 
 Configuration-relevant changes across all releases, newest first:
 
+* **5.6 renames the driver to `xhci-legacy.device`.**  The 6.x line keeps
+  `xhci.device`, so the two can be installed side by side.  To use 5.6 with
+  Poseidon 4.x, select `xhci-legacy.device` in Trident and save; the old
+  `DEVS:USBHardware/xhci.device` can then be deleted.  On Neptune, pick it in
+  Neptune USB the same way.  Until you switch, the old `xhci.device` keeps
+  working.
 * **5.x is the compatibility line.**  It speaks the classic V1/V2 `IOUsbHWReq`
   interface, so it drives **classic Poseidon 4.x** and also works with
   **[Neptune](https://github.com/rondoval/neptune) 6.x** (an incompatible fork
@@ -15,6 +21,19 @@ Configuration-relevant changes across all releases, newest first:
 * **From pre-3.x:** unit numbering differs.  Unit 0 was the VL805 (PCIe) and
   is now the onboard OTG port; unit 1 is now the VL805.  Update your USB
   stack configuration accordingly.
+
+
+# Release notes — xhci-legacy.device 5.6
+
+Changes since v5.5.
+
+---
+
+## Changes
+
+- **Renamed to `xhci-legacy.device`** so it can sit next to the 6.x line's
+  `xhci.device` in `DEVS:USBHardware/`, for a machine that boots either Poseidon
+  4.x or Neptune. Nothing else changes; see *Upgrade notes* for the switch.
 
 
 # Release notes — xhci.device 5.5

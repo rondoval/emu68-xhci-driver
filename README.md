@@ -5,12 +5,12 @@
 > `.lha` and bundled documentation are published there. This repository is source-only
 > and versioned via git tags.
 
-**xhci.device** is an AmigaOS USB 2.0 / USB 3.0 host controller driver for the xHCI
+**xhci-legacy.device** is an AmigaOS USB 2.0 / USB 3.0 host controller driver for the xHCI
 controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 [Emu68](https://github.com/michalsc/Emu68). The xHCI code is derived from
 [Das U-Boot](https://source.denx.de/u-boot/u-boot).
 
-> **Which line do you need?** `xhci.device` **5.x** — this line — is the compatibility
+> **Which line do you need?** `xhci-legacy.device` **5.x** — this line — is the compatibility
 > line: it speaks the classic V1/V2 `IOUsbHWReq` interface, so it drives **classic
 > Poseidon 4.x** and also works with [**Neptune**](https://github.com/rondoval/neptune)
 > **6.x** (an incompatible fork of the Poseidon USB stack, released as "Poseidon for
@@ -19,7 +19,9 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 > line — through this one, SuperSpeed devices still go through the USB 2.0 emulation and
 > run slower, whereas the 6.x line hands the stack real USB 3.0 devices and adds bulk
 > streams. It is maintained on the
-> [`context_release` branch](https://github.com/rondoval/emu68-xhci-driver/tree/context_release).
+> [`context_release` branch](https://github.com/rondoval/emu68-xhci-driver/tree/context_release)
+> and installs as `xhci.device`. Up to 5.5 this line was called `xhci.device` too; from 5.6
+> the two have different names and can be installed side by side.
 
 > **Upgrading from an older release?** See the *Upgrade notes* at the top of
 > [RELEASE-NOTES.md](RELEASE-NOTES.md) — unit renumbering and the `bcmpcie.library`
@@ -102,9 +104,8 @@ cross-toolchain and the companion CMake packages (`emu68-common`, `emu68-pcie-li
 ```
 
 The build runs inside the toolchain container, so do not invoke `cmake` on the host. The
-superproject installs this line under `Storage/` — `Storage/DEVS/USBHardware/xhci.device`
-— so it does not collide with the 6.x line's device of the same name; the installer copies
-whichever one you pick to `DEVS:USBHardware/`.
+superproject installs it as `DEVS/USBHardware/xhci-legacy.device`, next to the 6.x line's
+`xhci.device`. The source drawer keeps its old name, `xhci.device/`.
 
 Debug backend: `EMU68_CONFIGURE_ARGS="-DEMU68_DEBUG_BACKEND=serial" ./scripts/docker-build.sh`
 (`pistorm` default | `serial` | `off`), selected stack-wide via `emu68-common`. `serial`

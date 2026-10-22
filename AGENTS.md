@@ -14,7 +14,7 @@ cd ../..    # emu68-driver-stack root
 
 - The prefix must already carry `emu68-common` and `emu68-pcie-library`; gic400 headers arrive transitively via `Emu68PCIe::pcie_headers`, and `gic400.library` must be present at runtime.
 - Debug backend: `EMU68_CONFIGURE_ARGS="-DEMU68_DEBUG_BACKEND=serial"` (default `pistorm` | `serial` | `off`); selected stack-wide via `emu68-common`, `serial` links `debug.lib` and is not ROM-able.
-- The stack installs this flavor under `Storage/`, so the driver lands in `install/Storage/DEVS/USBHardware/xhci.device` — beside, not on top of, the context flavor's `install/DEVS/USBHardware/xhci.device`.
+- The driver is `xhci-legacy.device` (since 5.6; the source drawer is still `xhci.device/`) and lands in `install/DEVS/USBHardware/xhci-legacy.device`, next to the context flavor's `install/DEVS/USBHardware/xhci.device`.
 
 ## Code Handling
 
