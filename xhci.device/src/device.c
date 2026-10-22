@@ -233,6 +233,8 @@ void openLib(struct IORequest *io asm("a1"), LONG unitNumber asm("d0"),
     {
         Kprintf("[xhci] %s: Invalid request length %lu\n", __func__, (ULONG)io->io_Message.mn_Length);
         io->io_Error = IOERR_OPENFAIL;
+        io->io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+        io->io_Unit = NULL;
         return;
     }
 
@@ -256,6 +258,8 @@ void openLib(struct IORequest *io asm("a1"), LONG unitNumber asm("d0"),
         {
             Kprintf("[xhci]%s: Failed to allocate unit\n", __func__);
             io->io_Error = IOERR_OPENFAIL;
+            io->io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+            io->io_Unit = NULL;
             return;
         }
         unit->sysBase = base->sysBase;
@@ -268,6 +272,8 @@ void openLib(struct IORequest *io asm("a1"), LONG unitNumber asm("d0"),
     {
         KprintfT("[xhci] %s: Unit is already open, we only support exclusive access\n", __func__);
         io->io_Error = IOERR_UNITBUSY;
+        io->io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+        io->io_Unit = NULL;
         return;
     }
 
@@ -296,6 +302,8 @@ err_close_libs:
         xhci_close_libraries(base);
 err_free_unit:
     io->io_Error = IOERR_OPENFAIL;
+    io->io_Device = NULL; /* a CloseDevice() after the failed open must not reach closeLib */
+    io->io_Unit = NULL;
     /* closeLib frees a unit on its last close, so a unit that failed to open
      * here can only be the one created above. */
     if (createdUnit)
