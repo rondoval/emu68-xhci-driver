@@ -34,6 +34,15 @@ Changes since v5.5.
 - **Renamed to `xhci-legacy.device`** so it can sit next to the 6.x line's
   `xhci.device` in `DEVS:USBHardware/`, for a machine that boots either Poseidon
   4.x or Neptune. Nothing else changes; see *Upgrade notes* for the switch.
+- **A program that calls `CloseDevice()` after a failed `OpenDevice()` no
+  longer upsets the driver.** A failed open now clears the request's device
+  and unit, so that close does nothing, as Exec expects; before, it reached
+  the driver's close and dropped an open count it had never taken.
+- **The on-board controller is found by its device-tree label** (`xhci`)
+  instead of a fixed path.
+- `find_package()` names the oldest version of each dependency the driver
+  builds against: emu68-common 2.1 (for `DT_OpenSymbol`), bcmpcie.library
+  2.0. An older one now fails at configure instead of mid-build.
 
 
 # Release notes — xhci.device 5.5
