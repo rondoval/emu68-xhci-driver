@@ -79,6 +79,21 @@ The isochronous IN path learns what USB video cameras need.
 - **Isochronous IN endpoints that send several packets per interval now
   work.** HD webcams and bursting SuperSpeed endpoints lost everything after
   the first packet.
+- **A program that calls `CloseDevice()` after a failed `OpenDevice()` no
+  longer upsets the driver.** A failed open now clears the request's device
+  and unit, so that close does nothing, as Exec expects; before, it reached
+  the driver's close and dropped an open count it had never taken.
+- **The on-board controller is found by its device-tree label** (`xhci`)
+  instead of a fixed path.
+
+---
+
+## Build & tooling
+
+- `find_package()` names the oldest version of each dependency the driver
+  builds against: emu68-common 2.1 (for `DT_OpenSymbol`), bcmpcie.library
+  2.3 (for `libraries/pci_irq.h`). An older one now fails at configure
+  instead of mid-build.
 
 ---
 
