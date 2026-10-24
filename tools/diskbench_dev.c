@@ -214,7 +214,7 @@ static LONG db_dev_point(const struct BenchCfg *cfg, ULONG bs, ULONG qd, BOOL rn
 
     APTR base;
     ULONG basesize;
-    UBYTE *buf = db_alloc_aligned(qd * bs + 4,
+    UBYTE *buf = db_alloc_aligned(qd * bs + DB_ALIGN_SLACK,
                                   MEMF_PUBLIC | (cfg->chip ? MEMF_CHIP : MEMF_FAST),
                                   &base, &basesize);
     if (buf == NULL)
@@ -223,8 +223,7 @@ static LONG db_dev_point(const struct BenchCfg *cfg, ULONG bs, ULONG qd, BOOL rn
                (unsigned long)bs, (unsigned long)qd, (unsigned long)(qd * bs));
         return RETURN_OK;
     }
-    if (cfg->misalign)
-        buf++;
+    buf += cfg->offset;
     memset(buf, 0xA5, qd * bs);
 
     ULONG rng = cfg->seed;

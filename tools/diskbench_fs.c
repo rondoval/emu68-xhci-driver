@@ -264,7 +264,7 @@ static LONG db_fs_point(const struct BenchCfg *cfg, ULONG kind, ULONG bs, ULONG 
 
     APTR base;
     ULONG basesize;
-    UBYTE *buf = db_alloc_aligned(qd * bs + 4,
+    UBYTE *buf = db_alloc_aligned(qd * bs + DB_ALIGN_SLACK,
                                   MEMF_PUBLIC | (cfg->chip ? MEMF_CHIP : MEMF_FAST),
                                   &base, &basesize);
     if (buf == NULL)
@@ -273,8 +273,7 @@ static LONG db_fs_point(const struct BenchCfg *cfg, ULONG kind, ULONG bs, ULONG 
                (unsigned long)bs, (unsigned long)qd, (unsigned long)(qd * bs));
         return RETURN_OK;
     }
-    if (cfg->misalign)
-        buf++;
+    buf += cfg->offset;
     memset(buf, 0xA5, qd * bs);
 
     struct BenchStat st;

@@ -31,7 +31,7 @@ static const char verstag[] __attribute__((used)) = VERSTAG;
 #endif
 
 #define TEMPLATE "DRIVE,DEVICE/K,UNIT/N,TEST/K,BS/K,QD/K,SIZE/K,SECS/N,SEED/N," \
-                 "MISALIGN/S,CHIP/S,KEEPFILE/S,RAW/S,HELP/S"
+                 "MISALIGN/S,OFFSET/K/N,CHIP/S,KEEPFILE/S,RAW/S,HELP/S"
 
 enum
 {
@@ -45,6 +45,7 @@ enum
     ARG_SECS,
     ARG_SEED,
     ARG_MISALIGN,
+    ARG_OFFSET,
     ARG_CHIP,
     ARG_KEEPFILE,
     ARG_RAW,
@@ -95,7 +96,7 @@ static void db_usage(void)
     printf(
         "usage: diskbench <drive:> [DEVICE=<name>] [UNIT=<n>] [TEST=<what>]\n"
         "                 [BS=<list>] [QD=<list>] [SIZE=<n>] [SECS=<n>] [SEED=<n>]\n"
-        "                 [MISALIGN] [CHIP] [KEEPFILE] [RAW] [HELP]\n"
+        "                 [MISALIGN | OFFSET=<n>] [CHIP] [KEEPFILE] [RAW] [HELP]\n"
         "\n"
         "Two engines, both sweeping block size and queue depth:\n"
         "  fs   read/write packets on <drive:>diskbench.tmp - the numbers an\n"
@@ -142,7 +143,10 @@ static void db_usage(void)
         "  SEED=     Seed for the random offsets, so a rerun replays them. Default\n"
         "            0x1234567.\n"
         "  MISALIGN  Offset every buffer by one byte, taking the driver's bounce-\n"
-        "            buffer path instead of zero-copy DMA.\n"
+        "            buffer path instead of zero-copy DMA. Same as OFFSET=1.\n"
+        "  OFFSET=   Start every buffer this many bytes (0..63) past a 4K boundary.\n"
+        "            OFFSET=8 is a plain AllocMem() buffer: word and longword\n"
+        "            aligned, but not on a cache line.\n"
         "  CHIP      Allocate buffers in Chip RAM. PiStorm cannot DMA there, so this\n"
         "            measures the bounce path plus Chip bus contention.\n"
         "  RAW       Print one machine-parseable 'RESULT key=value ...' line per point\n"
@@ -296,7 +300,18 @@ int main(void)
     }
     if (args[ARG_SEED] != 0)
         cfg.seed = (ULONG)*(LONG *)args[ARG_SEED];
-    cfg.misalign = (BOOL)(args[ARG_MISALIGN] != 0);
+    cfg.offset = (args[ARG_MISALIGN] != 0) ? 1 : 0;
+    if (args[ARG_OFFSET] != 0)
+    {
+        LONG o = *(LONG *)args[ARG_OFFSET];
+        if (o < 0 || o >= DB_ALIGN_SLACK || args[ARG_MISALIGN] != 0)
+        {
+            printf("diskbench: OFFSET must be 0..%lu, and not given with MISALIGN\n",
+                   (unsigned long)(DB_ALIGN_SLACK - 1));
+            goto out_args;
+        }
+        cfg.offset = (ULONG)o;
+    }
     cfg.chip = (BOOL)(args[ARG_CHIP] != 0);
     cfg.keepfile = (BOOL)(args[ARG_KEEPFILE] != 0);
     db_raw = (BOOL)(args[ARG_RAW] != 0);
@@ -319,9 +334,13 @@ int main(void)
     {
         char sizestr[12];
         db_fmt_size((ULONG)cfg.size, sizestr);
+        char alignstr[32];
+        if (cfg.offset != 0)
+            sprintf(alignstr, " misaligned(+%lu)", (unsigned long)cfg.offset);
+        else
+            strcpy(alignstr, " 4K-aligned");
         printf("  buffers: %s%s  size=%s secs=%lu seed=0x%lx  eclock=%lu Hz\n",
-               cfg.chip ? "chip" : "fast",
-               cfg.misalign ? " misaligned(+1)" : " 4K-aligned",
+               cfg.chip ? "chip" : "fast", alignstr,
                sizestr, (unsigned long)cfg.secs, (unsigned long)cfg.seed,
                (unsigned long)db_efreq);
         if ((cfg.tests & DB_T_DEV) != 0)
