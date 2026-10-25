@@ -13,6 +13,7 @@
 #include <exec/interrupts.h>
 
 #include <reset_guard.h>
+#include <hw_claim.h>
 
 #include <types.h>
 #include <exec/io.h>
@@ -48,6 +49,9 @@ struct XHCIUnit
 	/* state */
 	struct Task *task;
 	struct xhci_ctrl *xhci_ctrl;
+	/* Unit 0's hold on the onboard controller against other drivers for it
+	 * (a PCI controller's is its board's PRM_BoardOwner) */
+	struct hw_claim onboard_claim;
 
 	struct Interrupt irq_isr;
 	u32 irq_line;

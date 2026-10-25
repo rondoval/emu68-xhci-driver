@@ -124,6 +124,12 @@ into ordinary buffers no longer pay for a copy.
   could not hand a command to the controller, the request behind it (setting
   up, resetting or reconfiguring a device) was never answered. It now fails
   with an error.
+- **Two drivers could run the built-in USB controller at once.** Unit 0
+  (the Pi 4's USB-C port, the CM4's USB) was not reserved like a PCIe
+  controller: with Neptune on `xhci.device` unit 0, Poseidon could open
+  `xhci-legacy.device` unit 0 as well. The second driver is now refused.
+  A controller that failed to start is released again, so a later open can
+  have it; before, it stayed taken until a reboot.
 
 ---
 
