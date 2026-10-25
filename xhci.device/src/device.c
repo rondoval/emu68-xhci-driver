@@ -106,6 +106,11 @@ static const APTR funcTable[] = {
 s32 xhci_open_pcie_library(struct XHCIDevice *base)
 {
     struct ExecBase *SysBase = base->sysBase;
+    /* Opened once per device open count: xhci_close_libraries() closes it once,
+     * when the last unit closes. */
+    if (base->pcieBase != NULL)
+        return 0;
+
     /* v2: the typed multi-vector interrupt API (AllocIntVectors, LVO -342…) is
      * only present in bcmpcie.library 2.0.  Requesting v2 makes the open fail
      * cleanly against an older 1.x library rather than crashing on a call that
