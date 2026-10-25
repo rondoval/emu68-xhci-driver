@@ -175,8 +175,7 @@ void xhci_xfer_complete(struct usb_device *udev, struct xhci_xfer *io, s8 err, u
     io->error = err;
 
     /* a request that dies while queued still owns its mapping */
-    if (io->priv_flags & REQ_DMA_MAPPED)
-        xhci_dma_unmap(io->ctrl, io, FALSE);
+    xhci_dma_span_unmap(io->ctrl, &io->data_span, 0);
 
     if (io->priv_flags & REQ_CTX_OP)
     {
@@ -283,8 +282,7 @@ static BOOL xhci_udev_send_control_request(struct usb_device *udev,
         slab_free(&ctrl->xfer_slab, io);
         return FALSE;
     }
-    io->timeout_ms = 1000;
-    io->flags |= XHCI_XF_TIMEOUT;
+    xhci_xfer_set_timeout(io, 1000);
     io->about_slot = about_slot;
     io->about_ep = about_ep;
 

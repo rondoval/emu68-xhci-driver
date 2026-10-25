@@ -551,8 +551,7 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl)
     if (!cmd->deadline_active)
         return; /* abort already fired */
 
-    u32 now_us = get_time();
-    if ((int32_t)(now_us - cmd->deadline_us) < 0)
+    if (!time_deadline_passed(get_time(), cmd->deadline_us))
         return; /* not timed out yet */
 
     Kprintf("Command timeout: type=%s trb_dma=%lx slot=%ld — asserting Command Abort (CA)\n",

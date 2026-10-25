@@ -135,7 +135,6 @@ static void xhci_initialize_ring_info(struct xhci_ring *ring)
 	 */
 	ring->cycle_state = 1;
 
-	ring->queued_trbs = 0;
 	ring->deferred_giveback = NULL;
 }
 
@@ -595,34 +594,55 @@ struct TransferDescriptorList *xhci_ring_get_td_list(struct xhci_ring *ring)
 	return ring->td_list;
 }
 
-/*
- * Per-ring TRB occupancy.  The submit layer reserves a TD's TRBs before
- * emitting them and gives them back if the TD never reaches the hardware;
- * the TD tracker releases them as the TD leaves the ring.
+/* Does segment seg hold the TRB at trb? */
+static inline BOOL seg_holds(const struct xhci_segment *seg, dma_addr_t trb)
+{
+	return trb >= (dma_addr_t)seg->trbs && trb < (dma_addr_t)&seg->trbs[TRBS_PER_SEGMENT];
+}
+
+/**
+ * xhci_ring_td_fits() - Whether a TD can be queued at the enqueue pointer now.
+ * @ring: transfer ring.
+ * @num_trbs: TRBs the TD may take (an upper bound).
+ * @oldest: ring address of the first TRB of the oldest TD still on the ring;
+ *	0 if there is none.
+ *
+ * Room is decided by position, not by counting free slots.  The TD's TRBs
+ * fill the rest of the enqueue's segment, then the segments after it.  They
+ * fit unless they would have to enter
+ *  - a segment holding @oldest, the start of the oldest TD in flight, or
+ *  - the enqueue's own segment again, having gone round the whole ring.
+ *
+ * That keeps the stretch from the enqueue to the oldest TD free of TRBs in
+ * flight, which is what ring growth relies on: xhci_ring_grow() splices new
+ * segments in right after the enqueue's segment, by re-pointing its Link TRB.
+ *  - Counting free slots would allow the enqueue to wrap round behind the
+ *    oldest TD in the same segment.  Segments spliced in there would come
+ *    between the TDs in flight, and the controller would run into the empty
+ *    new segments instead of the TDs queued after the wrap.
+ *  - A TD that came back into its own segment would be crossing the Link TRB
+ *    that growth re-points, and would be cut in two.
+ *
+ * Return: TRUE if the TRBs fit; FALSE if the ring has to grow first.
  */
-u32 xhci_ring_get_queued_trbs(struct xhci_ring *ring)
+BOOL xhci_ring_td_fits(struct xhci_ring *ring, u32 num_trbs, dma_addr_t oldest)
 {
-	return ring->queued_trbs;
-}
+	const u32 per_seg = TRBS_PER_SEGMENT - 1; /* the last slot holds the Link TRB */
 
-void xhci_ring_reserve_trbs(struct xhci_ring *ring, u32 trb_count)
-{
-	ring->queued_trbs += trb_count;
-}
+	/* slots before the Link TRB; 0 with the enqueue parked on it */
+	struct xhci_segment *seg = ring->enq_seg;
+	u32 room = (u32)(&seg->trbs[per_seg] - ring->enqueue);
+	if (oldest >= (dma_addr_t)ring->enqueue && seg_holds(seg, oldest))
+		room = (u32)((union xhci_trb *)oldest - ring->enqueue); /* the rule keeps it from being ahead; if it is, stop short */
 
-void xhci_ring_release_trbs(struct xhci_ring *ring, u32 trb_count)
-{
-	ring->queued_trbs = (ring->queued_trbs >= trb_count) ? ring->queued_trbs - trb_count : 0;
-}
-
-BOOL xhci_ring_has_room(struct xhci_ring *ring, u32 needed)
-{
-	/* queued_trbs counts THIS ring's in-flight TDs, so a streams endpoint
-	 * sizes each stream ring by its own load instead of the endpoint-wide
-	 * total.  One TRB per segment is the link TRB and never usable. */
-	u32 capacity = ring->num_segs * (TRBS_PER_SEGMENT - 1);
-	if (capacity == 0)
-		return FALSE;
-	return ring->queued_trbs + needed <= capacity;
+	while (num_trbs > room)
+	{
+		num_trbs -= room;
+		seg = seg->next;
+		if (seg == ring->enq_seg || (oldest != 0 && seg_holds(seg, oldest)))
+			return FALSE;
+		room = per_seg;
+	}
+	return TRUE;
 }
 

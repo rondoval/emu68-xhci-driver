@@ -275,8 +275,8 @@ static inline u32 Do_CMD_DEVICE_QUERY(struct IORequest *io)
             break;
         case UHA_DMAAlignment:
             /* Cache-line granularity a data buffer must meet to be DMA'd
-             * directly (else xhci_dma_span_map bounces it); lets the stack
-             * place filesystem buffers to avoid the copy. */
+             * whole in place (else xhci_dma_span_prepare splits or bounces
+             * it); lets the stack place filesystem buffers to avoid copies. */
             *out = DMA_ALIGN_MIN;
             filled++;
             break;

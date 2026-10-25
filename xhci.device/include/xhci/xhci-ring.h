@@ -302,14 +302,10 @@ void xhci_ring_set_stream_id(struct xhci_ring *ring, u16 stream_id);
  * NULL for event/command rings. */
 void xhci_ring_set_td_list(struct xhci_ring *ring, struct TransferDescriptorList *td_list);
 struct TransferDescriptorList *xhci_ring_get_td_list(struct xhci_ring *ring);
-/* This ring's TRB occupancy, the room policy's whole state: the submit layer
- * reserves a TD's TRBs before emitting them (and releases them again if the
- * TD never reaches the hardware), the TD tracker releases them as the TD
- * leaves the ring.  needed counts the TRBs the caller is about to emit. */
-u32 xhci_ring_get_queued_trbs(struct xhci_ring *ring);
-void xhci_ring_reserve_trbs(struct xhci_ring *ring, u32 trb_count);
-void xhci_ring_release_trbs(struct xhci_ring *ring, u32 trb_count);
-BOOL xhci_ring_has_room(struct xhci_ring *ring, u32 needed);
+/* Room by position: can num_trbs be queued at the enqueue without entering the
+ * segment where the oldest TD on the ring starts (oldest: its first TRB, 0 if
+ * the ring holds none)?  See xhci-ring.c. */
+BOOL xhci_ring_td_fits(struct xhci_ring *ring, u32 num_trbs, dma_addr_t oldest);
 
 void xhci_ring_consume_event(struct xhci_ctrl *ctrl);
 void xhci_ring_ack_events(struct xhci_ctrl *ctrl);

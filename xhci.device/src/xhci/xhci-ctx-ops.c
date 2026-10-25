@@ -457,7 +457,7 @@ static u32 ctx_op_free_streams(struct xhci_ctrl *ctrl, struct xhci_xfer *io)
     Kprintf("free_streams: slot %lu ep %lu\n", (ULONG)udev->slot_id, (ULONG)ep_index);
     if (!xhci_ep_streams_active(ep_ctx))
         return ctx_reply_error(io, UHIOERR_NO_ERROR); /* idempotent */
-    if (xhci_ep_get_active_trb_count(ep_ctx) != 0)
+    if (xhci_ep_tds_in_flight(ep_ctx))
     {
         Kprintf("free_streams: slot %lu ep %lu still has TDs in flight\n",
                 (ULONG)udev->slot_id, (ULONG)ep_index);
@@ -493,7 +493,7 @@ static u32 ctx_op_alloc_streams(struct xhci_ctrl *ctrl, struct xhci_xfer *io)
         return ctx_reply_error(io, UHIOERR_BADPARAMS);
 
     if (xhci_ep_get_state(ep_ctx) != USB_DEV_EP_STATE_IDLE ||
-        xhci_ep_get_active_trb_count(ep_ctx) != 0)
+        xhci_ep_tds_in_flight(ep_ctx))
     {
         Kprintf("alloc_streams: slot %lu ep %lu not idle\n",
                 (ULONG)udev->slot_id, (ULONG)ep_index);

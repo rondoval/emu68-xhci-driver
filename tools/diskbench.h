@@ -10,6 +10,8 @@
  *  - dev (diskbench_dev.c): read-only async NSCMD_TD_READ64 directly at the
  *    underlying exec device, N requests in flight — no filesystem in the way,
  *    so QD lands on the massstorage UAS tag engine (one IORequest = one tag).
+ *    It also runs DEVCHECK: the same blocks read at every buffer offset and
+ *    compared against an aligned read, to check the driver's DMA paths.
  */
 
 #ifndef DISKBENCH_H
@@ -33,9 +35,11 @@ typedef unsigned long long db_u64; /* NDK 3.2 has no UQUAD */
 #define DB_T_FSIOPS (1UL << 1)
 #define DB_T_DEVSEQ (1UL << 2)
 #define DB_T_DEVIOPS (1UL << 3)
+#define DB_T_DEVCHECK (1UL << 4)
 #define DB_T_FS (DB_T_FSSEQ | DB_T_FSIOPS)
 #define DB_T_DEV (DB_T_DEVSEQ | DB_T_DEVIOPS)
 #define DB_T_ALL (DB_T_FS | DB_T_DEV)
+#define DB_T_DEV_ENGINE (DB_T_DEV | DB_T_DEVCHECK) /* everything db_run_dev runs */
 
 struct BenchCfg
 {

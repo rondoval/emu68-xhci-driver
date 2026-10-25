@@ -273,7 +273,7 @@ static void xhci_ep_enqueue(struct ep_context *ep_ctx, struct xhci_xfer *io)
 /* THE transfer submit entry (direct path, pending-drain, internal EP0): the
  * endpoint owns the policy — state gate, pending-queue deferral, stream-ring
  * selection — and hands the mechanics to xhci_submit_td().  The NAK timeout
- * rides the xfer (XHCI_XF_TIMEOUT + timeout_ms). */
+ * rides the xfer (XHCI_XF_TIMEOUT + deadline_us), running since acceptance. */
 s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io)
 {
 #ifdef DEBUG
@@ -320,9 +320,8 @@ s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io)
         return UHIOERR_BADPARAMS;
     }
 
-    const u32 timeout_ms = (io->flags & XHCI_XF_TIMEOUT) ? io->timeout_ms : 0;
     s8 err = UHIOERR_NO_ERROR;
-    switch (xhci_submit_td(ep_ctx->udev, ep_ctx, ep_ring, io, timeout_ms, &err))
+    switch (xhci_submit_td(ep_ctx->udev, ep_ctx, ep_ring, io, &err))
     {
     case XHCI_SUBMIT_NO_ROOM:
         /* the io keeps its mapping while queued; resubmission reuses it */
@@ -384,7 +383,8 @@ void xhci_ep_set_idle(struct ep_context *ep_ctx)
  * request's disposal (same contract as the RT variant below).  The TD lands
  * on ep_ring's own list. */
 BOOL xhci_ep_set_receiving(struct ep_context *ep_ctx, struct xhci_ring *ep_ring,
-                           struct xhci_xfer *req, dma_addr_t *trb_addrs, u32 timeout_ms, u32 trb_count)
+                           struct xhci_xfer *req, dma_addr_t *trb_addrs,
+                           u32 trb_count, u32 trb_cap)
 {
     if (!trb_addrs || trb_count == 0)
     {
@@ -395,13 +395,13 @@ BOOL xhci_ep_set_receiving(struct ep_context *ep_ctx, struct xhci_ring *ep_ring,
 
     BOOL result = xhci_td_add(xhci_ring_get_td_list(ep_ring),
                               req,
-                              timeout_ms,
                               trb_addrs,
-                              trb_count);
+                              trb_count,
+                              trb_cap);
     if (!result)
     {
         Kprintf("Failed to add TD to active list\n");
-        xhci_td_trb_addrs_free(ep_ctx->udev->controller, trb_addrs, trb_count);
+        xhci_td_trb_addrs_free(ep_ctx->udev->controller, trb_addrs, trb_cap);
         xhci_ep_set_failed(ep_ctx);
         return FALSE;
     }
@@ -418,6 +418,7 @@ BOOL xhci_ep_set_receiving_rt(struct ep_context *ep_ctx, const struct xhci_dma_s
     if (!xhci_td_add_rt(ep_default_tds(ep_ctx), span, frame, dir, staging, trb_addrs, trb_count))
     {
         Kprintf("Failed to add RT TD to active list\n");
+        /* an RT TD's count is its cap (xhci_td_add_rt) */
         xhci_td_trb_addrs_free(ep_ctx->udev->controller, trb_addrs, trb_count);
         xhci_ep_set_failed(ep_ctx);
         return FALSE;
@@ -810,19 +811,70 @@ void xhci_ep_abort_cookie(struct ep_context *ep_ctx, APTR cookie)
     ep_want_stop(ep_ctx);
 }
 
+/**
+ * ep_expire_pending - answer the queued transfers whose NAK timeout ran out
+ * @ep_ctx: the endpoint
+ * @now: get_time() of this tick
+ *
+ * A NAK timeout counts from acceptance, so it also runs for a transfer that
+ * still waits on the pending queue: behind a full ring, a recovery or a port
+ * suspend.  It never reached a ring, so it is answered without wire work, as
+ * an aborted one is.  Collected first and answered after the walk, so a
+ * completion that queues new work cannot disturb it.
+ */
+static void ep_expire_pending(struct ep_context *ep_ctx, u32 now)
+{
+    struct ExecBase *SysBase = ep_ctx->sysBase;
+    struct MinList expired;
+    _NewMinList(&expired);
+
+    struct MinNode *node = ep_ctx->pending_reqs.mlh_Head;
+    while (node->mln_Succ)
+    {
+        struct MinNode *next = node->mln_Succ;
+        if (xhci_xfer_expired((struct xhci_xfer *)node, now))
+        {
+            Remove((struct Node *)node);
+            AddTailMinList(&expired, node);
+        }
+        node = next;
+    }
+
+    while ((node = RemHeadMinList(&expired)))
+    {
+        KprintfT("queued transfer timed out on slot %lu ep %lu\n",
+                 (ULONG)ep_ctx->udev->slot_id, (ULONG)ep_ctx->ep_index);
+        xhci_xfer_complete(ep_ctx->udev, (struct xhci_xfer *)node, UHIOERR_NAKTIMEOUT, 0);
+    }
+}
+
+/**
+ * xhci_ep_check_timeouts() - The unit task's tick for one endpoint.
+ * @ep_ctx: the endpoint.
+ *
+ * Answers the queued transfers past their NAK deadline, lets a held endpoint
+ * run on whose halt was not cleared in time, and gets the endpoint stopped if
+ * a TD on one of its rings is past its deadline.  One clock reading for all.
+ */
 void xhci_ep_check_timeouts(struct ep_context *ep_ctx)
 {
+    const u32 now = get_time();
+
+    ep_expire_pending(ep_ctx, now);
+
     /* what a halted endpoint waits for has not come: run on without it */
-    if ((ep_ctx->hold & EP_HOLD_WAITS) && (s32)(get_time() - ep_ctx->hold_until_us) >= 0)
+    if ((ep_ctx->hold & EP_HOLD_WAITS) && time_deadline_passed(now, ep_ctx->hold_until_us))
     {
         Kprintf("EP %lu: not cleared within %lu ms (hold %02lx), running on\n",
                 (ULONG)ep_ctx->ep_index, (ULONG)EP_HOLD_WAIT_MS, (ULONG)ep_ctx->hold);
         ep_release(ep_ctx, EP_HOLD_WAITS);
     }
 
+    /* a TD past its deadline gets the endpoint stopped; the stop's service
+     * then retires every TD expired by then (xhci_td_retire) */
     for (u16 slot = 0; slot < ep_ring_count(ep_ctx); ++slot)
     {
-        if (xhci_td_is_expired(xhci_ring_get_td_list(ep_ring_by_slot(ep_ctx, slot))))
+        if (xhci_td_any_expired(xhci_ring_get_td_list(ep_ring_by_slot(ep_ctx, slot)), now))
         {
             KprintfT("TD timeout on slot %lu ep %lu\n", (ULONG)ep_ctx->udev->slot_id, (ULONG)ep_ctx->ep_index);
             ep_ctx->want_timeouts = TRUE;
@@ -1127,12 +1179,14 @@ BOOL xhci_ep_complete_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr,
     return FALSE; /* no ring owns this TRB */
 }
 
-u32 xhci_ep_get_active_trb_count(struct ep_context *ep_ctx)
+BOOL xhci_ep_tds_in_flight(struct ep_context *ep_ctx)
 {
-    u32 count = 0;
-    for (u16 slot = 0; slot < ep_ring_count(ep_ctx); ++slot)
-        count += xhci_ring_get_queued_trbs(ep_ring_by_slot(ep_ctx, slot));
-    return count;
+    return !ep_tds_empty(ep_ctx);
+}
+
+dma_addr_t xhci_ep_ring_oldest_trb(struct xhci_ring *ring)
+{
+    return xhci_td_oldest_trb(xhci_ring_get_td_list(ring));
 }
 
 void xhci_ep_flush(struct ep_context *ep_ctx, s8 reply_code)

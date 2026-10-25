@@ -84,9 +84,11 @@ void xhci_ep_set_failed(struct ep_context *ep_ctx);
 void xhci_ep_set_idle(struct ep_context *ep_ctx);
 /* Both variants: FALSE = the endpoint is FAILED and trb_addrs is already
  * freed — the caller must not touch the ring or the array, and still owns
- * the request's/span's disposal.  The TD lands on ep_ring's own list. */
+ * the request's/span's disposal.  The TD lands on ep_ring's own list.
+ * trb_count TRBs were emitted into an array allocated for trb_cap. */
 BOOL xhci_ep_set_receiving(struct ep_context *ep_ctx, struct xhci_ring *ep_ring,
-                           struct xhci_xfer *req, dma_addr_t *trb_addrs, u32 timeout_ms, u32 trb_count);
+                           struct xhci_xfer *req, dma_addr_t *trb_addrs,
+                           u32 trb_count, u32 trb_cap);
 BOOL xhci_ep_set_receiving_rt(struct ep_context *ep_ctx, const struct xhci_dma_span *span,
                               u16 frame, u16 dir, BOOL staging, dma_addr_t *trb_addrs, u32 trb_count);
 
@@ -122,8 +124,9 @@ void xhci_ep_command_done(struct ep_context *ep_ctx, trb_type cmd, BOOL ok);
 /* Abort the in-flight or queued direct transfer with this cookie (a wish;
  * xhci_direct_abort). */
 void xhci_ep_abort_cookie(struct ep_context *ep_ctx, APTR cookie);
-/* The unit task's tick: retire the TDs past their NAK deadline, and let an
- * endpoint run on that has waited too long for a halt to be cleared. */
+/* The unit task's tick: answer the queued transfers and retire the TDs past
+ * their NAK deadline, and let an endpoint run on that has waited too long for
+ * a halt to be cleared. */
 void xhci_ep_check_timeouts(struct ep_context *ep_ctx);
 /* CMD_FLUSH: give up every TD on the rings (IOERR_ABORTED).  The pending
  * queue is the caller's: xhci_ep_flush(). */
@@ -144,7 +147,10 @@ BOOL xhci_ep_clear_halt_follow(struct usb_device *udev, struct xhci_xfer *req);
 
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx);
 u8 xhci_ep_get_ep_index(struct ep_context *ep_ctx);
-u32 xhci_ep_get_active_trb_count(struct ep_context *ep_ctx);
+/* Any TD on any of the endpoint's rings? */
+BOOL xhci_ep_tds_in_flight(struct ep_context *ep_ctx);
+/* First TRB of the oldest TD on ring (0: none), for the room check. */
+dma_addr_t xhci_ep_ring_oldest_trb(struct xhci_ring *ring);
 struct xhci_ring *xhci_ep_get_ring(struct ep_context *ep_ctx);
 
 /* Transfer-time ring selection.  No streams: the default ring regardless of
@@ -161,7 +167,7 @@ BOOL xhci_ep_complete_by_trb(struct ep_context *ep_ctx, dma_addr_t trb_addr,
 /* THE transfer submit entry (direct path, pending-drain, internal EP0):
  * state gate, pending-queue deferral and stream-ring selection here; TD
  * mechanics in xhci_submit_td().  The NAK timeout rides the xfer
- * (XHCI_XF_TIMEOUT + timeout_ms). */
+ * (XHCI_XF_TIMEOUT + deadline_us), running since acceptance. */
 s8 xhci_ep_submit(struct ep_context *ep_ctx, struct xhci_xfer *io);
 
 /* Answer everything in the pending queue (never on a ring) with reply_code. */

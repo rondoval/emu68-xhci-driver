@@ -303,7 +303,8 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
     while (ep_ctx->rt->inflight_bytes < prefetch_bytes)
     {
-        /* Don't enqueue if the ring can't fit one more TRB+spare; try to grow first */
+        /* Don't enqueue if the ring can't take an RT TD (two TRBs at most: a
+         * buffer crossing 64 KB); try to grow first */
         if (!rt_ensure_room(ep_ctx))
             break;
 

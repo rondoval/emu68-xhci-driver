@@ -25,12 +25,23 @@ Configuration-relevant changes across all releases, newest first:
 
 Changes since v6.3.
 
-The isochronous IN path learns what USB video cameras need.
+The isochronous IN path learns what USB video cameras need, and large reads
+into ordinary buffers no longer pay for a copy.
 
 ---
 
 ## Improvements
 
+- **Large reads into unaligned buffers are no longer copied whole.** A bulk
+  read into a buffer that does not start and end on a 64-byte cache line was
+  received into a bounce buffer and copied over in full. Plain `AllocMem()`
+  buffers are 8-byte aligned, so most filesystem reads went that way. Now
+  only the partial lines at either end, at most 63 bytes each, go through a
+  bounce buffer; the rest lands straight in the caller's buffer. Reads of
+  4 KB and more get it. 1 MB reads now run as fast as into aligned buffers:
+  on a Pi 4 a UAS SSD reads 290 MB/s instead of 256 from the device and 277
+  instead of 235 through PFS3, a USB 3 stick 114 instead of 107. Writes and
+  Chip RAM buffers are unchanged.
 - **Fast isochronous IN endpoints cost far less CPU.** An endpoint served
   every microframe, such as a high-speed webcam, raised 8000 interrupts a
   second. Its completions are now handled once a millisecond: a camera
@@ -85,6 +96,23 @@ The isochronous IN path learns what USB video cameras need.
   the driver's close and dropped an open count it had never taken.
 - **The on-board controller is found by its device-tree label** (`xhci`)
   instead of a fixed path.
+- **A transfer ring that had to grow while full could lose transfers.** New
+  ring space went in behind transfers still queued, so the controller could
+  skip them or the next transfer could overwrite them. Rings now grow before
+  the driver catches up with the controller.
+- **A large transfer that failed partway reported almost all of it as
+  received.** When a transfer over 64 KB stopped with an error before its
+  end, everything after the point of failure was counted as delivered too: a
+  1 MB read that failed 70 KB in reported nearly the whole megabyte. A class
+  or program that used that count could take buffer contents that were never
+  written for data. The count is now the bytes that actually arrived.
+- **A transfer held back by the driver could wait for ever.** Its timeout
+  only started once the transfer reached the controller, so one that waited
+  behind a full ring, an error recovery or a device suspend never timed out.
+  The timeout now counts from when the driver accepts the transfer.
+- **Large transfers now keep the xHCI rule at ring segment boundaries.** The
+  part of a transfer before the end of a ring segment is cut to whole USB
+  packets.
 
 ---
 
@@ -94,6 +122,9 @@ The isochronous IN path learns what USB video cameras need.
   builds against: emu68-common 2.1 (for `DT_OpenSymbol`), bcmpcie.library
   2.3 (for `libraries/pci_irq.h`). An older one now fails at configure
   instead of mid-build.
+- **`diskbench TEST=DEVCHECK`** checks the driver's DMA paths: it reads the
+  same blocks into an aligned buffer and into buffers at every offset in a
+  cache line, with guard bytes around them, and compares. Read-only.
 
 ---
 

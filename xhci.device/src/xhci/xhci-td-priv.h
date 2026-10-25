@@ -32,7 +32,8 @@ TransferDescriptorList* xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_co
 void xhci_td_destroy_list(TransferDescriptorList *td_list, s8 error_code);
 
 BOOL xhci_td_is_empty(TransferDescriptorList *td_list);
-BOOL xhci_td_is_expired(TransferDescriptorList *td_list);
+/* is any TD on the list past its NAK deadline at now (get_time())? */
+BOOL xhci_td_any_expired(TransferDescriptorList *td_list, u32 now);
 /* the on-ring direct transfer with this cookie, or NULL */
 struct xhci_xfer *xhci_td_find_cookie_request(TransferDescriptorList *td_list, APTR cookie);
 u32 xhci_td_get_queued_td_count(TransferDescriptorList *td_list);
@@ -44,11 +45,12 @@ BOOL xhci_td_has_request(TransferDescriptorList *td_list, struct xhci_xfer *io_r
 dma_addr_t xhci_td_retire(TransferDescriptorList *td_list, IOReqList *abort_reqs, u32 now_us,
     dma_addr_t stopped_deq, BOOL all);
 
+/* trb_count TRBs at trb_addresses, an array allocated for trb_cap. */
 BOOL xhci_td_add(TransferDescriptorList *td_list,
     struct xhci_xfer *io_req,
-    u32 timeout_ms,
     dma_addr_t *trb_addresses,
-    u32 trb_count);
+    u32 trb_count,
+    u32 trb_cap);
 
 /* RT ISO TD: the TD itself owns the mapped span; staging marks an IN buffer
  * from the endpoint's staging slab (freed by the completion/teardown paths). */
@@ -69,6 +71,9 @@ BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_add
  * oldest TD still on the list, or at the software enqueue if none is: what a
  * ring is re-armed at when the TD the controller stopped in is gone. */
 dma_addr_t xhci_td_first_deq(TransferDescriptorList *td_list);
+
+/* First TRB of the oldest TD on the list (0 if empty): the room check's bound. */
+dma_addr_t xhci_td_oldest_trb(TransferDescriptorList *td_list);
 
 void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error);
 

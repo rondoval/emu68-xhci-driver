@@ -79,6 +79,8 @@ static BOOL db_parse_test(const char *s, ULONG *tests)
         *tests = DB_T_DEVSEQ;
     else if (db_strieq(s, "DEVIOPS"))
         *tests = DB_T_DEVIOPS;
+    else if (db_strieq(s, "DEVCHECK"))
+        *tests = DB_T_DEVCHECK;
     else if (db_strieq(s, "FS"))
         *tests = DB_T_FS;
     else if (db_strieq(s, "DEV"))
@@ -107,7 +109,8 @@ static void db_usage(void)
         "       more. Writes, inside that one file.\n"
         "  dev  NSCMD_TD_READ64 straight at the exec device under the volume, QD\n"
         "       requests in flight - no filesystem in the way, so QD lands on the\n"
-        "       massstorage UAS tag engine. Never writes.\n"
+        "       massstorage UAS tag engine. Never writes. It also runs DEVCHECK, a\n"
+        "       data check of the driver's DMA paths rather than a benchmark.\n"
         "\n");
     printf(
         "Target\n"
@@ -122,7 +125,15 @@ static void db_usage(void)
         "            FSIOPS   fs random read, then write, at 4K, per QD entry\n"
         "            DEVSEQ   dev sequential read, every BS x QD\n"
         "            DEVIOPS  dev random read at 4K, per QD entry\n"
-        "            FS | DEV | ALL select the matching groups.\n"
+        "            DEVCHECK dev data check, every BS x QD: each position is\n"
+        "                     read into an aligned buffer, then QD at a time\n"
+        "                     into buffers at every offset 0..63, 64 guard\n"
+        "                     bytes either side; data and guards must match.\n"
+        "                     Repeats over new positions for SECS. OFFSET= is\n"
+        "                     ignored, CHIP puts the checked buffers in Chip RAM.\n"
+        "                     Fails with RC 20 on any mismatch, or a point\n"
+        "                     that could not run.\n"
+        "            FS | DEV | ALL select the matching groups (not DEVCHECK).\n"
         "            Default: ALL with a <drive:>, DEV with only DEVICE=.\n"
         "\n"
         "Both engines\n"
@@ -170,6 +181,7 @@ static void db_usage(void)
         "  diskbench USB0:\n"
         "  diskbench USB0: TEST=DEVSEQ BS=64K,1M QD=1,4,16 SECS=10\n"
         "  diskbench USB0: TEST=FS BS=1M QD=1,4 SIZE=512M KEEPFILE\n"
+        "  diskbench USB0: TEST=DEVCHECK BS=4K,1M QD=1,4 SECS=30\n"
         "  diskbench DEVICE=usbscsi.device UNIT=0 TEST=DEV RAW\n");
 }
 
@@ -242,7 +254,7 @@ int main(void)
     cfg.tests = (cfg.drive[0] != '\0') ? DB_T_ALL : DB_T_DEV;
     if (args[ARG_TEST] != 0 && !db_parse_test((const char *)args[ARG_TEST], &cfg.tests))
     {
-        printf("diskbench: bad TEST (FSSEQ|FSIOPS|DEVSEQ|DEVIOPS|FS|DEV|ALL)\n");
+        printf("diskbench: bad TEST (FSSEQ|FSIOPS|DEVSEQ|DEVIOPS|DEVCHECK|FS|DEV|ALL)\n");
         goto out_args;
     }
 
@@ -343,7 +355,7 @@ int main(void)
                cfg.chip ? "chip" : "fast", alignstr,
                sizestr, (unsigned long)cfg.secs, (unsigned long)cfg.seed,
                (unsigned long)db_efreq);
-        if ((cfg.tests & DB_T_DEV) != 0)
+        if ((cfg.tests & DB_T_DEV_ENGINE) != 0)
             printf("  note: wire QD is capped by the 'UAS queue depth' slider (latched at bind)\n");
     }
 
@@ -354,7 +366,7 @@ int main(void)
         if (r > rc)
             rc = (int)r;
     }
-    if ((cfg.tests & DB_T_DEV) != 0 && rc < RETURN_WARN)
+    if ((cfg.tests & DB_T_DEV_ENGINE) != 0 && rc < RETURN_WARN)
     {
         LONG r = db_run_dev(&cfg);
         if (r > rc)

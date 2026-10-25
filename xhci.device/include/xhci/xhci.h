@@ -131,6 +131,9 @@ enum XhciProfSlot
 	XP_EVT_DRAIN,   /* whole xhci_process_event_trb drain */
 	XP_EVT_HOOK,    /* done-hook CallHookPkt (the stack's completion work) */
 	XP_IRQ_TO_TASK, /* ISR signal -> unit-task pickup (IMOD + scheduling) */
+	XP_DMA_SPLIT,   /* an IN mapped as a split (count: the time is the decision's) */
+	XP_LINK_CUT,    /* a TRB before a Link TRB shortened to a packet boundary */
+	XP_LINK_PIECE, /* a TRB before a Link TRB sent through a link slot */
 	XP_SLOT_COUNT
 };
 
@@ -162,14 +165,19 @@ struct xhci_ctrl
 	struct dma_mem_ctx dma_ctx; /* Emu68 (DMA-reachable) RAM regions; backs dmaPool */
 	struct dma_pool *dmaPool;	/* region-restricted DMA pool (Emu68 RAM) for DMA buffers */
 	APTR metaPool;				/* ordinary Exec pool for CPU-only metadata */
-#define XHCI_TD_SMALL_TRBS 34	   /* trb_addr_slab covers up to this many TRBs
-                                    * (a 2 MiB TD = 33 data TRBs stays off the Exec pool) */
+#define XHCI_TD_SMALL_TRBS 36	   /* trb_addr_slab covers up to this many TRBs
+                                    * (a 2 MiB split TD = 35 data TRBs, 36 with a
+                                    * link alignment, stays off the Exec pool) */
 #define XHCI_BOUNCE_SMALL_SIZE 256 /* covers RT ISO 192 + tiny ctrl/desc */
 #define XHCI_BOUNCE_SMALL_CAP 256
-#define XHCI_BOUNCE_MED_SIZE (32 * 1024) /* covers ≤32KiB bulk reads */
+#define XHCI_BOUNCE_MED_SIZE (32 * 1024) /* misaligned INs too short to split, non-bulk ones, unreachable buffers */
 #define XHCI_BOUNCE_MED_CAP 8
+#define XHCI_LINK_SLOT_SIZE 1024 /* a link-piece slot: the largest bulk/interrupt max packet;
+                                 * self-aligned, so it never crosses 64 KB */
+#define XHCI_BOUNCE_LINK_CAP 8
 #define XHCI_BOUNCE_LARGE_SIZE (2 * 1024 * 1024) /* mass storage 2MB transfers */
-#define XHCI_BOUNCE_LARGE_CAP 2					 /* Neptune: 1 bulk/EP */
+#define XHCI_BOUNCE_LARGE_CAP 1					 /* only unreachable (Chip RAM) and non-bulk
+                                                  * misaligned INs bounce whole this big */
 	struct slab_cache td_slab;					 /* one struct xhci_td per slot */
 	struct slab_cache xfer_slab;				 /* one struct xhci_xfer per slot (direct + internal xfers) */
 	struct slab_cache trb_addr_slab;			 /* XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t) per slot */
@@ -177,6 +185,7 @@ struct xhci_ctrl
 	struct slab_cache bounce_small;				 /* XHCI_BOUNCE_SMALL_SIZE bytes per slot */
 	struct slab_cache bounce_med;				 /* XHCI_BOUNCE_MED_SIZE bytes per slot */
 	struct slab_cache bounce_large;				 /* XHCI_BOUNCE_LARGE_SIZE bytes per slot */
+	struct slab_cache bounce_link;				 /* XHCI_LINK_SLOT_SIZE bytes per slot: a span's link piece */
 	struct Library *utilityBase;
 	struct pci_dev *pci_dev;
 	struct usb_device *devices_by_slot_id[MAX_HC_SLOTS];
@@ -222,20 +231,22 @@ struct xhci_ctrl
 /* DMA cache maintenance comes straight from emu68-common's cache_ops.h
  * (cache_pre_dma / cache_post_dma / DMAF_NoSync), included above. */
 
-/* A TD's TRB-address bookkeeping array: slab-backed for small TDs (the common
- * case), metaPool otherwise.  Alloc and free must agree on the size class. */
-static inline dma_addr_t *xhci_td_trb_addrs_alloc(struct xhci_ctrl *ctrl, u32 num_trbs)
+/* A TD's TRB-address bookkeeping array of trb_cap entries: slab-backed for
+ * small TDs (the common case), metaPool otherwise.  Free takes the trb_cap the
+ * array was allocated with, not the TRBs written into it: that picks the size
+ * class, and a TD can write fewer (xhci_td.trb_cap). */
+static inline dma_addr_t *xhci_td_trb_addrs_alloc(struct xhci_ctrl *ctrl, u32 trb_cap)
 {
 	struct ExecBase *SysBase = ctrl->sysBase;
-	if (likely(num_trbs <= XHCI_TD_SMALL_TRBS))
+	if (likely(trb_cap <= XHCI_TD_SMALL_TRBS))
 		return slab_alloc(&ctrl->trb_addr_slab);
-	return pool_alloc(ctrl->metaPool, num_trbs * sizeof(dma_addr_t));
+	return pool_alloc(ctrl->metaPool, trb_cap * sizeof(dma_addr_t));
 }
 
-static inline void xhci_td_trb_addrs_free(struct xhci_ctrl *ctrl, dma_addr_t *trb_addrs, u32 num_trbs)
+static inline void xhci_td_trb_addrs_free(struct xhci_ctrl *ctrl, dma_addr_t *trb_addrs, u32 trb_cap)
 {
 	struct ExecBase *SysBase = ctrl->sysBase;
-	if (likely(num_trbs <= XHCI_TD_SMALL_TRBS))
+	if (likely(trb_cap <= XHCI_TD_SMALL_TRBS))
 		slab_free(&ctrl->trb_addr_slab, trb_addrs);
 	else
 		pool_free(ctrl->metaPool, trb_addrs);

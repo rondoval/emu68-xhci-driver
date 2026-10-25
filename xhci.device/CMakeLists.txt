@@ -48,6 +48,7 @@ add_executable(xhci.device
     src/xhci/xhci.c
     src/xhci/xhci-ring.c
     src/xhci/xhci-submit.c
+    src/xhci/xhci-dma.c
     src/xhci/xhci-context.c
     src/xhci/xhci-lpm.c
     src/xhci/xhci-events.c
