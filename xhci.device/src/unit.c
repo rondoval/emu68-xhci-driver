@@ -60,6 +60,15 @@ static s32 unit_init_onboard_xhci(struct XHCIUnit *unit,
 		return -1;
 	}
 
+	/* another driver for this controller (xhci.device, or this one loaded
+	 * twice) may run it: claimed by the node's name */
+	if (!hw_claim_take(SysBase, &unit->onboard_claim, DT_GetKeyName(key)))
+	{
+		Kprintf("[bcm-xhci] %s: %s is in use by another driver\n", __func__, DT_GetKeyName(key));
+		DT_CloseKey(key);
+		return -1;
+	}
+
 #ifdef DEBUG
 	CONST_STRPTR compatible = DT_GetPropValue(DT_FindProperty(key, (CONST_STRPTR) "compatible"));
 #endif
@@ -277,6 +286,23 @@ err_free_ctrl:
 	return result;
 }
 
+/**
+ * unit_release_controller() - Let other drivers have the unit's controller.
+ * @unit:    the unit
+ * @pci_dev: its PCI board, NULL for the onboard controller or before the
+ *           board was claimed
+ *
+ * The controller must be stopped: another driver may start it at once.
+ */
+static void unit_release_controller(struct XHCIUnit *unit, struct pci_dev *pci_dev)
+{
+	struct ExecBase *SysBase = unit->sysBase;
+	struct Library *pcielibBase = unit->device->pcieBase;
+	if (pcielibBase && pci_dev)
+		SetBoardAttrs(pci_dev, PRM_BoardOwner, 0UL, TAG_DONE);
+	hw_claim_release(SysBase, &unit->onboard_claim);
+}
+
 s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 {
 	struct ExecBase *SysBase = unit->sysBase;
@@ -307,15 +333,16 @@ s32 UnitOpen(struct XHCIUnit *unit, LONG unitNumber, LONG flags)
 		? unit_init_onboard_xhci(unit, &hccr, &hcor)
 		: unit_init_pcie_xhci(unitNumber, &pci_dev, &hccr, &hcor, unit->device);
 	if (result != ERR_NO_ERROR)
-		goto err_del_pool;
+		goto err_release;
 
 	result = unit_attach_xhci(unit, pci_dev, hccr, hcor);
 	if (result != ERR_NO_ERROR)
-		goto err_del_pool;
+		goto err_release;
 
 	return ERR_NO_ERROR;
 
-err_del_pool:
+err_release:
+	unit_release_controller(unit, pci_dev);
 	DeletePool(unit->memoryPool);
 	unit->memoryPool = NULL;
 	return result;
@@ -330,12 +357,10 @@ s32 UnitClose(struct XHCIUnit *unit)
 	if (unit->unit.unit_OpenCnt == 0)
 	{
 		Kprintf("[xhci] %s: Last opener closed, cleaning up unit\n", __func__);
-		struct Library *pcielibBase = unit->device->pcieBase;
-		if (pcielibBase && unit->xhci_ctrl->pci_dev)
-			SetBoardAttrs(unit->xhci_ctrl->pci_dev, PRM_BoardOwner, 0UL, TAG_DONE);
 		UnitTaskStop(unit);
 		xhci_int_shutdown(unit);
 		xhci_deregister(unit->xhci_ctrl);
+		unit_release_controller(unit, unit->xhci_ctrl->pci_dev);
 		FreeMem(unit->xhci_ctrl, sizeof(*unit->xhci_ctrl));
 		DeletePool(unit->memoryPool);
 		unit->memoryPool = NULL;

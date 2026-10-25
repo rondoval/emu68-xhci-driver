@@ -40,6 +40,11 @@ Changes since v5.5.
   the driver's close and dropped an open count it had never taken.
 - **The on-board controller is found by its device-tree label** (`xhci`)
   instead of a fixed path.
+- **Two drivers can no longer run the built-in USB controller at once.**
+  Unit 0 (the Pi 4's USB-C port, the CM4's USB) is now reserved like a PCIe
+  controller: while Neptune runs it with `xhci.device`, opening it here is
+  refused, and the other way round. A controller that failed to start is
+  released again; before, it stayed taken until a reboot.
 - `find_package()` names the oldest version of each dependency the driver
   builds against: emu68-common 2.1 (for `DT_OpenSymbol`), bcmpcie.library
   2.0. An older one now fails at configure instead of mid-build.
