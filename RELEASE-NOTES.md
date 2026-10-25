@@ -113,6 +113,17 @@ into ordinary buffers no longer pay for a copy.
 - **Large transfers now keep the xHCI rule at ring segment boundaries.** The
   part of a transfer before the end of a ring segment is cut to whole USB
   packets.
+- **Switching an interface's alternate setting could corrupt memory.** The
+  driver freed the endpoint's buffers and transfer ring before the
+  controller had stopped using them, and if the controller refused the
+  switch, for example for lack of bandwidth, the endpoint was left on freed
+  memory for good. The old endpoint now stays until the controller has
+  accepted the change. Unconfiguring a device now also releases its
+  endpoints.
+- **Out of memory, the USB stack could wait for ever.** When the driver
+  could not hand a command to the controller, the request behind it (setting
+  up, resetting or reconfiguring a device) was never answered. It now fails
+  with an error.
 
 ---
 

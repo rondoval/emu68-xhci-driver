@@ -584,46 +584,51 @@ static void ctx_done_update_ep0(struct usb_device *udev, struct xhci_xfer *io, s
     }
 }
 
+/* Software endpoint state follows the controller's: the contexts built for
+ * the command (xhci_ep_prepare_context) replace the live ones only once it
+ * has succeeded. A command timeout arrives without the device: the stack
+ * takes it as device lost, and the pending contexts go with the slot. */
 static void ctx_done_configure(struct usb_device *udev, struct xhci_xfer *io, s8 err)
 {
-    if (err != UHIOERR_NO_ERROR || !udev)
+    if (!udev)
         return;
+
+    struct UhcdConfigureEndpoints *op = ctx_op_data(io);
+
+    if (err != UHIOERR_NO_ERROR)
+    {
+        /* a failed command leaves the controller as it was: the live
+         * contexts still match it */
+        xhci_ep_discard_pending(udev);
+        return;
+    }
 
     udev->slot_state = USB_DEV_SLOT_STATE_CONFIGURED;
 
-    struct UhcdConfigureEndpoints *op = ctx_op_data(io);
+    /* the controller has disabled the dropped endpoints (drops go before
+     * adds): their contexts retire, and those re-added in this command
+     * (an alternate-setting switch) are replaced by the new ones */
+    for (u16 i = 0; i < op->ceo_NumDrop; ++i)
+        xhci_ep_destroy_context(udev, xhci_ep_index_from_address(op->ceo_DropAddresses[i]), UHIOERR_TIMEOUT);
+    xhci_ep_commit_pending(udev, UHIOERR_TIMEOUT);
 
     /* the added endpoints' submit tokens (direct path) */
     for (u16 i = 0; i < op->ceo_NumAdd; ++i)
         op->ceo_Add[i].ed_Token =
             xhci_direct_device_token(udev, xhci_ep_index(&op->ceo_Add[i]));
-
-    /* dropped endpoints retire their software contexts with the hardware
-     * drop — unless the same endpoint was re-added in this op (alt-setting
-     * switch): its context now belongs to the new alternate (xHCI processes
-     * drops before adds). */
-    for (u16 i = 0; i < op->ceo_NumDrop; ++i)
-    {
-        const u8 ep_index = xhci_ep_index_from_address(op->ceo_DropAddresses[i]);
-        BOOL readded = FALSE;
-        for (u16 j = 0; j < op->ceo_NumAdd; ++j)
-        {
-            if (xhci_ep_index(&op->ceo_Add[j]) == ep_index)
-            {
-                readded = TRUE;
-                break;
-            }
-        }
-        if (!readded)
-            xhci_ep_destroy_context(udev, ep_index, UHIOERR_TIMEOUT);
-    }
 }
 
 static void ctx_done_deconfigure(struct usb_device *udev, struct xhci_xfer *io, s8 err)
 {
     (void)io;
-    if (err == UHIOERR_NO_ERROR && udev)
-        udev->slot_state = USB_DEV_SLOT_STATE_ADDRESSED;
+    if (err != UHIOERR_NO_ERROR || !udev)
+        return;
+
+    udev->slot_state = USB_DEV_SLOT_STATE_ADDRESSED;
+
+    /* every endpoint but EP0 is disabled in the controller now */
+    for (u8 ep_index = 1; ep_index < USB_MAX_ENDPOINT_CONTEXTS; ++ep_index)
+        xhci_ep_destroy_context(udev, ep_index, UHIOERR_TIMEOUT);
 }
 
 /* Software stream state commits with the hardware: an alloc whose Configure

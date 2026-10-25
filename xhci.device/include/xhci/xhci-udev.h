@@ -145,6 +145,9 @@ struct usb_device {
 
 	/* Requests state data */
 	struct ep_context *ep_context[USB_MAX_ENDPOINT_CONTEXTS];
+	/* Contexts built for a Configure Endpoint command in flight; they replace
+	 * ep_context[] only when the command succeeds (xhci_ep_commit_pending) */
+	struct ep_context *ep_pending[USB_MAX_ENDPOINT_CONTEXTS];
 
 	/*
 	 * Commands to the hardware are passed an "input context" that

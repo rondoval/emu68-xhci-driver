@@ -95,19 +95,16 @@ static void ep_ring_free_with_tds(struct xhci_ctrl *ctrl, struct xhci_ring *ring
     xhci_ring_free(ctrl, ring);
 }
 
-BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst)
+/* A software endpoint context with its transfer ring; NULL when out of
+ * memory. */
+static struct ep_context *ep_context_alloc(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst)
 {
     struct ExecBase *SysBase = udev->sysBase;
-    /* a re-add over a live context (alt-setting switch): retire the old one
-     * first — anything still pending fails with device-gone semantics */
-    if (udev->ep_context[ep_index])
-        xhci_ep_destroy_context(udev, ep_index, UHIOERR_TIMEOUT);
-
     struct ep_context *ep_ctx = pool_zalloc(udev->controller->metaPool, sizeof(struct ep_context));
     if (!ep_ctx)
     {
         Kprintf("Failed to allocate ep_context for EP %ld\n", ep_index);
-        return FALSE;
+        return NULL;
     }
     ep_ctx->udev = udev;
     ep_ctx->sysBase = udev->sysBase;
@@ -123,24 +120,21 @@ BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet
         Kprintf("Failed to create resources for EP %ld\n", ep_index);
         ep_ring_free_with_tds(udev->controller, ep_ctx->ring, UHIOERR_OUTOFMEMORY);
         pool_free(udev->controller->metaPool, ep_ctx);
-        return FALSE;
+        return NULL;
     }
 
-    udev->ep_context[ep_index] = ep_ctx;
-    return TRUE;
+    return ep_ctx;
 }
 
-void xhci_ep_destroy_context(struct usb_device *udev, u8 ep_index, s8 reply_code)
+/* Retire a software endpoint context: everything still queued or in flight
+ * is replied with reply_code, then its rings go. The controller must no
+ * longer be using the endpoint. */
+static void ep_context_free(struct usb_device *udev, struct ep_context *ep_ctx, s8 reply_code)
 {
     struct ExecBase *SysBase = udev->sysBase;
-    struct ep_context *ep_ctx = (ep_index < USB_MAX_ENDPOINT_CONTEXTS)
-                                    ? udev->ep_context[ep_index]
-                                    : NULL;
-    if (!ep_ctx)
-        return;
 
     KprintfT("tearing down slot %lu EP %lu context, state %lu\n",
-             (ULONG)udev->slot_id, (ULONG)ep_index, (ULONG)ep_ctx->state);
+             (ULONG)udev->slot_id, (ULONG)ep_ctx->ep_index, (ULONG)ep_ctx->state);
     xhci_ep_flush(ep_ctx, reply_code);
 
     /* Reply every in-flight TD before the RT staging slab goes away below
@@ -158,7 +152,7 @@ void xhci_ep_destroy_context(struct usb_device *udev, u8 ep_index, s8 reply_code
         else
             xhci_ep_rt_iso_fire_release(ep_ctx); /* stream died without a STOP */
         xhci_ep_destroy_rt_staging_slab(ep_ctx);
-        pool_free(ep_ctx->udev->controller->metaPool, ep_ctx->rt);
+        pool_free(udev->controller->metaPool, ep_ctx->rt);
         ep_ctx->rt = NULL;
     }
 
@@ -172,14 +166,112 @@ void xhci_ep_destroy_context(struct usb_device *udev, u8 ep_index, s8 reply_code
     xhci_ep_streams_destroy(ep_ctx, reply_code);
     ep_ring_free_with_tds(udev->controller, ep_ctx->ring, reply_code);
 
-    pool_free(ep_ctx->udev->controller->metaPool, ep_ctx);
-    udev->ep_context[ep_index] = NULL;
+    pool_free(udev->controller->metaPool, ep_ctx);
 }
 
+/* Take the context out of slots[ep_index], leaving the slot empty; NULL when
+ * there is none. */
+static struct ep_context *ep_take(struct ep_context **slots, u8 ep_index)
+{
+    if (ep_index >= USB_MAX_ENDPOINT_CONTEXTS)
+        return NULL;
+
+    struct ep_context *ep_ctx = slots[ep_index];
+    slots[ep_index] = NULL;
+    return ep_ctx;
+}
+
+/* Free the context in slots[ep_index], if any (see ep_context_free). */
+static void ep_retire(struct usb_device *udev, struct ep_context **slots, u8 ep_index, s8 reply_code)
+{
+    struct ep_context *ep_ctx = ep_take(slots, ep_index);
+    if (ep_ctx)
+        ep_context_free(udev, ep_ctx, reply_code);
+}
+
+/* EP0 of a slot being addressed: there is no live context the controller
+ * could still be running (a new slot, or one Reset Device has emptied). */
+struct ep_context *xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst)
+{
+    xhci_ep_destroy_context(udev, ep_index, UHIOERR_TIMEOUT);
+    udev->ep_context[ep_index] = ep_context_alloc(udev, ep_index, max_packet_size, max_burst);
+    return udev->ep_context[ep_index];
+}
+
+void xhci_ep_destroy_context(struct usb_device *udev, u8 ep_index, s8 reply_code)
+{
+    ep_retire(udev, udev->ep_context, ep_index, reply_code);
+}
+
+/* Every context of the device, live and pending: the slot is gone or reset. */
 void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code)
 {
+    xhci_ep_discard_pending(udev);
     for (u8 i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
         xhci_ep_destroy_context(udev, i, reply_code);
+}
+
+/*
+ * Pending contexts belong to the one Configure Endpoint in flight for the
+ * device: the stack issues them one at a time, and they share udev->in_ctx.
+ */
+
+/**
+ * xhci_ep_prepare_context() - Build an endpoint context for a Configure Endpoint command.
+ * @udev:            the device
+ * @ep_index:        endpoint index (DCI - 1)
+ * @max_packet_size: the endpoint's max packet size
+ * @max_burst:       the endpoint's max burst
+ *
+ * The context is kept aside: the live context at @ep_index, if any, stays in
+ * use until the command has succeeded, because until then the controller may
+ * still be running it, and a failed command leaves it running. A context left
+ * over from an earlier command at @ep_index never reached the controller and
+ * is freed.
+ *
+ * Return: the new context, or NULL when out of memory.
+ */
+struct ep_context *xhci_ep_prepare_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst)
+{
+    if (ep_index >= USB_MAX_ENDPOINT_CONTEXTS)
+        return NULL;
+
+    ep_retire(udev, udev->ep_pending, ep_index, IOERR_ABORTED);
+    udev->ep_pending[ep_index] = ep_context_alloc(udev, ep_index, max_packet_size, max_burst);
+    return udev->ep_pending[ep_index];
+}
+
+/**
+ * xhci_ep_commit_pending() - Install the contexts a successful command was built with.
+ * @udev:       the device
+ * @reply_code: reply for what is still in flight on the contexts replaced
+ *
+ * The command has dropped the old endpoints in the controller, so their
+ * contexts are retired here, and the pending ones take their places.
+ */
+void xhci_ep_commit_pending(struct usb_device *udev, s8 reply_code)
+{
+    for (u8 i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
+    {
+        struct ep_context *ep_ctx = ep_take(udev->ep_pending, i);
+        if (!ep_ctx)
+            continue;
+
+        xhci_ep_destroy_context(udev, i, reply_code);
+        udev->ep_context[i] = ep_ctx;
+    }
+}
+
+/**
+ * xhci_ep_discard_pending() - Free the contexts built for a command that failed.
+ * @udev: the device
+ *
+ * The controller never saw them, and no transfer was queued on them.
+ */
+void xhci_ep_discard_pending(struct usb_device *udev)
+{
+    for (u8 i = 0; i < USB_MAX_ENDPOINT_CONTEXTS; ++i)
+        ep_retire(udev, udev->ep_pending, i, IOERR_ABORTED);
 }
 
 struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, u8 ep_index)
@@ -960,9 +1052,9 @@ void xhci_ep_resume(struct ep_context *ep_ctx)
  * that is what keeps the target's ring quiet meanwhile; nothing is parked and
  * no state is kept.
  *
- * TRUE = the request now belongs to the command.  FALSE = nothing was done and
- * the caller replies as usual: every guard is a reason to leave the endpoint
- * exactly as it is. */
+ * TRUE = the request now belongs to the command (a command that cannot be
+ * queued fails it at once).  FALSE = nothing was done and the caller replies
+ * as usual: every guard is a reason to leave the endpoint exactly as it is. */
 BOOL xhci_ep_clear_halt_follow(struct usb_device *udev, struct xhci_xfer *req)
 {
     if (!xhci_setup_is_clear_halt(&req->setup))
@@ -1006,7 +1098,8 @@ BOOL xhci_ep_clear_halt_follow(struct usb_device *udev, struct xhci_xfer *req)
             (ULONG)udev->slot_id, (ULONG)ep_index);
 
     xhci_build_ep_toggle_reset_ctx(udev, ep_index);
-    return xhci_configure_endpoints(udev, udev->toggle_in_ctx, FALSE, req);
+    xhci_configure_endpoints(udev, udev->toggle_in_ctx, FALSE, req);
+    return TRUE;
 }
 
 enum ep_state xhci_ep_get_state(struct ep_context *ep_ctx)

@@ -192,7 +192,9 @@ static void xhci_fail_timed_out_command(struct pending_command *cmd)
  * Enable Slot asks for one.
  *
  * TRUE = on the ring with a handler waiting for its completion; FALSE = no
- * completion will be delivered for it. */
+ * completion will be delivered for it, and req, if any, has been failed with
+ * UHIOERR_HOSTERROR through its completion path - so its epilogue rolls back
+ * exactly as for a command the controller refused. */
 static BOOL xhci_queue_command(struct usb_device *udev, trb_type cmd, dma_addr_t addr, struct xhci_xfer *req,
                                const struct xhci_ep_cmd *ep)
 {
@@ -200,18 +202,17 @@ static BOOL xhci_queue_command(struct usb_device *udev, trb_type cmd, dma_addr_t
     struct ExecBase *SysBase = ctrl->sysBase;
     const u8 ep_index = ep ? ep->ep_index : 0;
 
-    dma_addr_t trb_dma = xhci_ring_enqueue_command(ctrl->cmd_ring, cmd, udev->slot_id, addr, ep);
+    /* the handler first: a TRB on the ring without one would still run, and
+     * its completion would find nobody waiting */
+    struct pending_command *pending_cmd = pool_zalloc(ctrl->metaPool, sizeof(struct pending_command));
+    dma_addr_t trb_dma = pending_cmd ? xhci_ring_enqueue_command(ctrl->cmd_ring, cmd, udev->slot_id, addr, ep) : 0;
     if (trb_dma == 0)
     {
-        Kprintf("Failed to queue command TRB for cmd %s\n", xhci_command_type_name(cmd));
-        return FALSE;
-    }
-
-    /* Add command handler to pending list */
-    struct pending_command *pending_cmd = pool_zalloc(ctrl->metaPool, sizeof(struct pending_command));
-    if (!pending_cmd)
-    {
-        Kprintf("Failed to allocate pending command\n");
+        Kprintf("Failed to queue command %s\n", xhci_command_type_name(cmd));
+        if (pending_cmd)
+            pool_free(ctrl->metaPool, pending_cmd);
+        if (req)
+            xhci_xfer_complete(udev, req, UHIOERR_HOSTERROR, 0);
         return FALSE;
     }
 
@@ -714,17 +715,15 @@ BOOL xhci_device_command_pending(struct usb_device *udev)
  * @param in_ctx	input context the command carries (udev->in_ctx, or
  *              	toggle_in_ctx for the clear-halt toggle reset)
  * @param ctx_change	flag to indicate the Context has changed or NOT
- * @param req       Optional xfer to reply when the command completes
- * Return: TRUE = queued, and req (if any) is retired by the command's
- *         completion or its timeout; FALSE = nothing went out and req is
- *         still the caller's
+ * @param req       Optional xfer to reply when the command completes (or,
+ *                  when it cannot be queued, at once with UHIOERR_HOSTERROR)
  */
-BOOL xhci_configure_endpoints(struct usb_device *udev, struct xhci_container_ctx *in_ctx, BOOL ctx_change, struct xhci_xfer *req)
+void xhci_configure_endpoints(struct usb_device *udev, struct xhci_container_ctx *in_ctx, BOOL ctx_change, struct xhci_xfer *req)
 {
     struct ExecBase *SysBase = udev->sysBase;
 
     cache_pre_dma(in_ctx->bytes, in_ctx->size, DMA_ReadFromRAM);
-    return xhci_queue_command(udev, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, (dma_addr_t)in_ctx->bytes, req, NULL);
+    xhci_queue_command(udev, ctx_change ? TRB_EVAL_CONTEXT : TRB_CONFIG_EP, (dma_addr_t)in_ctx->bytes, req, NULL);
 }
 
 /**

@@ -54,10 +54,16 @@ struct xhci_td_completion
     u32 act_len;
 };
 
-BOOL xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst);
+struct ep_context *xhci_ep_create_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst);
 void xhci_ep_set_rt_service(struct ep_context *ep_ctx, u8 interval, u32 max_esit_payload);
 void xhci_ep_destroy_context(struct usb_device *udev, u8 ep_index, s8 reply_code);
 void xhci_ep_destroy_contexts(struct usb_device *udev, s8 reply_code);
+
+/* Endpoint contexts of a Configure Endpoint command: built beside the live
+ * ones, installed when the command succeeds, discarded when it fails. */
+struct ep_context *xhci_ep_prepare_context(struct usb_device *udev, u8 ep_index, u32 max_packet_size, u8 max_burst);
+void xhci_ep_commit_pending(struct usb_device *udev, s8 reply_code);
+void xhci_ep_discard_pending(struct usb_device *udev);
 struct ep_context *xhci_ep_get_context_for_index(struct usb_device *udev, u8 ep_index);
 
 /* SS bulk streams (NSCMD_USB_ALLOC/FREE_STREAMS).  Software state only: build

@@ -28,10 +28,10 @@ void xhci_process_command_timeouts(struct xhci_ctrl *ctrl);
  * completion - or its timeout - comes back as xhci_ep_command_done().
  * FALSE = nothing went out. */
 BOOL xhci_queue_ep_command(struct usb_device *udev, u8 ep_index, trb_type cmd, u32 flags, struct xhci_ring *ring, dma_addr_t deq);
-/* Configure Endpoint / Evaluate Context carrying in_ctx.  TRUE = queued (req,
- * if any, is retired by the command); FALSE = nothing went out and req is
- * still the caller's. */
-BOOL xhci_configure_endpoints(struct usb_device *udev, struct xhci_container_ctx *in_ctx, BOOL ctx_change, struct xhci_xfer *req);
+/* Configure Endpoint / Evaluate Context carrying in_ctx.  req (may be NULL)
+ * is replied by the command's completion, or at once with UHIOERR_HOSTERROR
+ * through the same path when the command cannot be queued. */
+void xhci_configure_endpoints(struct usb_device *udev, struct xhci_container_ctx *in_ctx, BOOL ctx_change, struct xhci_xfer *req);
 /* TRUE while any command of this device is still on the command ring. */
 BOOL xhci_device_command_pending(struct usb_device *udev);
 void xhci_address_device(struct usb_device *udev, struct xhci_xfer *req);
