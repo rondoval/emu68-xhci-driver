@@ -10,6 +10,8 @@
  *  - dev (diskbench_dev.c): read-only async NSCMD_TD_READ64 directly at the
  *    underlying exec device, N requests in flight — no filesystem in the way,
  *    so QD lands on the massstorage UAS tag engine (one IORequest = one tag).
+ *    It also runs DEVCHECK: the same blocks read at every buffer offset and
+ *    compared against an aligned read, to check the driver's DMA paths.
  */
 
 #ifndef DISKBENCH_H
@@ -24,6 +26,7 @@ typedef unsigned long long db_u64; /* NDK 3.2 has no UQUAD */
 #define DB_MAX_QD 16         /* massstorage NCM_MAXTAGS */
 #define DB_IOPS_BS 4096      /* classic random-I/O block size */
 #define DB_ALIGN 4096        /* buffer alignment for the zero-copy DMA path */
+#define DB_ALIGN_SLACK 64    /* room past a buffer for OFFSET=; offsets stay below it */
 #define DB_NAME_LEN 64
 #define DB_ERR_BUDGET 8      /* device I/O errors tolerated per point */
 
@@ -32,9 +35,11 @@ typedef unsigned long long db_u64; /* NDK 3.2 has no UQUAD */
 #define DB_T_FSIOPS (1UL << 1)
 #define DB_T_DEVSEQ (1UL << 2)
 #define DB_T_DEVIOPS (1UL << 3)
+#define DB_T_DEVCHECK (1UL << 4)
 #define DB_T_FS (DB_T_FSSEQ | DB_T_FSIOPS)
 #define DB_T_DEV (DB_T_DEVSEQ | DB_T_DEVIOPS)
 #define DB_T_ALL (DB_T_FS | DB_T_DEV)
+#define DB_T_DEV_ENGINE (DB_T_DEV | DB_T_DEVCHECK) /* everything db_run_dev runs */
 
 struct BenchCfg
 {
@@ -53,7 +58,7 @@ struct BenchCfg
     ULONG secs;                 /* time budget per point */
     ULONG seed;
     ULONG tests;                /* DB_T_* mask */
-    BOOL misalign;              /* +1 byte buffer offset: bounce-buffer path */
+    ULONG offset;               /* bytes past a 4K boundary every buffer starts at */
     BOOL chip;                  /* MEMF_CHIP buffers: bounce-buffer path */
     BOOL keepfile;
 };

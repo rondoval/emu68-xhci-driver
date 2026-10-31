@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * TD construction layer (xhci-submit.c): DMA mapping/bounce buffers, TRB
- * emission for control/bulk/interrupt/iso TDs, ring-room policy and the
- * doorbell/giveback protocol.  Sits above the pure ring/segment mechanics
- * (xhci-ring.h) and below the endpoint state machine (xhci-endpoint.h),
- * which owns every submit-policy decision — xhci_ep_submit() is the only
- * caller of xhci_submit_td().
+ * TD construction layer (xhci-submit.c): TRB emission for control/bulk/
+ * interrupt/iso TDs, ring-room policy and the doorbell/giveback protocol.
+ * Sits above the pure ring/segment mechanics (xhci-ring.h) and the DMA
+ * mapping (xhci-dma.h), and below the endpoint state machine
+ * (xhci-endpoint.h), which owns every submit-policy decision —
+ * xhci_ep_submit() is the only caller of xhci_submit_td().
  *
  * Every function here requires ctrl->xfer_lock held; the lock sites are the
  * unit-task work blocks and the direct entries (xhci-direct.c).
@@ -16,31 +16,12 @@
 
 #include <exec/types.h>
 #include <xhci/xhci-xfer.h>
+#include <xhci/xhci-dma.h>
 
 struct xhci_ctrl;
 struct usb_device;
 struct ep_context;
 struct xhci_ring;
-
-/* A mapped DMA buffer: either direct (bounce == NULL, cache-maintained) or
- * bounced through one of the controller's bounce slabs. */
-struct xhci_dma_span
-{
-	APTR cpu;        /* caller's buffer */
-	u32 length;
-	APTR bounce;     /* bounce buffer; NULL when mapped directly */
-	u8 bounce_class; /* REQ_BOUNCE_CLASS_* when bounced */
-};
-
-void xhci_dma_span_unmap(struct xhci_ctrl *ctrl, struct xhci_dma_span *span, BOOL copy_back);
-void xhci_dma_unmap(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL copy);
-
-/* Two-phase request map for the direct path: premap (lock held - decide
- * direct-vs-bounce, allocate) then map_sync (lock NOT required - bounce copy
- * + cache maintenance touch only caller-owned buffers).  The one-call map
- * inside the submit machinery is idempotent over a premapped request. */
-dma_addr_t xhci_dma_premap(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL to_device);
-void xhci_dma_map_sync(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL to_device);
 
 /* xhci_submit_td outcome.  NO_ROOM leaves the io fully intact (its DMA
  * mapping included — the map is idempotent) so the endpoint can park it on
@@ -59,17 +40,20 @@ enum xhci_submit_status
  * the caller, xhci_ep_submit(). */
 enum xhci_submit_status xhci_submit_td(struct usb_device *udev, struct ep_context *ep_ctx,
                                        struct xhci_ring *ep_ring, struct xhci_xfer *io,
-                                       u32 timeout_ms, s8 *err);
+                                       s8 *err);
 
 /* RT ISO TD: no request object - the TD itself carries the payload.
- * staging_in marks an IN buffer owned by the endpoint's staging slab
- * (freed on completion/teardown).  Rides the endpoint's default ring —
- * RT-ISO endpoints never have streams. */
+ * An IN buffer belongs to the endpoint's staging slab (freed on
+ * completion/teardown).  A silent TD completes without raising an
+ * interrupt (BEI): its event waits on the ring for the next TD that does
+ * raise one.  The doorbell is the caller's:
+ * xhci_submit_giveback() after a run of TDs.  Rides the endpoint's
+ * default ring — RT-ISO endpoints never have streams. */
 s8 xhci_submit_rt_td(struct usb_device *udev, struct ep_context *ep_ctx,
-                     APTR buffer, u32 length,
-                     u16 frame, u16 dir, BOOL staging_in, BOOL defer_doorbell);
+                     APTR buffer, u32 length, u16 frame, u16 dir, BOOL silent);
 
-/* Room check against the endpoint's DEFAULT ring only (RT-ISO backpressure). */
+/* Can a TD of needed_trbs TRBs go on the endpoint's DEFAULT ring now (room by
+ * position, xhci_ring_td_fits())?  RT-ISO backpressure. */
 BOOL xhci_submit_has_room(struct ep_context *ep_ctx, u32 needed_trbs);
 
 /* Ring the deferred-giveback doorbell closing an RT-ISO scheduling run.
@@ -77,9 +61,9 @@ BOOL xhci_submit_has_room(struct ep_context *ep_ctx, u32 needed_trbs);
  * endpoints never have streams. */
 void xhci_submit_giveback(struct usb_device *udev, struct ep_context *ep_ctx);
 
-/* Ring an endpoint's doorbell without touching the ring contents - restarts
- * a Stopped endpoint whose TDs are still queued (e.g. after a port resume
- * from U3).  stream_id targets one stream ring; 0 = the default ring. */
-void xhci_submit_kick_ep(struct usb_device *udev, u8 ep_index, u16 stream_id);
+/* Ring the doorbell for one transfer ring without touching its contents: the
+ * controller (re)starts working on what is queued there.  The ring knows its
+ * endpoint and, on a stream endpoint, its stream. */
+void xhci_submit_ring_doorbell(struct usb_device *udev, struct xhci_ring *ring);
 
 #endif /* __XHCI_SUBMIT_H */

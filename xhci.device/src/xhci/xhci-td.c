@@ -49,9 +49,8 @@ struct xhci_td
     } u;
     dma_addr_t completion_trb; /* TRB address we expect a completion for */
     u32 length;                /* total length for completion accounting */
-    BOOL deadline_active;      /* true if deadline_us is valid */
-    u32 deadline_us;           /* absolute deadline in usec, 0 means no timeout */
     u32 trb_count;             /* number of TRBs consumed by this TD */
+    u32 trb_cap;               /* entries trb_addrs was allocated for (its size class) */
     dma_addr_t *trb_addrs;     /* DMA addresses for every TRB in this TD */
 
     /* Mid-TD short packet: exact transferred length recorded at the short
@@ -59,6 +58,12 @@ struct xhci_td
     BOOL short_seen;
     u32 short_act_len;
 };
+
+/* A TD's NAK deadline is its request's; RT ISO TDs have none. */
+static inline BOOL td_is_expired_at(const struct xhci_td *td, u32 now)
+{
+    return !td->is_rt_iso && xhci_xfer_expired(td->u.req, now);
+}
 
 struct TransferDescriptorList
 {
@@ -121,28 +126,28 @@ BOOL xhci_td_is_empty(TransferDescriptorList *td_list)
     return td_list->list.mlh_Head == (struct MinNode *)&td_list->list.mlh_Tail;
 }
 
-BOOL xhci_td_is_expired(TransferDescriptorList *td_list)
+/**
+ * xhci_td_any_expired() - Whether any TD on a list is past its NAK deadline.
+ * @td_list: the ring's TD list.
+ * @now: get_time() of the caller's tick.
+ *
+ * Return: TRUE at the first expired TD found.
+ */
+BOOL xhci_td_any_expired(TransferDescriptorList *td_list, u32 now)
 {
     if (!td_list)
         return FALSE;
 
-    u32 now = get_time();
-
-    struct MinNode *n = td_list->list.mlh_Head;
-    while (n && n->mln_Succ)
+    for (struct MinNode *n = td_list->list.mlh_Head; n->mln_Succ; n = n->mln_Succ)
     {
-        struct xhci_td *td = (struct xhci_td *)n;
-        if (td->deadline_active && (int32_t)(now - td->deadline_us) >= 0)
+        const struct xhci_td *td = (const struct xhci_td *)n;
+        if (td_is_expired_at(td, now))
         {
             KprintfT("Found expired TD req=%lx deadline=%lu now=%lu\n",
-                     td->is_rt_iso ? NULL : td->u.req,
-                     (ULONG)td->deadline_us,
-                     (ULONG)now);
+                     td->u.req, (ULONG)td->u.req->deadline_us, (ULONG)now);
             return TRUE;
         }
-        n = n->mln_Succ;
     }
-
     return FALSE;
 }
 
@@ -171,7 +176,7 @@ u32 xhci_td_get_queued_td_count(TransferDescriptorList *td_list)
 }
 
 static struct xhci_td *td_alloc_common(TransferDescriptorList *td_list,
-                                       dma_addr_t *trb_addresses, u32 trb_count)
+                                       dma_addr_t *trb_addresses, u32 trb_count, u32 trb_cap)
 {
     struct xhci_td *td = slab_zalloc(&td_list->ctrl->td_slab);
     if (!td)
@@ -181,6 +186,7 @@ static struct xhci_td *td_alloc_common(TransferDescriptorList *td_list,
     }
 
     td->trb_count = trb_count;
+    td->trb_cap = trb_cap;
     td->trb_addrs = trb_addresses;
     td->completion_trb = trb_addresses[trb_count - 1];
     return td;
@@ -195,22 +201,19 @@ static void td_append(TransferDescriptorList *td_list, struct xhci_td *td)
 
 BOOL xhci_td_add(TransferDescriptorList *td_list,
                  struct xhci_xfer *io_req,
-                 u32 timeout_ms,
                  dma_addr_t *trb_addresses,
-                 u32 trb_count)
+                 u32 trb_count,
+                 u32 trb_cap)
 {
     if (!td_list)
         return FALSE;
 
-    struct xhci_td *td = td_alloc_common(td_list, trb_addresses, trb_count);
+    struct xhci_td *td = td_alloc_common(td_list, trb_addresses, trb_count, trb_cap);
     if (!td)
         return FALSE;
 
     td->u.req = io_req;
     io_req->priv_flags |= REQ_ON_RING;
-
-    td->deadline_active = (timeout_ms != 0);
-    td->deadline_us = (timeout_ms != 0) ? get_time() + timeout_ms * 1000UL : 0;
     td->length = io_req->data_length;
 
     td_append(td_list, td);
@@ -226,7 +229,9 @@ BOOL xhci_td_add_rt(TransferDescriptorList *td_list,
     if (!td_list)
         return FALSE;
 
-    struct xhci_td *td = td_alloc_common(td_list, trb_addresses, trb_count);
+    /* never link-aligned: an RT TD writes the TRBs it reserved, so its count
+     * is its cap */
+    struct xhci_td *td = td_alloc_common(td_list, trb_addresses, trb_count, trb_count);
     if (!td)
         return FALSE;
 
@@ -243,8 +248,8 @@ BOOL xhci_td_add_rt(TransferDescriptorList *td_list,
 
 /* Sum of data bytes carried by this TD's TRBs before index idx (a control
  * TD's setup TRB is not data).  TRB lengths are read back from the ring; the
- * controller never modifies them.  Mirrors Linux sum_trb_lengths(). */
-static u32 td_sum_trb_lengths(struct xhci_td *td, u32 idx)
+ * controller never modifies them. */
+static u32 td_sum_trb_lengths(const struct xhci_td *td, u32 idx)
 {
     u32 first = (!td->is_rt_iso && td->u.req &&
                  td->u.req->type == UHCD_EPTYPE_CONTROL)
@@ -258,6 +263,23 @@ static u32 td_sum_trb_lengths(struct xhci_td *td, u32 idx)
         sum += TRB_LEN(le32(trb->field[2]));
     }
     return sum;
+}
+
+/**
+ * td_bytes_through() - Data bytes a TD moved up to and including one of its TRBs.
+ * @td: the TD.
+ * @idx: index of the TRB an event names.
+ * @residue: the event's length field: bytes that TRB did not move.
+ *
+ * The TRBs before @idx moved all their bytes; @idx moved its length less
+ * @residue.  A control TD's setup TRB moves no data (td_sum_trb_lengths()).
+ *
+ * Return: the byte count.
+ */
+static u32 td_bytes_through(const struct xhci_td *td, u32 idx, u32 residue)
+{
+    const u32 sum = td_sum_trb_lengths(td, idx + 1);
+    return (sum > residue) ? sum - residue : 0;
 }
 
 static s32 td_find_trb_index(struct xhci_td *td, dma_addr_t trb_addr)
@@ -275,7 +297,7 @@ static s32 td_find_trb_index(struct xhci_td *td, dma_addr_t trb_addr)
  * Fast pass first: the final-TRB event (completion_trb) is the overwhelming
  * case, so the interior-TRB scan (mid-TD shorts, recovery stops) only runs
  * when nothing's final TRB matched. */
-static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr, s32 *idx_out)
+static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr, u32 *idx_out)
 {
     if (!td_list)
         return NULL;
@@ -285,7 +307,7 @@ static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_
         struct xhci_td *td = (struct xhci_td *)n;
         if (td->completion_trb == trb_addr)
         {
-            *idx_out = (s32)td->trb_count - 1;
+            *idx_out = td->trb_count - 1;
             return td;
         }
     }
@@ -293,10 +315,10 @@ static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_
     for (struct MinNode *n = td_list->list.mlh_Head; n && n->mln_Succ; n = n->mln_Succ)
     {
         struct xhci_td *td = (struct xhci_td *)n;
-        s32 idx = td_find_trb_index(td, trb_addr);
+        const s32 idx = td_find_trb_index(td, trb_addr);
         if (idx >= 0)
         {
-            *idx_out = idx;
+            *idx_out = (u32)idx;
             return td;
         }
     }
@@ -304,11 +326,8 @@ static struct xhci_td *find_td_by_trb(TransferDescriptorList *td_list, dma_addr_
     return NULL;
 }
 
-static void xhci_td_decrease_queued(TransferDescriptorList *td_list, struct xhci_td *td)
+static void xhci_td_decrease_queued(TransferDescriptorList *td_list)
 {
-    if (td->trb_count > 0)
-        xhci_ring_release_trbs(td_list->ring, td->trb_count);
-
     if (td_list->queued_tds > 0)
         td_list->queued_tds--;
 }
@@ -317,7 +336,7 @@ static void xhci_td_free(TransferDescriptorList *td_list, struct xhci_td *td)
 {
     if (td->trb_addrs)
     {
-        xhci_td_trb_addrs_free(td_list->ctrl, td->trb_addrs, td->trb_count);
+        xhci_td_trb_addrs_free(td_list->ctrl, td->trb_addrs, td->trb_cap);
         td->trb_addrs = NULL;
     }
 
@@ -341,28 +360,6 @@ BOOL xhci_td_has_request(TransferDescriptorList *td_list, struct xhci_xfer *io_r
     return FALSE;
 }
 
-static inline BOOL td_is_expired_at(struct xhci_td *td, u32 now)
-{
-    return td && td->deadline_active && (int32_t)(now - td->deadline_us) >= 0;
-}
-
-
-/* Does this request move device->host data?  Control transfers carry the
- * direction in the setup packet, everything else in the descriptor. */
-static inline BOOL td_req_is_in(const struct xhci_xfer *req)
-{
-    return (req->type == UHCD_EPTYPE_CONTROL)
-               ? (req->setup.usd_RequestType & USB_DIR_IN) != 0
-               : (req->direction == XHCI_DIR_IN);
-}
-
-/* Unmap a request's data buffer; bounce data is copied back only for IN
- * requests and only when the caller reports data (want_data). */
-static inline void td_unmap_req_data(struct xhci_ctrl *ctrl, struct xhci_xfer *req, BOOL want_data)
-{
-    if (req->data_length > 0)
-        xhci_dma_unmap(ctrl, req, want_data && td_req_is_in(req));
-}
 
 static void td_unmap_and_reply(TransferDescriptorList *td_list, struct xhci_td *td, BYTE error_code, u32 actual)
 {
@@ -370,9 +367,9 @@ static void td_unmap_and_reply(TransferDescriptorList *td_list, struct xhci_td *
      * IN staging buffer, drop the data. */
     if (td->is_rt_iso)
     {
-        xhci_dma_span_unmap(td_list->ctrl, &td->u.rt.span, FALSE);
+        xhci_dma_span_unmap(td_list->ctrl, &td->u.rt.span, 0);
         if (td->u.rt.staging)
-            xhci_ep_free_rt_iso_buffer(td_list->ep_ctx, td->u.rt.span.cpu);
+            xhci_ep_free_rt_iso_buffer(td_list->ep_ctx, td->u.rt.span.buffer);
         return;
     }
 
@@ -380,162 +377,60 @@ static void td_unmap_and_reply(TransferDescriptorList *td_list, struct xhci_td *
     if (!req)
         return;
 
-    td_unmap_req_data(td_list->ctrl, req, actual != 0);
+    xhci_dma_span_unmap(td_list->ctrl, &req->data_span, actual);
     xhci_xfer_complete(NULL, req, error_code, actual);
 }
 
-static inline BOOL td_req_is_recovery_abort(IOReqList *abort_reqs, struct xhci_xfer *req)
+/* Was an abort asked for td's request (abort_reqs)?  RT ISO TDs are stopped
+ * through the hook API, never aborted. */
+static BOOL td_is_aborted(const struct xhci_td *td, IOReqList *abort_reqs)
 {
-    if (!abort_reqs || !req)
-        return FALSE;
-
-    struct MinNode *node = abort_reqs->mlh_Head;
-    while (node && node->mln_Succ)
-    {
-        IOReqNode *abort_req_node = (IOReqNode *)node;
-        if (abort_req_node->req == req)
-            return TRUE;
-        node = node->mln_Succ;
-    }
-
-    return FALSE;
-}
-
-static inline BOOL td_is_recovery_abort(struct xhci_td *td,
-                                        IOReqList *abort_reqs,
-                                        u32 now_us)
-{
-    if (td_is_expired_at(td, now_us))
-        return TRUE;
-
     if (td->is_rt_iso)
         return FALSE;
 
-    return td_req_is_recovery_abort(abort_reqs, td->u.req);
+    for (struct MinNode *node = abort_reqs->mlh_Head; node->mln_Succ; node = node->mln_Succ)
+    {
+        if (((IOReqNode *)node)->req == td->u.req)
+            return TRUE;
+    }
+    return FALSE;
 }
 
-static void td_resolve_recovery_deq_ptr(TransferDescriptorList *td_list,
-                                        struct xhci_ring *ring,
-                                        IOReqList *abort_reqs,
-                                        u32 now_us,
-                                        dma_addr_t stopped_deq_ptr,
-                                        dma_addr_t *resolved_deq_ptr)
-{
-    const dma_addr_t stopped_trb_addr = stopped_deq_ptr & ~(dma_addr_t)EP_CTX_CYCLE_MASK;
-    *resolved_deq_ptr = 0;
-
-    /* Locate the TD the hardware stopped in. */
-    struct MinNode *node = td_list->list.mlh_Head;
-    while (node && node->mln_Succ)
-    {
-        if (td_find_trb_index((struct xhci_td *)node, stopped_trb_addr) >= 0)
-            break;
-        node = node->mln_Succ;
-    }
-
-    if (!node || !node->mln_Succ)
-    {
-        Kprintf("Stopped TRB address %lx not found in any TD\n", (ULONG)stopped_trb_addr);
-        return;
-    }
-
-    /* Re-arm at the first TD from the stop point onward that survives recovery:
-     * the exact TRB the hardware halted on for the stopped TD, or a later
-     * survivor's first TRB.  Take the cycle bit from the TRB itself, not the EP
-     * context's DCS - the VL805 writes that field back wrong (Linux
-     * XHCI_EP_CTX_BROKEN_DCS), and the TRB's cycle is what the consumer must
-     * match anyway. */
-    for (; node && node->mln_Succ; node = node->mln_Succ)
-    {
-        struct xhci_td *td = (struct xhci_td *)node;
-        if (td_is_recovery_abort(td, abort_reqs, now_us))
-            continue;
-
-        dma_addr_t entry_trb = (td_find_trb_index(td, stopped_trb_addr) >= 0)
-                                   ? stopped_trb_addr
-                                   : td->trb_addrs[0];
-        *resolved_deq_ptr = xhci_ring_get_deq_ptr_for_trb(ring, entry_trb);
-        return;
-    }
-
-    /* Everything from the stop point onward is being aborted: re-arm past it. */
-    *resolved_deq_ptr = xhci_ring_get_new_dequeue_ptr(ring);
-}
-
-static void td_abort_recovery_requests(TransferDescriptorList *td_list,
-                                       IOReqList *abort_reqs,
-                                       u32 now_us,
-                                       dma_addr_t stopped_trb_addr)
+/* Take a TD off its list and hand its payload to the completion path. */
+static void td_consume(TransferDescriptorList *td_list, struct xhci_td *td, u32 act_len,
+                       struct xhci_td_completion *out)
 {
     struct ExecBase *SysBase = td_list->sysBase;
-    struct MinNode *node = td_list->list.mlh_Head;
 
-    while (node && node->mln_Succ)
+    out->rt = td->is_rt_iso;
+    out->act_len = act_len;
+
+    if (td->is_rt_iso)
     {
-        struct xhci_td *td = (struct xhci_td *)node;
-        struct MinNode *next = node->mln_Succ;
-        BOOL recovery_abort = td_is_recovery_abort(td, abort_reqs, now_us);
-
-        if (recovery_abort)
-        {
-            /* Bytes already moved by the TRBs the hardware fully consumed.
-             * Poseidon's bulk streams continue on NAK_TIMEOUT with a non-zero
-             * actual, so report the partial transfer rather than
-             * discarding it (the in-progress TRB counts as untransferred -
-             * conservative lower bound). */
-            u32 actual = 0;
-            s32 stopped_idx = td_find_trb_index(td, stopped_trb_addr);
-            if (stopped_idx > 0)
-                actual = td_sum_trb_lengths(td, (u32)stopped_idx);
-
-            /* stopped_idx < 0 = the HW dequeue never entered this TD: the
-             * transfer wedged before the controller fetched it (doorbell /
-             * enqueue side), as opposed to a device that NAKed a fetched TD. */
-            Kprintf("recovery abort TD: first TRB %08lx, HW stopped %08lx (idx %ld), actual %lu, %s\n",
-                    (ULONG)td->trb_addrs[0], (ULONG)stopped_trb_addr, (LONG)stopped_idx,
-                    actual, td_is_expired_at(td, now_us) ? "expired" : "aborted");
-
-            xhci_ring_patch_trbs_to_noop(td_list->ring, td->trb_addrs, td->trb_count, 0);
-
-            RemoveMinNode((struct MinNode *)td);
-            xhci_td_decrease_queued(td_list, td);
-            /* A deadline expiry is a NAK timeout, not "device dead": the
-             * stack weighs UHIOERR_TIMEOUT three times worse. */
-            td_unmap_and_reply(td_list, td,
-                               td_is_expired_at(td, now_us) ? UHIOERR_NAKTIMEOUT : IOERR_ABORTED,
-                               actual);
-            xhci_td_free(td_list, td);
-        }
-
-        node = next;
+        out->req = NULL;
+        out->rt_buffer = td->u.rt.span.buffer;
+        out->rt_length = td->u.rt.span.length;
+        out->rt_frame = td->u.rt.frame;
+        out->rt_dir = td->u.rt.dir;
+        /* The completion path consumes the data (and frees IN staging). */
+        xhci_dma_span_unmap(td_list->ctrl, &td->u.rt.span, act_len);
     }
-}
+    else
+    {
+        struct xhci_xfer *req = td->u.req;
+        out->req = req;
+        out->rt_buffer = NULL;
+        out->rt_length = 0;
+        out->rt_frame = 0;
+        out->rt_dir = 0;
 
-dma_addr_t xhci_td_resolve_recovery(TransferDescriptorList *td_list,
-                                    struct xhci_ring *ring,
-                                    IOReqList *abort_reqs,
-                                    u32 now_us,
-                                    dma_addr_t stopped_deq_ptr)
-{
-    if (!td_list || !ring || !stopped_deq_ptr)
-        return 0;
+        if (req)
+            xhci_dma_span_unmap(td_list->ctrl, &req->data_span, act_len);
+    }
 
-    dma_addr_t new_deq = 0;
-    td_resolve_recovery_deq_ptr(td_list, ring, abort_reqs, now_us,
-                                stopped_deq_ptr, &new_deq);
-    return new_deq;
-}
-
-void xhci_td_abort_recovery(TransferDescriptorList *td_list,
-                            IOReqList *abort_reqs,
-                            u32 now_us,
-                            dma_addr_t stopped_deq_ptr)
-{
-    if (!td_list)
-        return;
-
-    td_abort_recovery_requests(td_list, abort_reqs, now_us,
-                               stopped_deq_ptr & ~(dma_addr_t)EP_CTX_CYCLE_MASK);
+    RemoveMinNode((struct MinNode *)td);
+    xhci_td_decrease_queued(td_list);
+    xhci_td_free(td_list, td);
 }
 
 /*
@@ -549,6 +444,15 @@ void xhci_td_abort_recovery(TransferDescriptorList *td_list,
  *
  * On consumption out->act_len is the exact transferred byte count; the per-TRB
  * event residue is only trusted when no mid-TD short was seen.
+ *
+ * An iso ring retires its TDs in queue order, one event each.  An event that
+ * names a TD behind the oldest one therefore says the controller passed over
+ * the TDs before it without serving them, and without saying so: xHCI
+ * 4.10.3.2 lets a controller without the Contiguous Frame ID capability skip
+ * the Missed Service Error event of a missed interval, and any controller
+ * drop those events while its event ring is full.  The passed-over TDs
+ * come out first, oldest first and one a call, with out->missed set and
+ * nothing transferred: the caller calls again until it has the event's own TD.
  */
 BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr,
                              u32 residue, BOOL short_packet,
@@ -558,66 +462,83 @@ BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_add
 
     if (!td_list)
         return FALSE;
-    struct ExecBase *SysBase = td_list->sysBase;
 
-    s32 idx;
+    u32 idx;
     struct xhci_td *td = find_td_by_trb(td_list, trb_addr, &idx);
     if (!td)
         return FALSE;
 
-    if (short_packet && (u32)idx + 1 < td->trb_count)
+    struct xhci_td *oldest = (struct xhci_td *)td_list->list.mlh_Head;
+    out->missed = td->is_rt_iso && td != oldest;
+    if (out->missed)
     {
-        const struct xhci_generic_trb *trb = (const struct xhci_generic_trb *)(uintptr_t)trb_addr;
-        u32 trb_len = TRB_LEN(le32(trb->field[2]));
-        td->short_act_len = td_sum_trb_lengths(td, (u32)idx) +
-                            ((trb_len > residue) ? trb_len - residue : 0);
-        td->short_seen = TRUE;
-        *deferred = TRUE;
-        KprintfT("mid-TD short at TRB %ld/%lu: act_len=%lu\n",
-                 (LONG)idx, (ULONG)td->trb_count, (ULONG)td->short_act_len);
-        return FALSE;
+        td_consume(td_list, oldest, 0, out);
+        return TRUE;
     }
 
     u32 act_len;
     if (td->short_seen)
-        act_len = td->short_act_len;
-    else if (td->length > residue)
-        act_len = td->length - residue;
-    else
-        act_len = 0;
-
-    out->rt = td->is_rt_iso;
-    out->act_len = act_len;
-
-    if (td->is_rt_iso)
-    {
-        out->req = NULL;
-        out->rt_buffer = td->u.rt.span.cpu;
-        out->rt_length = td->u.rt.span.length;
-        out->rt_frame = td->u.rt.frame;
-        out->rt_dir = td->u.rt.dir;
-        /* The completion path consumes the data (and frees IN staging). */
-        xhci_dma_span_unmap(td_list->ctrl, &td->u.rt.span,
-                            td->u.rt.dir == XHCI_DIR_IN && act_len > 0);
-    }
+        act_len = td->short_act_len; /* fixed by a short packet on an earlier TRB */
+    else if (idx + 1 == td->trb_count)
+        /* the final TRB's residue is the TD's: td_bytes_through() without
+         * reading the ring back, on every completion */
+        act_len = (td->length > residue) ? td->length - residue : 0;
     else
     {
-        struct xhci_xfer *req = td->u.req;
-        out->req = req;
-        out->rt_buffer = NULL;
-        out->rt_length = 0;
-        out->rt_frame = 0;
-        out->rt_dir = 0;
-
-        if (req)
-            td_unmap_req_data(td_list->ctrl, req, TRUE);
+        act_len = td_bytes_through(td, idx, residue);
+        if (short_packet)
+        {
+            /* the TD ends with its final TRB's event (xHCI 4.10.1.1) */
+            td->short_act_len = act_len;
+            td->short_seen = TRUE;
+            *deferred = TRUE;
+            KprintfT("mid-TD short at TRB %lu/%lu: act_len=%lu\n",
+                     (ULONG)idx, (ULONG)td->trb_count, (ULONG)act_len);
+            return FALSE;
+        }
+        /* an error (stall, babble, transaction error) ends the TD here */
     }
 
-    RemoveMinNode((struct MinNode *)td);
-    xhci_td_decrease_queued(td_list, td);
-    xhci_td_free(td_list, td);
-
+    td_consume(td_list, td, act_len, out);
     return TRUE;
+}
+
+/*
+ * The one place a dequeue pointer for a transfer ring is made.
+ *
+ * A stopped endpoint keeps its own position, and a doorbell makes it carry on
+ * from there.  The pointer only has to be moved when the TD the controller
+ * stopped in is no longer on the list - it failed with a halt, or it was
+ * retired.  Then the ring goes on at the oldest TD left, or at the software
+ * enqueue if none is left.
+ *
+ * The cycle bit comes from the TRB itself, not from the endpoint context's
+ * DCS: the VL805 writes that field back wrong (Linux XHCI_EP_CTX_BROKEN_DCS),
+ * and the TRB's cycle is what the controller has to match anyway.
+ */
+dma_addr_t xhci_td_first_deq(TransferDescriptorList *td_list)
+{
+    struct xhci_td *oldest = (struct xhci_td *)td_list->list.mlh_Head;
+    if (oldest->node.mln_Succ)
+        return xhci_ring_get_deq_ptr_for_trb(td_list->ring, oldest->trb_addrs[0]);
+
+    return xhci_ring_get_new_dequeue_ptr(td_list->ring);
+}
+
+/**
+ * xhci_td_oldest_trb() - First TRB of the oldest TD on a ring.
+ * @td_list: the ring's TD list.
+ *
+ * TDs sit on the list in ring order, so the head's first TRB is where the
+ * controller's work on the ring begins: the room check keeps the enqueue out
+ * of its segment (xhci_ring_td_fits()).
+ *
+ * Return: the TRB's ring address, 0 if the list is empty.
+ */
+dma_addr_t xhci_td_oldest_trb(TransferDescriptorList *td_list)
+{
+    struct xhci_td *oldest = (struct xhci_td *)td_list->list.mlh_Head;
+    return oldest->node.mln_Succ ? oldest->trb_addrs[0] : 0;
 }
 
 void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
@@ -630,7 +551,6 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
     while ((n = RemHeadMinList(&td_list->list)) != NULL)
     {
         struct xhci_td *td = (struct xhci_td *)n;
-        xhci_ring_release_trbs(td_list->ring, td->trb_count);
         td_unmap_and_reply(td_list, td, io_Error, 0);
         xhci_td_free(td_list, td);
     }
@@ -638,18 +558,64 @@ void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error)
     td_list->queued_tds = 0;
 }
 
-BOOL xhci_td_has_recovery_victim(TransferDescriptorList *td_list,
-                                 IOReqList *abort_reqs, u32 now_us)
+/*
+ * Retire TDs of a stopped ring, and say whether the ring has to be re-armed.
+ *
+ * The victims are the TDs of the listed requests and the TDs past their
+ * deadline - or, with all, every TD.  A victim's TRBs become No-Ops, which
+ * the controller steps over, and its request is answered: UHIOERR_NAKTIMEOUT
+ * for an expired one (a deadline is a NAK timeout, not "device dead" - the
+ * stack weighs UHIOERR_TIMEOUT three times worse), IOERR_ABORTED otherwise.
+ * Either way with the bytes its fully consumed TRBs moved: Neptune's bulk
+ * streams go on after a NAK timeout with a non-zero actual.  The TRB the
+ * controller was working on counts as not moved.
+ *
+ * stopped_deq is where the controller stopped on this ring.  If that is still
+ * inside a TD of the list, the controller carries on by itself and 0 is
+ * returned; so it is when nothing was retired.  Otherwise the TD it stopped
+ * in is gone and the return value is where to re-arm (xhci_td_first_deq).
+ */
+dma_addr_t xhci_td_retire(TransferDescriptorList *td_list, IOReqList *abort_reqs, u32 now_us,
+                          dma_addr_t stopped_deq, BOOL all)
 {
     if (!td_list)
-        return FALSE;
+        return 0;
+    struct ExecBase *SysBase = td_list->sysBase;
 
-    for (struct MinNode *n = td_list->list.mlh_Head; n && n->mln_Succ; n = n->mln_Succ)
+    const dma_addr_t stopped_trb = stopped_deq & ~(dma_addr_t)EP_CTX_CYCLE_MASK;
+    BOOL retired = FALSE;
+    BOOL stopped_in_survivor = FALSE;
+
+    struct MinNode *next;
+    for (struct MinNode *node = td_list->list.mlh_Head; (next = node->mln_Succ) != NULL; node = next)
     {
-        if (td_is_recovery_abort((struct xhci_td *)n, abort_reqs, now_us))
-            return TRUE;
+        struct xhci_td *td = (struct xhci_td *)node;
+        const s32 stopped_idx = td_find_trb_index(td, stopped_trb);
+        const BOOL expired = td_is_expired_at(td, now_us);
+
+        if (!all && !expired && !td_is_aborted(td, abort_reqs))
+        {
+            stopped_in_survivor |= stopped_idx >= 0;
+            continue;
+        }
+
+        const u32 actual = (stopped_idx > 0) ? td_sum_trb_lengths(td, (u32)stopped_idx) : 0;
+
+        /* stopped_idx < 0: the controller never reached this TD */
+        Kprintf("retiring TD: first TRB %08lx, stopped at %08lx (index %ld), actual %lu, %s\n",
+                (ULONG)td->trb_addrs[0], (ULONG)stopped_trb, (LONG)stopped_idx,
+                actual, expired ? "expired" : "aborted");
+
+        xhci_ring_patch_trbs_to_noop(td_list->ring, td->trb_addrs, td->trb_count, 0);
+        RemoveMinNode(node);
+        xhci_td_decrease_queued(td_list);
+        td_unmap_and_reply(td_list, td, expired ? UHIOERR_NAKTIMEOUT : IOERR_ABORTED, actual);
+        xhci_td_free(td_list, td);
+        retired = TRUE;
     }
 
-    return FALSE;
-}
+    if (!retired || stopped_in_survivor)
+        return 0;
 
+    return xhci_td_first_deq(td_list);
+}

@@ -43,7 +43,7 @@
 #define KprintfT(fmt, ...) PrintPistorm("[xhci-rtiso] %s: " fmt, __func__, ##__VA_ARGS__)
 #endif
 
-/* Hook object for every iso hook call: the registrant's uih_Object (Poseidon
+/* Hook object for every iso hook call: the registrant's uih_Object (Neptune
  * passes the classic IOUsbHWRTIso block so class hooks run unchanged), the
  * hooks block itself as fallback. */
 #define RT_HOOK_OBJ(hooks) ((hooks)->uih_Object ? (hooks)->uih_Object : (APTR)(hooks))
@@ -70,10 +70,11 @@ void xhci_ep_destroy_rt_staging_slab(struct ep_context *ep_ctx)
 /*
  * RT ISO functions
  */
-void xhci_ep_set_rt_interval(struct ep_context *ep_ctx, u8 interval)
+void xhci_ep_set_rt_service(struct ep_context *ep_ctx, u8 interval, u32 max_esit_payload)
 {
     /* xHCI EP Context Interval is log2 of microframes-per-ESIT. */
     ep_ctx->rt_uframes_per_esit = (u16)(1U << interval);
+    ep_ctx->rt_esit_payload = max_esit_payload;
 }
 
 #define RT_ISO_SCHED_OFFSET_UFRAMES 32U
@@ -223,23 +224,29 @@ void xhci_ep_rt_iso_in(struct ep_context *ep_ctx, APTR buffer, u32 length, u32 a
 {
     struct USBIsoHooks *hooks = ep_ctx->rt->hooks;
 
-    /* Pull a destination buffer from the class, copy staged DMA into it, then signal completion. */
-    struct USBBufferRequest rt_buffer_req;
-    rt_buffer_req.frame = rt_frame;
-    rt_buffer_req.flags = 0;
-    rt_buffer_req.length = act_len;
-    rt_buffer_req.data = NULL;
-
-    CallHookPkt(hooks->uih_InRequestHook, RT_HOOK_OBJ(hooks), &rt_buffer_req);
-
-    if (rt_buffer_req.data)
+    /* An interval that brought nothing is routine on a fast endpoint and no
+     * business of the class - unless it failed and the class asked to hear of
+     * those (UHCD_IHF_IN_ERRORS). */
+    if (act_len > 0 || (ubr_flags && (hooks->uih_Flags & UHCD_IHF_IN_ERRORS)))
     {
-        u32 copy_len = act_len < rt_buffer_req.length ? act_len : rt_buffer_req.length;
-        memcpy(rt_buffer_req.data, buffer, copy_len);
-        rt_buffer_req.length = copy_len;
-        rt_buffer_req.flags = ubr_flags; /* done direction carries the wire status */
+        /* Pull a destination buffer from the class, copy staged DMA into it, then signal completion. */
+        struct USBBufferRequest rt_buffer_req;
+        rt_buffer_req.frame = rt_frame;
+        rt_buffer_req.flags = 0;
+        rt_buffer_req.length = act_len;
+        rt_buffer_req.data = NULL;
 
-        CallHookPkt(hooks->uih_InDoneHook, RT_HOOK_OBJ(hooks), &rt_buffer_req);
+        CallHookPkt(hooks->uih_InRequestHook, RT_HOOK_OBJ(hooks), &rt_buffer_req);
+
+        if (rt_buffer_req.data)
+        {
+            u32 copy_len = act_len < rt_buffer_req.length ? act_len : rt_buffer_req.length;
+            memcpy(rt_buffer_req.data, buffer, copy_len);
+            rt_buffer_req.length = copy_len;
+            rt_buffer_req.flags = ubr_flags; /* done direction carries the wire status */
+
+            CallHookPkt(hooks->uih_InDoneHook, RT_HOOK_OBJ(hooks), &rt_buffer_req);
+        }
     }
 
     xhci_ep_rt_iso_update_counters(ep_ctx, length);
@@ -296,7 +303,8 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 
     while (ep_ctx->rt->inflight_bytes < prefetch_bytes)
     {
-        /* Don't enqueue if the ring can't fit one more TRB+spare; try to grow first */
+        /* Don't enqueue if the ring can't take an RT TD (two TRBs at most: a
+         * buffer crossing 64 KB); try to grow first */
         if (!rt_ensure_room(ep_ctx))
             break;
 
@@ -336,8 +344,7 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         u32 length = rt_buffer_req.length;
         s8 ret = xhci_submit_rt_td(ep_ctx->udev, ep_ctx,
                                    (APTR)((u8 *)rt_buffer_req.data + offset), length,
-                                   frame, XHCI_DIR_OUT, FALSE,
-                                   TRUE /* RT ISO defers doorbell to per-run giveback */);
+                                   frame, XHCI_DIR_OUT, FALSE);
         if (ret != UHIOERR_NO_ERROR)
         {
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
@@ -355,17 +362,35 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
     xhci_submit_giveback(ep_ctx->udev, ep_ctx);
 }
 
+/*
+ * The pipeline is topped up a batch at a time, and only the last TD of a
+ * batch raises its completion interrupt (the others carry BEI): an endpoint
+ * served every microframe would otherwise interrupt 8000 times a second,
+ * data or no data.  A batch is one frame's worth of TDs, so the hooks run at
+ * most a millisecond late - against a pipeline RT_ISO_IN_TARGET_FRAMES deep.
+ * The TD queued last always interrupts, so a stream that stops drains without
+ * help; a pass cut short by a failure may end on a silent TD, whose event the
+ * unit task's tick collects.  With one TD per batch (an endpoint served once
+ * a frame or less, or a pre-1.0 controller) none of this changes anything.
+ */
 static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 {
-    u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
-    while (inflight < ep_ctx->rt->inflight_tds_target)
+    const u32 batch_mask = ep_ctx->rt->in_irq_batch_mask;
+    const u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
+    if (inflight + batch_mask >= ep_ctx->rt->inflight_tds_target)
+        return;
+
+    for (u32 remaining = ep_ctx->rt->inflight_tds_target - inflight; remaining; --remaining)
     {
         /* Same backpressure rule as the OUT path: bail before alloc if no room. */
         if (!rt_ensure_room(ep_ctx))
             break;
 
         u16 frame = rt_pick_frame(ep_ctx);
-        const u32 packet_size = ep_ctx->max_packet_size;
+        /* One TD per service interval, sized for everything the interval can
+         * carry: a high-bandwidth or SuperSpeed endpoint sends several
+         * packets in it. */
+        const u32 td_length = ep_ctx->rt_esit_payload;
 
         APTR staging = slab_alloc(&ep_ctx->rt->in_staging_slab);
         if (!staging)
@@ -374,28 +399,26 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
             break;
         }
 
-        KprintfT("RT ISO IN sched frame=%lu maxpkt=%lu inflight_bytes=%lu inflight_tds=%lu\n",
+        KprintfT("RT ISO IN sched frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
-                 (ULONG)packet_size,
+                 (ULONG)td_length,
                  (ULONG)ep_ctx->rt->inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
 
         s8 ret = xhci_submit_rt_td(ep_ctx->udev, ep_ctx,
-                                   staging, packet_size, frame, XHCI_DIR_IN,
-                                   TRUE /* staging buffer, freed on completion */,
-                                   TRUE /* RT ISO defers doorbell to per-run giveback */);
+                                   staging, td_length, frame, XHCI_DIR_IN,
+                                   ((remaining - 1U) & batch_mask) != 0 /* all but the last of a batch */);
         if (ret != UHIOERR_NO_ERROR)
         {
             slab_free(&ep_ctx->rt->in_staging_slab, staging);
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
             break;
         }
-        ++inflight;
 
-        rt_advance(ep_ctx, packet_size);
+        rt_advance(ep_ctx, td_length);
         KprintfT("RT ISO IN queued frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
                  (ULONG)frame,
-                 (ULONG)packet_size,
+                 (ULONG)td_length,
                  (ULONG)ep_ctx->rt->inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
     }
@@ -417,6 +440,17 @@ static void xhci_ep_notify_rt_iso_stopped(struct ep_context *ep_ctx)
 
     stop_req->error = UHIOERR_NO_ERROR;
     xhci_xfer_reply(stop_req); /* the STOP_STREAM shadow copies back to its client */
+}
+
+/* The controller reports the ring empty while the stream is being stopped.
+ * A stop waits for the TDs in flight to complete - but TDs the controller
+ * passed over only leave the list when a later TD's event names them, and
+ * after the last one there is no later TD.  Whatever is still tracked now
+ * will never complete: drop it, which lets the stop finish. */
+void xhci_ep_rt_iso_ring_empty(struct ep_context *ep_ctx)
+{
+    xhci_td_fail_all(ep_default_tds(ep_ctx), IOERR_ABORTED);
+    xhci_ep_schedule_rt_iso(ep_ctx); /* not running and nothing in flight: stopped */
 }
 
 void xhci_ep_schedule_rt_iso(struct ep_context *ep_ctx)
@@ -467,15 +501,27 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
     const u32 target_uframes = RT_ISO_IN_TARGET_FRAMES * 8U;
     ep_ctx->rt->inflight_tds_target = (target_uframes + uframes_per_td - 1U) / uframes_per_td;
 
-    /* Build the per-endpoint IN staging slab now that we know both the packet size
-     * and the target inflight depth.  OUT endpoints have no staging buffer. */
-    if (ep_ctx->rt->direction == XHCI_DIR_IN && ep_ctx->max_packet_size > 0)
+    /* One completion interrupt per frame: 8, 4 or 2 TDs for an endpoint served
+     * 8, 4 or 2 times a frame (the interval is a power of two), else 1. */
+    const u32 tds_per_frame = 8U / uframes_per_td;
+    ep_ctx->rt->in_irq_batch_mask =
+        (tds_per_frame > 1U && ep_ctx->udev->controller->hci_version >= 0x100) ? tds_per_frame - 1U : 0;
+
+    /* Build the per-endpoint IN staging slab now that we know both the TD length
+     * and the target inflight depth.  OUT endpoints have no staging buffer.
+     *
+     * Each buffer is aligned to its own size rounded up to a power of two, so
+     * none crosses a 64 KB boundary and every IN TD is exactly one TRB (the
+     * payload of one interval never exceeds 48 KB).  That is what makes the
+     * completion's length exact without ISP: a short packet can only end in
+     * the TD's final TRB, whose event residue is the TD's. */
+    if (ep_ctx->rt->direction == XHCI_DIR_IN && ep_ctx->rt_esit_payload > 0)
     {
         slab_cache_init(&ep_ctx->rt->in_staging_slab, ep_ctx->sysBase,
                         ep_ctx->udev->controller->metaPool,
                         ep_ctx->udev->controller->dmaPool,
-                        ep_ctx->max_packet_size,
-                        DMA_ALIGN_MIN,
+                        ep_ctx->rt_esit_payload,
+                        round_up_pow2_u32(ep_ctx->rt_esit_payload),
                         ep_ctx->rt->inflight_tds_target);
         ep_ctx->rt->in_staging_active = TRUE;
     }

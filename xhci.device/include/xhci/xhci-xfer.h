@@ -22,7 +22,10 @@
 #include <exec/io.h>
 #include <exec/nodes.h>
 
+#include <timing.h>
+
 #include <devices/usbhcd_context.h> /* UhcdSetupData, UHCD_EPTYPE_*, UHCD_XFF_*, USBIsoHooks */
+#include <xhci/xhci-dma.h>          /* struct xhci_dma_span */
 
 struct xhci_ctrl;
 
@@ -34,7 +37,7 @@ struct xhci_ctrl;
 #define XHCI_DIR_IN  2
 
 /* xf->flags — the only two per-transfer behaviours the core reads. */
-#define XHCI_XF_TIMEOUT   BIT(0) /* naktimeout is meaningful */
+#define XHCI_XF_TIMEOUT   BIT(0) /* deadline_us is meaningful */
 #define XHCI_XF_ALLOWRUNT BIT(1) /* a short IN is not an error */
 
 /* xf->priv_flags — internal state markers, orthogonal to the completion route
@@ -45,20 +48,9 @@ struct xhci_ctrl;
                                  * (internal recovery EP0 traffic) and AddTails
                                  * everything else */
 #define REQ_ON_RING  0x4        /* TRBs live on the hardware ring */
-#define REQ_DMA_MAPPED 0x8      /* data buffer is DMA-mapped (dma_address valid) */
 #define REQ_DIRECT   0x10       /* direct-path device transfer: cookie is the
                                  * abort demux key (xhci_ep_abort_cookie) */
-#define REQ_DMA_DIRECT 0x20     /* mapping is the caller's buffer itself (no
-                                 * bounce); dma_address == data */
 #define REQ_CTX_OP   0x40       /* context-ABI lifecycle op: completion replies the op */
-
-/* bounce class — which bounce slab the bounce buffer came from (0 = dma_alloc fallback) */
-#define REQ_BOUNCE_CLASS_SHIFT 8
-#define REQ_BOUNCE_CLASS_MASK  (0x7U << REQ_BOUNCE_CLASS_SHIFT)
-#define REQ_BOUNCE_CLASS_NONE  0
-#define REQ_BOUNCE_CLASS_SMALL 1
-#define REQ_BOUNCE_CLASS_MED   2
-#define REQ_BOUNCE_CLASS_LARGE 3
 
 struct xhci_xfer
 {
@@ -73,7 +65,7 @@ struct xhci_xfer
     u8   endpoint;              /* endpoint number 0..15 */
     u8   flags;                 /* XHCI_XF_* */
     u16  stream_id;             /* SS bulk stream ring; 0 = default ring */
-    u32  timeout_ms;            /* NAK timeout (valid when XHCI_XF_TIMEOUT) */
+    u32  deadline_us;           /* NAK timeout, as a get_time() deadline (valid when XHCI_XF_TIMEOUT) */
     APTR data;                  /* transfer buffer */
     u32  data_length;
     struct UhcdSetupData setup; /* control setup packet */
@@ -84,9 +76,11 @@ struct xhci_xfer
 
     /* driver bookkeeping */
     u32  priv_flags;            /* REQ_* */
-    void *dma_address;          /* bounce pointer (valid when REQ_DMA_MAPPED) */
+    struct xhci_dma_span data_span; /* data's DMA mapping; XHCI_DMA_NONE = unmapped */
     APTR cookie;                /* direct-path demux key (the stack's pipe) */
     u8   owner_slot;            /* internal EP0 requests: owning slot id (device key) */
+    u8   about_slot;            /* internal EP0 requests: the endpoint the request is */
+    u8   about_ep;              /* about, told when it completes; slot 0 = none */
 };
 
 /* node must sit at offset 0: the pending-list links the xfer by &xf->node, and
@@ -99,8 +93,37 @@ typedef char xhci_xfer_node_first_assert[offsetof(struct xhci_xfer, node) == 0 ?
  * completion needs no central switch on request kind. */
 static inline void xhci_xfer_reply(struct xhci_xfer *xf) { xf->complete(xf); }
 
+/**
+ * xhci_xfer_set_timeout - start a transfer's NAK timeout
+ * @xf: the transfer, as the driver accepts it
+ * @timeout_ms: the timeout; 0 = none
+ *
+ * The timeout counts from acceptance, wherever the transfer waits from then
+ * on: on a ring, or on the endpoint's pending queue behind a full ring, a
+ * recovery or a port suspend.
+ */
+static inline void xhci_xfer_set_timeout(struct xhci_xfer *xf, u32 timeout_ms)
+{
+    if (!timeout_ms)
+        return;
+    xf->deadline_us = get_time() + timeout_ms * 1000UL;
+    xf->flags |= XHCI_XF_TIMEOUT;
+}
+
+/**
+ * xhci_xfer_expired - has a transfer's NAK timeout run out
+ * @xf: the transfer
+ * @now: get_time() of the caller's scan
+ *
+ * Return: TRUE if the transfer has a timeout and it has passed.
+ */
+static inline BOOL xhci_xfer_expired(const struct xhci_xfer *xf, u32 now)
+{
+    return (xf->flags & XHCI_XF_TIMEOUT) && time_deadline_passed(now, xf->deadline_us);
+}
+
 /* The classic 12-byte iso buffer block handed to the clock-driven iso hooks
- * (== Poseidon's struct IOUsbHWBufferReq).  The context ABI deliberately leaves
+ * (== Neptune's struct IOUsbHWBufferReq).  The context ABI deliberately leaves
  * this type anonymous (usbhcd_context.h), so each side names it privately; its
  * ubr_Flags bits live in usbhcd_common.h. */
 struct USBBufferRequest

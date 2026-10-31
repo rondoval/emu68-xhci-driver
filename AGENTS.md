@@ -41,12 +41,14 @@ cd ../..    # emu68-driver-stack root
   slot id); `xhci_address` is the wire address from `ADDRESS_DEVICE`. The driver
   never sends `SET_ADDRESS`.
 
-## Poseidon HCD ABI (matched pair)
+## Neptune context HCD ABI (matched pair)
 
-This driver and the `poseidon-backport` stack evolve together. That repo's
-`docs/poseidon-context-hcd-abi.md` governs the ABI (`NSCMD_*` lifecycle ops,
-`UHCF_CONTEXT` = BIT(5), `UHIOERR_NO_BANDWIDTH` = 14), alongside
-`poseidon-vs-xhci-driver-model.md` and `implementation-plan.md`.
+This driver and the Neptune stack (`rondoval/neptune`, an incompatible fork of the
+Poseidon USB stack; local checkout `neptune`) evolve together. That repo's
+`docs/neptune-context-hcd-abi.md` governs the ABI (`NSCMD_*` lifecycle ops,
+`UHCF_CONTEXT` = BIT(5), `UHIOERR_NO_BANDWIDTH` = 14), alongside `implementation-plan.md`. The ABI is Neptune's own,
+not Poseidon's; this driver implements neither Poseidon's V3 interface nor
+the legacy per-transfer commands.
 
 - The context ABI is the **only** client ABI; legacy `CMD_REQUEST_*` and classic
   RT-ISO commands reply `IOERR_NOCMD`.
@@ -57,7 +59,7 @@ This driver and the `poseidon-backport` stack evolve together. That repo's
   commands travel as messages.
 - Value-level contracts: `ERR_*` values and their dead-device weighting
   (TIMEOUT +3 / NAK_TIMEOUT +2 / CRC +1), `CMD_FLUSH` reply-everything,
-  device-side CLEAR_FEATURE(ENDPOINT_HALT) is poseidon.library's alone - the
+  device-side CLEAR_FEATURE(ENDPOINT_HALT) is neptune.library's alone - the
   driver neither issues nor dedups one (host-side recovery only). Error codes
   report what happened, independent of endpoint type (UHIOERR_STALL,
   UHIOERR_BABBLE, XACTERROR, SPLITERROR); the stack decides what each means

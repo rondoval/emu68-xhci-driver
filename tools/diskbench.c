@@ -8,7 +8,7 @@
  * for the why.
  *
  * The wire queue depth is capped by the massstorage 'UAS queue depth'
- * slider, which is latched at bind — change it in Trident and replug the
+ * slider, which is latched at bind — change it in Neptune USB and replug the
  * drive between sweep configurations; QD= here only sets how many requests
  * this tool keeps outstanding.
  */
@@ -31,7 +31,7 @@ static const char verstag[] __attribute__((used)) = VERSTAG;
 #endif
 
 #define TEMPLATE "DRIVE,DEVICE/K,UNIT/N,TEST/K,BS/K,QD/K,SIZE/K,SECS/N,SEED/N," \
-                 "MISALIGN/S,CHIP/S,KEEPFILE/S,RAW/S,HELP/S"
+                 "MISALIGN/S,OFFSET/K/N,CHIP/S,KEEPFILE/S,RAW/S,HELP/S"
 
 enum
 {
@@ -45,6 +45,7 @@ enum
     ARG_SECS,
     ARG_SEED,
     ARG_MISALIGN,
+    ARG_OFFSET,
     ARG_CHIP,
     ARG_KEEPFILE,
     ARG_RAW,
@@ -78,6 +79,8 @@ static BOOL db_parse_test(const char *s, ULONG *tests)
         *tests = DB_T_DEVSEQ;
     else if (db_strieq(s, "DEVIOPS"))
         *tests = DB_T_DEVIOPS;
+    else if (db_strieq(s, "DEVCHECK"))
+        *tests = DB_T_DEVCHECK;
     else if (db_strieq(s, "FS"))
         *tests = DB_T_FS;
     else if (db_strieq(s, "DEV"))
@@ -95,7 +98,7 @@ static void db_usage(void)
     printf(
         "usage: diskbench <drive:> [DEVICE=<name>] [UNIT=<n>] [TEST=<what>]\n"
         "                 [BS=<list>] [QD=<list>] [SIZE=<n>] [SECS=<n>] [SEED=<n>]\n"
-        "                 [MISALIGN] [CHIP] [KEEPFILE] [RAW] [HELP]\n"
+        "                 [MISALIGN | OFFSET=<n>] [CHIP] [KEEPFILE] [RAW] [HELP]\n"
         "\n"
         "Two engines, both sweeping block size and queue depth:\n"
         "  fs   read/write packets on <drive:>diskbench.tmp - the numbers an\n"
@@ -106,7 +109,8 @@ static void db_usage(void)
         "       more. Writes, inside that one file.\n"
         "  dev  NSCMD_TD_READ64 straight at the exec device under the volume, QD\n"
         "       requests in flight - no filesystem in the way, so QD lands on the\n"
-        "       massstorage UAS tag engine. Never writes.\n"
+        "       massstorage UAS tag engine. Never writes. It also runs DEVCHECK, a\n"
+        "       data check of the driver's DMA paths rather than a benchmark.\n"
         "\n");
     printf(
         "Target\n"
@@ -121,7 +125,15 @@ static void db_usage(void)
         "            FSIOPS   fs random read, then write, at 4K, per QD entry\n"
         "            DEVSEQ   dev sequential read, every BS x QD\n"
         "            DEVIOPS  dev random read at 4K, per QD entry\n"
-        "            FS | DEV | ALL select the matching groups.\n"
+        "            DEVCHECK dev data check, every BS x QD: each position is\n"
+        "                     read into an aligned buffer, then QD at a time\n"
+        "                     into buffers at every offset 0..63, 64 guard\n"
+        "                     bytes either side; data and guards must match.\n"
+        "                     Repeats over new positions for SECS. OFFSET= is\n"
+        "                     ignored, CHIP puts the checked buffers in Chip RAM.\n"
+        "                     Fails with RC 20 on any mismatch, or a point\n"
+        "                     that could not run.\n"
+        "            FS | DEV | ALL select the matching groups (not DEVCHECK).\n"
         "            Default: ALL with a <drive:>, DEV with only DEVICE=.\n"
         "\n"
         "Both engines\n"
@@ -134,7 +146,7 @@ static void db_usage(void)
         "            (massstorage NCM_MAXTAGS). Default 1,2,4,8,16. This is only what\n"
         "            diskbench keeps outstanding; the wire depth is capped by the\n"
         "            massstorage 'UAS queue depth' slider, which latches at bind, so\n"
-        "            change it in Trident and replug the drive between sweeps.\n"
+        "            change it in Neptune USB and replug the drive between sweeps.\n"
         "  SIZE=     fs test file size, and the dev engine's random-read working set.\n"
         "            1M..1G, default 256M. Pick something past the drive's own cache.\n"
         "  SECS=     Measured seconds per point, 1..600, default 3. Each point also\n"
@@ -142,7 +154,10 @@ static void db_usage(void)
         "  SEED=     Seed for the random offsets, so a rerun replays them. Default\n"
         "            0x1234567.\n"
         "  MISALIGN  Offset every buffer by one byte, taking the driver's bounce-\n"
-        "            buffer path instead of zero-copy DMA.\n"
+        "            buffer path instead of zero-copy DMA. Same as OFFSET=1.\n"
+        "  OFFSET=   Start every buffer this many bytes (0..63) past a 4K boundary.\n"
+        "            OFFSET=8 is a plain AllocMem() buffer: word and longword\n"
+        "            aligned, but not on a cache line.\n"
         "  CHIP      Allocate buffers in Chip RAM. PiStorm cannot DMA there, so this\n"
         "            measures the bounce path plus Chip bus contention.\n"
         "  RAW       Print one machine-parseable 'RESULT key=value ...' line per point\n"
@@ -166,6 +181,7 @@ static void db_usage(void)
         "  diskbench USB0:\n"
         "  diskbench USB0: TEST=DEVSEQ BS=64K,1M QD=1,4,16 SECS=10\n"
         "  diskbench USB0: TEST=FS BS=1M QD=1,4 SIZE=512M KEEPFILE\n"
+        "  diskbench USB0: TEST=DEVCHECK BS=4K,1M QD=1,4 SECS=30\n"
         "  diskbench DEVICE=usbscsi.device UNIT=0 TEST=DEV RAW\n");
 }
 
@@ -238,7 +254,7 @@ int main(void)
     cfg.tests = (cfg.drive[0] != '\0') ? DB_T_ALL : DB_T_DEV;
     if (args[ARG_TEST] != 0 && !db_parse_test((const char *)args[ARG_TEST], &cfg.tests))
     {
-        printf("diskbench: bad TEST (FSSEQ|FSIOPS|DEVSEQ|DEVIOPS|FS|DEV|ALL)\n");
+        printf("diskbench: bad TEST (FSSEQ|FSIOPS|DEVSEQ|DEVIOPS|DEVCHECK|FS|DEV|ALL)\n");
         goto out_args;
     }
 
@@ -296,7 +312,18 @@ int main(void)
     }
     if (args[ARG_SEED] != 0)
         cfg.seed = (ULONG)*(LONG *)args[ARG_SEED];
-    cfg.misalign = (BOOL)(args[ARG_MISALIGN] != 0);
+    cfg.offset = (args[ARG_MISALIGN] != 0) ? 1 : 0;
+    if (args[ARG_OFFSET] != 0)
+    {
+        LONG o = *(LONG *)args[ARG_OFFSET];
+        if (o < 0 || o >= DB_ALIGN_SLACK || args[ARG_MISALIGN] != 0)
+        {
+            printf("diskbench: OFFSET must be 0..%lu, and not given with MISALIGN\n",
+                   (unsigned long)(DB_ALIGN_SLACK - 1));
+            goto out_args;
+        }
+        cfg.offset = (ULONG)o;
+    }
     cfg.chip = (BOOL)(args[ARG_CHIP] != 0);
     cfg.keepfile = (BOOL)(args[ARG_KEEPFILE] != 0);
     db_raw = (BOOL)(args[ARG_RAW] != 0);
@@ -319,12 +346,16 @@ int main(void)
     {
         char sizestr[12];
         db_fmt_size((ULONG)cfg.size, sizestr);
+        char alignstr[32];
+        if (cfg.offset != 0)
+            sprintf(alignstr, " misaligned(+%lu)", (unsigned long)cfg.offset);
+        else
+            strcpy(alignstr, " 4K-aligned");
         printf("  buffers: %s%s  size=%s secs=%lu seed=0x%lx  eclock=%lu Hz\n",
-               cfg.chip ? "chip" : "fast",
-               cfg.misalign ? " misaligned(+1)" : " 4K-aligned",
+               cfg.chip ? "chip" : "fast", alignstr,
                sizestr, (unsigned long)cfg.secs, (unsigned long)cfg.seed,
                (unsigned long)db_efreq);
-        if ((cfg.tests & DB_T_DEV) != 0)
+        if ((cfg.tests & DB_T_DEV_ENGINE) != 0)
             printf("  note: wire QD is capped by the 'UAS queue depth' slider (latched at bind)\n");
     }
 
@@ -335,7 +366,7 @@ int main(void)
         if (r > rc)
             rc = (int)r;
     }
-    if ((cfg.tests & DB_T_DEV) != 0 && rc < RETURN_WARN)
+    if ((cfg.tests & DB_T_DEV_ENGINE) != 0 && rc < RETURN_WARN)
     {
         LONG r = db_run_dev(&cfg);
         if (r > rc)

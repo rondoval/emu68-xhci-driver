@@ -37,7 +37,7 @@
 
 /* Target RT ISO IN scheduling horizon in ms */
 #define RT_ISO_IN_TARGET_FRAMES 16
-#define XHCI_INITIAL_SEGMENTS_PER_RING 1
+#define XHCI_INITIAL_SEGMENTS_PER_RING 2
 #define XHCI_SEGMENTS_PER_RING 4
 #define XHCI_MAX_SEGMENTS_PER_RING 64 // Hard ceiling for dynamic transfer ring growth
 

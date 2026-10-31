@@ -2,10 +2,14 @@
 
 Configuration-relevant changes across all releases, newest first:
 
-* **6.x requires Poseidon for AmigaOS 6.x**, whose context HCD ABI is the only
-  one this line implements.  **Still on classic Poseidon 4.x?  Do not upgrade
-  to 6.x** — use the driver's **5.x** line instead, which speaks the classic
-  Poseidon HCD ABI and is maintained on the
+* **6.x requires [Neptune](https://github.com/rondoval/neptune) 6.x**, whose
+  context HCD interface is the only one this line implements.  Neptune is an
+  incompatible fork of the Poseidon USB stack; its 6.0–6.2 releases were
+  published as "Poseidon for AmigaOS", and older notes below use that name.
+  The context interface is Neptune's own, not part of Poseidon's API.
+  **On Poseidon (classic 4.x or AROS 5.x)?  Do not upgrade to 6.x** — use the
+  driver's **5.x** line instead, which speaks the classic V1/V2 `IOUsbHWReq`
+  interface and is maintained on the
   [`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main).
   The two lines are alternatives, not a sequence: pick the one that matches
   your USB stack.
@@ -16,6 +20,130 @@ Configuration-relevant changes across all releases, newest first:
   is now the onboard OTG port; unit 1 is now the VL805.  Update your USB
   stack configuration accordingly.
 
+
+# Release notes — xhci.device 6.4
+
+Changes since v6.3.
+
+The isochronous IN path learns what USB video cameras need, and large reads
+into ordinary buffers no longer pay for a copy.
+
+---
+
+## Improvements
+
+- **Large reads into unaligned buffers are no longer copied whole.** A bulk
+  read into a buffer that does not start and end on a 64-byte cache line was
+  received into a bounce buffer and copied over in full. Plain `AllocMem()`
+  buffers are 8-byte aligned, so most filesystem reads went that way. Now
+  only the partial lines at either end, at most 63 bytes each, go through a
+  bounce buffer; the rest lands straight in the caller's buffer. Reads of
+  4 KB and more get it. 1 MB reads now run as fast as into aligned buffers:
+  on a Pi 4 a UAS SSD reads 290 MB/s instead of 256 from the device and 277
+  instead of 235 through PFS3, a USB 3 stick 114 instead of 107. Writes and
+  Chip RAM buffers are unchanged.
+- **Fast isochronous IN endpoints cost far less CPU.** An endpoint served
+  every microframe, such as a high-speed webcam, raised 8000 interrupts a
+  second. Its completions are now handled once a millisecond: a camera
+  stream on a Pi 4 takes about a quarter of the CPU instead of about 70 %.
+  USB audio is unaffected.
+- **A class can be told about lost isochronous IN intervals.** With a new
+  flag in its hook block, a class's hooks are also called for an interval
+  that failed or was skipped. The video class uses it to recognise a damaged
+  picture. Needs Neptune 6.3.
+- **A halted endpoint loses one transfer, not all of them.** When a device
+  refuses a transfer, or the controller stops an endpoint over a bus error,
+  only that transfer comes back with the error. The others stay queued and
+  go out once Neptune has cleared the halt on the device - on a control
+  endpoint at once.
+- **A passing bus error no longer fails a transfer.** A failed transaction
+  on a bulk or interrupt endpoint is tried again, up to three more rounds,
+  before any error is reported.
+
+---
+
+## Bug fixes
+
+- **Transfers left waiting after an abort or a timeout.** When one of
+  several queued transfers was aborted or timed out, the others were not
+  restarted until something new was sent to the endpoint.
+- **A transfer finishing just as its endpoint was stopped was lost.** It was
+  never reported. A keyboard whose key press coincided with its suspend
+  could stay deaf after the resume.
+- **A resume right after a suspend could be lost,** leaving the device
+  asleep. The driver now waits until the port is suspended, and the 10 ms
+  the specification asks for, before it resumes it.
+- **Endpoints the controller halted for its own reasons stayed halted.**
+  They are now recovered like any other halt.
+- **Low and full speed devices behind a hub.** After a failed transfer the
+  hub has to be told to drop it. That request could go to the wrong hub or
+  name the wrong port, and the driver did not wait for the answer.
+- **A small buffer leak on aborts.** A transfer aborted while it was still
+  waiting for its endpoint kept its transfer buffer.
+- **Stopping an isochronous stream could wait for ever.** The stop waits for
+  the transfers in flight, but transfers the controller skipped at the very
+  end never completed. It could happen when a device was unplugged while it
+  streamed.
+- **Isochronous streams keep their full pipeline after missed service
+  intervals.** Skipped transfers were never retired, so each such event
+  left the stream less room until it was restarted.
+- **Isochronous IN endpoints that send several packets per interval now
+  work.** HD webcams and bursting SuperSpeed endpoints lost everything after
+  the first packet.
+- **A program that calls `CloseDevice()` after a failed `OpenDevice()` no
+  longer upsets the driver.** A failed open now clears the request's device
+  and unit, so that close does nothing, as Exec expects; before, it reached
+  the driver's close and dropped an open count it had never taken.
+- **The on-board controller is found by its device-tree label** (`xhci`)
+  instead of a fixed path.
+- **A transfer ring that had to grow while full could lose transfers.** New
+  ring space went in behind transfers still queued, so the controller could
+  skip them or the next transfer could overwrite them. Rings now grow before
+  the driver catches up with the controller.
+- **A large transfer that failed partway reported almost all of it as
+  received.** When a transfer over 64 KB stopped with an error before its
+  end, everything after the point of failure was counted as delivered too: a
+  1 MB read that failed 70 KB in reported nearly the whole megabyte. A class
+  or program that used that count could take buffer contents that were never
+  written for data. The count is now the bytes that actually arrived.
+- **A transfer held back by the driver could wait for ever.** Its timeout
+  only started once the transfer reached the controller, so one that waited
+  behind a full ring, an error recovery or a device suspend never timed out.
+  The timeout now counts from when the driver accepts the transfer.
+- **Large transfers now keep the xHCI rule at ring segment boundaries.** The
+  part of a transfer before the end of a ring segment is cut to whole USB
+  packets.
+- **Switching an interface's alternate setting could corrupt memory.** The
+  driver freed the endpoint's buffers and transfer ring before the
+  controller had stopped using them, and if the controller refused the
+  switch, for example for lack of bandwidth, the endpoint was left on freed
+  memory for good. The old endpoint now stays until the controller has
+  accepted the change. Unconfiguring a device now also releases its
+  endpoints.
+- **Out of memory, the USB stack could wait for ever.** When the driver
+  could not hand a command to the controller, the request behind it (setting
+  up, resetting or reconfiguring a device) was never answered. It now fails
+  with an error.
+- **Two drivers could run the built-in USB controller at once.** Unit 0
+  (the Pi 4's USB-C port, the CM4's USB) was not reserved like a PCIe
+  controller: with Neptune on `xhci.device` unit 0, Poseidon could open
+  `xhci-legacy.device` unit 0 as well. The second driver is now refused.
+  A controller that failed to start is released again, so a later open can
+  have it; before, it stayed taken until a reboot.
+
+---
+
+## Build & tooling
+
+- `find_package()` names the oldest version of each dependency the driver
+  builds against: emu68-common 2.1 (for `DT_OpenSymbol`), bcmpcie.library
+  2.3 (for `libraries/pci_irq.h`). An older one now fails at configure
+  instead of mid-build.
+- **`diskbench TEST=DEVCHECK`** checks the driver's DMA paths: it reads the
+  same blocks into an aligned buffer and into buffers at every offset in a
+  cache line, with guard bytes around them, and compares. Read-only.
+
+---
 
 # Release notes — xhci.device 6.3
 

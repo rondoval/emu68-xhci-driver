@@ -28,9 +28,6 @@ struct xhci_ring
 	u16 stream_id; /* SS bulk stream ring: the stream id this ring serves (doorbell target); 0 = default ring */
 	u32 num_segs;
 	u32 max_packet_size;
-	u32 queued_trbs; /* TRBs of in-flight TDs on THIS ring (per-stream-accurate
-	                  * room accounting; xhci-ring.c owns every access -
-	                  * xhci_ring_reserve_trbs / _release_trbs / _has_room) */
 
 	/* This ring's in-flight TDs.  Owned and tracked by the endpoint layer
 	 * (xhci-td.c is the only code that looks inside); transfer rings only,

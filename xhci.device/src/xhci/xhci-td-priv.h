@@ -32,44 +32,25 @@ TransferDescriptorList* xhci_td_create_list(struct xhci_ctrl *ctrl, struct ep_co
 void xhci_td_destroy_list(TransferDescriptorList *td_list, s8 error_code);
 
 BOOL xhci_td_is_empty(TransferDescriptorList *td_list);
-BOOL xhci_td_is_expired(TransferDescriptorList *td_list);
+/* is any TD on the list past its NAK deadline at now (get_time())? */
+BOOL xhci_td_any_expired(TransferDescriptorList *td_list, u32 now);
 /* the on-ring direct transfer with this cookie, or NULL */
 struct xhci_xfer *xhci_td_find_cookie_request(TransferDescriptorList *td_list, APTR cookie);
 u32 xhci_td_get_queued_td_count(TransferDescriptorList *td_list);
 BOOL xhci_td_has_request(TransferDescriptorList *td_list, struct xhci_xfer *io_req);
-/* Does this ring's list hold a recovery victim (an abort-listed or expired
- * TD)?  The per-ring pre-check that keeps recovery surgical: rings without
- * victims are skipped whole and their TDs keep running. */
-BOOL xhci_td_has_recovery_victim(TransferDescriptorList *td_list,
-    IOReqList *abort_reqs, u32 now_us);
+/* Retire TDs of a stopped ring: the TDs of the abort-listed requests and the
+ * expired ones, or - all - every TD.  Returns the dequeue pointer to re-arm
+ * the ring at; 0 = the controller carries on by itself from where it stopped
+ * (nothing retired, or it stopped in a TD that stays).  See xhci-td.c. */
+dma_addr_t xhci_td_retire(TransferDescriptorList *td_list, IOReqList *abort_reqs, u32 now_us,
+    dma_addr_t stopped_deq, BOOL all);
 
-/* Ring recovery, split so the caller can validate before mutating (both
- * halves take the same now_us so the victim set cannot shift between them).
- *
- * Resolve (non-destructive): the re-arm dequeue for this ring's victim set —
- * the stopped TRB itself when the hardware halted inside a survivor, a later
- * survivor's first TRB, or the software enqueue when everything from the
- * stop point on dies.  0 = the stopped dequeue lies outside every tracked TD
- * (anomaly; the caller falls back to coarse whole-endpoint recovery). */
-dma_addr_t xhci_td_resolve_recovery(TransferDescriptorList *td_list,
-    struct xhci_ring *ring,
-    IOReqList *abort_reqs,
-    u32 now_us,
-    dma_addr_t stopped_deq_ptr);
-
-/* Abort (destructive): No-Op every victim's TRBs and reply them —
- * UHIOERR_NAKTIMEOUT for expired TDs, IOERR_ABORTED otherwise, with the
- * partial actual recovered from the fully-consumed TRBs. */
-void xhci_td_abort_recovery(TransferDescriptorList *td_list,
-    IOReqList *abort_reqs,
-    u32 now_us,
-    dma_addr_t stopped_deq_ptr);
-
+/* trb_count TRBs at trb_addresses, an array allocated for trb_cap. */
 BOOL xhci_td_add(TransferDescriptorList *td_list,
     struct xhci_xfer *io_req,
-    u32 timeout_ms,
     dma_addr_t *trb_addresses,
-    u32 trb_count);
+    u32 trb_count,
+    u32 trb_cap);
 
 /* RT ISO TD: the TD itself owns the mapped span; staging marks an IN buffer
  * from the endpoint's staging slab (freed by the completion/teardown paths). */
@@ -85,6 +66,14 @@ BOOL xhci_td_add_rt(TransferDescriptorList *td_list,
 BOOL xhci_td_complete_by_trb(TransferDescriptorList *td_list, dma_addr_t trb_addr,
                              u32 residue, BOOL short_packet,
                              struct xhci_td_completion *out, BOOL *deferred);
+
+/* The dequeue pointer (with its cycle bit) that carries a ring on at the
+ * oldest TD still on the list, or at the software enqueue if none is: what a
+ * ring is re-armed at when the TD the controller stopped in is gone. */
+dma_addr_t xhci_td_first_deq(TransferDescriptorList *td_list);
+
+/* First TRB of the oldest TD on the list (0 if empty): the room check's bound. */
+dma_addr_t xhci_td_oldest_trb(TransferDescriptorList *td_list);
 
 void xhci_td_fail_all(TransferDescriptorList *td_list, s8 io_Error);
 

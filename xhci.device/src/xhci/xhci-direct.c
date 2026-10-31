@@ -306,10 +306,8 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
     io->endpoint = (u8)((ep_index + 1) >> 1);
     io->data = data;
     io->data_length = length;
-    io->timeout_ms = naktimeout_ms;
     io->cookie = cookie;
-    if (naktimeout_ms)
-        io->flags |= XHCI_XF_TIMEOUT;
+    xhci_xfer_set_timeout(io, naktimeout_ms);
 
     if (setup)
     {
@@ -340,7 +338,7 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
      * transfer) with the lock RELEASED so the transfer plane keeps moving. */
     const BOOL to_device = (io->direction == XHCI_DIR_OUT) ||
                            (setup && !(setup->usd_RequestType & 0x80U));
-    if (length && !xhci_dma_premap(ctrl, io, to_device))
+    if (length && !xhci_dma_req_prepare(ctrl, io, to_device))
     {
         slab_free(&ctrl->xfer_slab, io);
         lock_prof_release(&ctrl->lockProf, &ctrl->xfer_lock);
@@ -350,7 +348,7 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
     lock_prof_release(&ctrl->lockProf, &ctrl->xfer_lock);
     PERF_T0(map_t0);
     if (length)
-        xhci_dma_map_sync(ctrl, io, to_device);
+        xhci_dma_span_sync(ctrl, &io->data_span);
     PERF_ADD(&ctrl->perf, XP_SUBMIT_MAP, map_t0);
     lock_prof_obtain(&ctrl->lockProf, &ctrl->xfer_lock);
 
@@ -360,7 +358,7 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
     ep_ctx = token_resolve(ctrl, tok, &udev);
     if (!ep_ctx)
     {
-        xhci_dma_unmap(ctrl, io, FALSE);
+        xhci_dma_span_unmap(ctrl, &io->data_span, 0);
         slab_free(&ctrl->xfer_slab, io);
         lock_prof_release(&ctrl->lockProf, &ctrl->xfer_lock);
         return UHIOERR_TIMEOUT; /* device-gone semantics */
@@ -369,7 +367,7 @@ static LONG direct_device_submit(struct xhci_ctrl *ctrl, u32 tok,
     s8 err = xhci_ep_submit(ep_ctx, io);
     if (err != UHIOERR_NO_ERROR)
     {
-        xhci_dma_unmap(ctrl, io, FALSE); /* state-gate rejects leave the map live */
+        xhci_dma_span_unmap(ctrl, &io->data_span, 0); /* state-gate rejects leave the span mapped */
         slab_free(&ctrl->xfer_slab, io);
     }
 

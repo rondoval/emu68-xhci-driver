@@ -267,7 +267,7 @@ u32 xhci_find_root_port(struct usb_device *udev)
 /* TRUE if hub is a HS multi-TT hub with its multi-TT interface selected:
  * bDeviceProtocol == 2 (capability) and the active altsetting of the hub
  * interface has bInterfaceProtocol == 2. */
-static BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub)
+BOOL xhci_hub_multi_tt_enabled(struct usb_device *hub)
 {
     /* The stack supplies the enabled MTT state explicitly
        (NSCMD_USB_UPDATE_HUB): 2 = multi-TT interface selected. */
@@ -295,30 +295,24 @@ u16 xhci_ep0_default_mps(enum usb_device_speed speed)
 }
 
 /* Low-level endpoint wiring shared by EP0 setup and the descriptor-driven
- * path: allocate the software endpoint context (+ transfer ring), then fill
- * the hardware input endpoint context.  ep_info carries the host-order
- * interval/mult/ESIT-hi bits (0 for control endpoints), tx_info the
- * ESIT-lo/average-TRB-length bits. */
-static s8 xhci_wire_ep_ctx(struct usb_device *udev, u8 ep_index, u8 ep_type,
-                           u16 max_packet_size, u8 max_burst, u8 err_count,
-                           u32 ep_info, u32 tx_info)
+ * path: fill the hardware input endpoint context of ep_index from the
+ * software context ep_ctx and its transfer ring.  ep_info carries the
+ * host-order interval/mult/ESIT-hi bits (0 for control endpoints), tx_info
+ * the ESIT-lo/average-TRB-length bits. */
+static void xhci_wire_ep_ctx(struct usb_device *udev, u8 ep_index, struct ep_context *ep_ctx,
+                             u8 ep_type, u16 max_packet_size, u8 max_burst, u8 err_count,
+                             u32 ep_info, u32 tx_info)
 {
     struct xhci_ctrl *ctrl = udev->controller;
     struct xhci_ep_ctx *epc = xhci_get_ep_ctx(ctrl, udev->in_ctx, ep_index);
 
-    if (!xhci_ep_create_context(udev, ep_index, max_packet_size, max_burst))
-        return UHIOERR_OUTOFMEMORY;
-    xhci_ep_set_hw_type(xhci_ep_get_context_for_index(udev, ep_index), ep_type);
+    xhci_ep_set_hw_type(ep_ctx, ep_type);
 
     epc->ep_info = le32(ep_info);
     epc->ep_info2 = le32(EP_TYPE(ep_type) | MAX_PACKET((u32)max_packet_size) |
                          MAX_BURST(max_burst) | ERROR_COUNT(err_count));
-
-    struct ep_context *ep_context = xhci_ep_get_context_for_index(udev, ep_index);
-    epc->deq = le64(xhci_ring_get_new_dequeue_ptr(xhci_ep_get_ring(ep_context)));
+    epc->deq = le64(xhci_ring_get_new_dequeue_ptr(xhci_ep_get_ring(ep_ctx)));
     epc->tx_info = le32(tx_info);
-
-    return UHIOERR_NO_ERROR;
 }
 
 /* Route string, device speed and the initial Context Entries value (EP0 only)
@@ -354,6 +348,31 @@ static void ctx_pack_slot_speed_route(struct usb_device *udev, struct xhci_slot_
     slot_ctx->dev_info = le32(dev_info);
 }
 
+/* The hub whose transaction translator serves a low or full speed device: the
+ * nearest high-speed hub up the tree.  *tt_port is the port of that hub the
+ * device hangs off, directly or through full-speed hubs.  NULL = none (a
+ * device of another speed, or one that sits on a root port or under a
+ * full-speed hub that does). */
+struct usb_device *xhci_tt_hub(struct usb_device *udev, u8 *tt_port)
+{
+    if (udev->speed != USB_SPEED_LOW && udev->speed != USB_SPEED_FULL)
+        return NULL;
+
+    u8 port = udev->parent_port;
+
+    for (struct usb_device *hub = udev->parent; hub; hub = hub->parent)
+    {
+        if (hub->is_hub && hub->speed >= USB_SPEED_HIGH)
+        {
+            *tt_port = port;
+            return hub;
+        }
+        port = hub->parent_port;
+    }
+
+    return NULL;
+}
+
 /* Root-hub port into dev_info2; for LS/FS devices behind a high-speed hub,
  * the TT fields (and the DEV_MTT mirror of the hub's enabled multi-TT mode,
  * xHCI 6.2.2 — safe at address time: the hub class selects the TT mode
@@ -374,29 +393,22 @@ static void ctx_pack_tt_info(struct usb_device *udev, struct xhci_slot_ctx *slot
     u32 tt_info = 0;
     if (udev->speed == USB_SPEED_LOW || udev->speed == USB_SPEED_FULL)
     {
-        struct usb_device *tt_hub = udev->parent;
-        u8 parent_port = udev->parent_port;
+        u8 tt_port;
+        struct usb_device *tt_hub = xhci_tt_hub(udev, &tt_port);
 
-        while (tt_hub)
+        if (tt_hub)
         {
-            if (tt_hub->is_hub && tt_hub->speed >= USB_SPEED_HIGH)
-            {
-                tt_info = TT_SLOT(tt_hub->slot_id) | TT_PORT(parent_port);
+            tt_info = TT_SLOT(tt_hub->slot_id) | TT_PORT(tt_port);
 
-                BOOL mtt = xhci_hub_multi_tt_enabled(tt_hub);
-                if (mtt)
-                    slot_ctx->dev_info |= le32(DEV_MTT);
+            BOOL mtt = xhci_hub_multi_tt_enabled(tt_hub);
+            if (mtt)
+                slot_ctx->dev_info |= le32(DEV_MTT);
 
-                KprintfT("tt_slot=%lu tt_port=%lu tt_info=%08lx mtt=%ld\n",
-                         (ULONG)tt_hub->slot_id, (ULONG)parent_port, (ULONG)tt_info,
-                         (LONG)mtt);
-                break;
-            }
-            parent_port = tt_hub->parent_port;
-            tt_hub = tt_hub->parent;
+            KprintfT("tt_slot=%lu tt_port=%lu tt_info=%08lx mtt=%ld\n",
+                     (ULONG)tt_hub->slot_id, (ULONG)tt_port, (ULONG)tt_info,
+                     (LONG)mtt);
         }
-
-        if (!tt_hub)
+        else
             Kprintf("Low or full speed device slot %lu not behind a high-speed hub???\n", (ULONG)udev->slot_id);
     }
 
@@ -414,10 +426,14 @@ static void ctx_wire_ep0(struct usb_device *udev)
         Kprintf("Unknown device speed %lu\n", (ULONG)udev->speed);
     KprintfT("SPEED=%lu MPS=%lu\n", (ULONG)udev->speed, (ULONG)max_packet_size);
 
-    if (xhci_wire_ep_ctx(udev, 0, CTRL_EP, max_packet_size, /*max_burst*/ 0,
-                         /*err_count*/ 3, /*ep_info*/ 0,
-                         EP_AVG_TRB_LENGTH(8)) != UHIOERR_NO_ERROR)
+    struct ep_context *ep_ctx = xhci_ep_create_context(udev, 0, max_packet_size, /*max_burst*/ 0);
+    if (!ep_ctx)
+    {
         Kprintf("Failed to create EP0 context\n");
+        return;
+    }
+    xhci_wire_ep_ctx(udev, 0, ep_ctx, CTRL_EP, max_packet_size, /*max_burst*/ 0,
+                     /*err_count*/ 3, /*ep_info*/ 0, EP_AVG_TRB_LENGTH(8));
 }
 
 /**
@@ -805,13 +821,18 @@ static s8 xhci_init_one_ep_context(struct usb_device *udev,
         avg_trb_len = 8;
 
     u16 max_packet_size = ed_maxp(ed);
-    s8 err = xhci_wire_ep_ctx(udev, ep_index, ep_type, max_packet_size, max_burst, err_count,
-                              EP_MAX_ESIT_PAYLOAD_HI(max_esit_payload) | EP_INTERVAL(interval) | EP_MULT(mult),
-                              EP_MAX_ESIT_PAYLOAD_LO(max_esit_payload) | EP_AVG_TRB_LENGTH(avg_trb_len));
-    if (err != UHIOERR_NO_ERROR)
-        return err;
+    /* built beside a live context of the same index (an alternate-setting
+     * switch), which the controller may run until the command has succeeded */
+    struct ep_context *ep_ctx = xhci_ep_prepare_context(udev, ep_index, max_packet_size, max_burst);
+    if (!ep_ctx)
+        return UHIOERR_OUTOFMEMORY;
+    xhci_wire_ep_ctx(udev, ep_index, ep_ctx, ep_type, max_packet_size, max_burst, err_count,
+                     EP_MAX_ESIT_PAYLOAD_HI(max_esit_payload) | EP_INTERVAL(interval) | EP_MULT(mult),
+                     EP_MAX_ESIT_PAYLOAD_LO(max_esit_payload) | EP_AVG_TRB_LENGTH(avg_trb_len));
 
-    xhci_ep_set_rt_interval(xhci_ep_get_context_for_index(udev, ep_index), interval);
+    xhci_ep_set_rt_service(ep_ctx, interval, max_esit_payload);
+    /* SS bulk stream capability, consumed by NSCMD_USB_ALLOC_STREAMS */
+    xhci_ep_set_max_streams(ep_ctx, ed->ed_MaxStreams);
 
     KprintfT("EP%lu %s: type=%lu maxp=%lu maxesit=%lu "
              "interval=%lu mult=%lu maxburst=%lu\n",
@@ -909,12 +930,12 @@ s8 xhci_configure_endpoints_from_list(struct usb_device *udev,
 
         s8 err = xhci_init_one_ep_context(udev, ed);
         if (err != UHIOERR_NO_ERROR)
+        {
+            xhci_ep_discard_pending(udev); /* no command goes out for them */
             return err;
+        }
 
-        u8 ep_index = xhci_ep_index(ed);
-        /* SS bulk stream capability, consumed by NSCMD_USB_ALLOC_STREAMS */
-        xhci_ep_set_max_streams(xhci_ep_get_context_for_index(udev, ep_index), ed->ed_MaxStreams);
-        add_flags |= BIT(ep_index + 1);
+        add_flags |= BIT(xhci_ep_index(ed) + 1);
     }
 
     for (u16 i = 0; i < num_drop; ++i)

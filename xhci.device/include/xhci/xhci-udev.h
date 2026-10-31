@@ -16,7 +16,7 @@
 #include <xhci/ch9.h>
 
 /* Recognise the stack's CLEAR_FEATURE(ENDPOINT_HALT) on the direct path.
- * Device-side halt clearing is entirely poseidon.library's job (class API or
+ * Device-side halt clearing is entirely neptune.library's job (class API or
  * async recovery sweep); the driver never issues one, it only watches for the
  * request where host-side endpoint state has to follow it. */
 static inline BOOL xhci_setup_is_clear_halt(const struct UhcdSetupData *setup)
@@ -82,6 +82,8 @@ struct udev_suspend {
 	u8 stops_pending;
 	u8 u3_port;
 	struct xhci_xfer *stash; /* request to reply when the stops drain */
+	u32 stopped_us;          /* when the endpoints were last stopped for a suspend;
+	                          * outlives the sequence (xhci_udev_resume_device) */
 };
 
 /**
@@ -143,6 +145,9 @@ struct usb_device {
 
 	/* Requests state data */
 	struct ep_context *ep_context[USB_MAX_ENDPOINT_CONTEXTS];
+	/* Contexts built for a Configure Endpoint command in flight; they replace
+	 * ep_context[] only when the command succeeds (xhci_ep_commit_pending) */
+	struct ep_context *ep_pending[USB_MAX_ENDPOINT_CONTEXTS];
 
 	/*
 	 * Commands to the hardware are passed an "input context" that
@@ -185,7 +190,7 @@ void xhci_udev_disconnect(struct usb_device *udev, BOOL recursive);
 void xhci_xfer_complete(struct usb_device *udev, struct xhci_xfer *io, s8 err, u32 actual);
 
 /* Send commands to device */
-void xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, int ep_type);
+BOOL xhci_udev_clear_tt_buffer(struct usb_device *udev, u8 ep_index, s32 ep_type);
 
 /* Port suspend (U3) sequencing (struct udev_suspend above) */
 BOOL xhci_udev_suspend_device(struct usb_device *udev, u8 root_port, struct xhci_xfer *deferred_req);

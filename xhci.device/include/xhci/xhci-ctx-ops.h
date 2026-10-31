@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Context HCD ABI (NSCMD_USB_*) ingress layer — the xHCI-native interface
- * designed in poseidon-backport/docs/poseidon-context-hcd-abi.md.
+ * designed in neptune/docs/neptune-context-hcd-abi.md.
  *
  * Lifecycle ops arrive as struct IOStdReq (io_Data -> Uhcd* op block, see
  * devices/usbhcd_context.h); transfers travel the direct call path

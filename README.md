@@ -10,16 +10,18 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 [Emu68](https://github.com/michalsc/Emu68). The xHCI code is derived from
 [Das U-Boot](https://source.denx.de/u-boot/u-boot).
 
-> **This driver needs the new Poseidon.** `xhci.device` **6.x** talks to
-> **Poseidon for AmigaOS 6.x** and nothing else: it implements only that stack's context
-> HCD ABI, and answers the legacy per-transfer commands with `IOERR_NOCMD`. It will
-> **not** work with classic Poseidon **4.x** (Chris Hodges) or the AROS **5.x** line.
-> Those stacks want the driver's **5.x** line, which speaks the classic Poseidon HCD ABI
-> and is maintained on the
-> [`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main). Poseidon 6.x
-> keeps that ABI too, so it can drive the 5.x line as well — but SuperSpeed devices then
-> run through the USB 2.0 emulation, with no bulk streams. On Poseidon 6.x this line is
-> the faster choice.
+> **This driver needs Neptune.** `xhci.device` **6.x** talks to
+> [**Neptune**](https://github.com/rondoval/neptune) **6.x** — an incompatible fork of the
+> Poseidon USB stack, whose 6.0–6.2 releases were published as "Poseidon for AmigaOS" — and
+> nothing else: it implements only Neptune's own context HCD interface, which is not part
+> of Poseidon's API, and answers the legacy per-transfer commands with `IOERR_NOCMD`. It
+> will **not** work with Poseidon: neither Chris Hodges' classic **4.x** nor the AROS
+> **5.x** line. Those stacks want the driver's **5.x** line, which speaks the classic
+> V1/V2 `IOUsbHWReq` interface and is maintained on the
+> [`main` branch](https://github.com/rondoval/emu68-xhci-driver/tree/main). Neptune keeps
+> that interface too, so it can drive the 5.x line as well — but SuperSpeed devices then
+> run through the USB 2.0 emulation, with no bulk streams. On Neptune this line is the
+> faster choice.
 
 > **Upgrading from an older release?** See the *Upgrade notes* at the top of
 > [RELEASE-NOTES.md](RELEASE-NOTES.md) — unit renumbering and the `bcmpcie.library`
@@ -29,7 +31,7 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 
 - **Real USB 3.0, not emulated** — SuperSpeed devices reach the stack as what they are,
   with their own descriptors and a real SuperSpeed root hub. The 5.x line had to disguise
-  them as USB 2.0 devices and translate; Poseidon 6.x handles USB 3.0 itself, so that
+  them as USB 2.0 devices and translate; Neptune handles USB 3.0 itself, so that
   layer is gone.
 - **Bulk streams** — the fast UAS path for mass storage: each queued command gets its own
   transfer ring, so a modern USB 3.0 drive is not held to one command at a time.
@@ -49,7 +51,8 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 ## Requirements
 
 - AmigaOS 3.1 or later (Kickstart V39 minimum).
-- **Poseidon for AmigaOS 6.x** — see the note above; earlier Poseidon lines will not work.
+- **Neptune 6.x** (6.0–6.2 released as "Poseidon for AmigaOS") — see the note above;
+  Poseidon itself (4.x, 5.x) will not work.
 - [PiStorm32-lite](https://github.com/PiStorm/pistorm32-lite) with a Raspberry Pi 4B or CM4.
 - Emu68 1.1 alpha.1 or later — needed to map the PCIe BAR window into the lower 4 GB.
 - `gic400.library` — [emu68-gic400-library](https://github.com/rondoval/emu68-gic400-library).

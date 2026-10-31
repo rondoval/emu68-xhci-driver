@@ -214,7 +214,7 @@ static LONG db_dev_point(const struct BenchCfg *cfg, ULONG bs, ULONG qd, BOOL rn
 
     APTR base;
     ULONG basesize;
-    UBYTE *buf = db_alloc_aligned(qd * bs + 4,
+    UBYTE *buf = db_alloc_aligned(qd * bs + DB_ALIGN_SLACK,
                                   MEMF_PUBLIC | (cfg->chip ? MEMF_CHIP : MEMF_FAST),
                                   &base, &basesize);
     if (buf == NULL)
@@ -223,8 +223,7 @@ static LONG db_dev_point(const struct BenchCfg *cfg, ULONG bs, ULONG qd, BOOL rn
                (unsigned long)bs, (unsigned long)qd, (unsigned long)(qd * bs));
         return RETURN_OK;
     }
-    if (cfg->misalign)
-        buf++;
+    buf += cfg->offset;
     memset(buf, 0xA5, qd * bs);
 
     ULONG rng = cfg->seed;
@@ -338,6 +337,244 @@ static LONG db_dev_point(const struct BenchCfg *cfg, ULONG bs, ULONG qd, BOOL rn
     db_report(&pt, &st);
 
 out:
+    FreeMem(base, basesize);
+    return rc;
+}
+
+#define DB_GUARD 64          /* guard bytes either side of a DEVCHECK buffer */
+#define DB_GUARD_BYTE 0x5A   /* plus the round number: a wrongly invalidated line */
+                             /* then shows an older round's value from RAM */
+#define DB_CHECK_OFFSETS 64  /* buffer offsets 0..63: every byte of a cache line */
+#define DB_CHECK_REPORTS 8   /* mismatch lines printed per point */
+
+enum db_check_result
+{
+    DB_CHECK_OK,
+    DB_CHECK_DATA,  /* the data differs from the reference read */
+    DB_CHECK_GUARD, /* a byte outside the buffer changed */
+};
+
+/**
+ * db_dev_check_buf() - Compare one DEVCHECK buffer and its guards.
+ * @slot: the buffer's slot: guard, offset padding, data, guard.
+ * @slot_size: bytes in @slot.
+ * @data: the read's buffer inside @slot.
+ * @ref: the aligned reference read of the same blocks.
+ * @bs: bytes read.
+ * @guard: the guard byte this round wrote.
+ * @bad: set to the offset in @slot of the first wrong byte.
+ *
+ * Return: DB_CHECK_OK, DB_CHECK_GUARD if any byte of @slot outside @data no longer holds
+ * @guard, else DB_CHECK_DATA if @data differs from @ref.
+ */
+static enum db_check_result db_dev_check_buf(const UBYTE *slot, ULONG slot_size, const UBYTE *data,
+                                             const UBYTE *ref, ULONG bs, UBYTE guard, ULONG *bad)
+{
+    for (const UBYTE *p = slot; p < data; p++)
+    {
+        if (*p != guard)
+        {
+            *bad = (ULONG)(p - slot);
+            return DB_CHECK_GUARD;
+        }
+    }
+    for (const UBYTE *p = data + bs; p < slot + slot_size; p++)
+    {
+        if (*p != guard)
+        {
+            *bad = (ULONG)(p - slot);
+            return DB_CHECK_GUARD;
+        }
+    }
+    if (memcmp(data, ref, bs) == 0)
+        return DB_CHECK_OK;
+
+    ULONG i = 0;
+    while (data[i] == ref[i])
+        i++;
+    *bad = (ULONG)(data - slot) + i;
+    return DB_CHECK_DATA;
+}
+
+/**
+ * db_dev_check_report() - Print one DEVCHECK mismatch.
+ * @bs: bytes per read.
+ * @qd: reads in flight.
+ * @offset: the buffer's offset past a cache line boundary.
+ * @pos: byte position of the read on the disk.
+ * @what: DB_CHECK_DATA or DB_CHECK_GUARD.
+ * @slot: the buffer's slot.
+ * @data: the buffer inside @slot.
+ * @ref: the reference read.
+ * @bad: offset in @slot of the first wrong byte.
+ */
+static void db_dev_check_report(ULONG bs, ULONG qd, ULONG offset, db_u64 pos,
+                                enum db_check_result what, const UBYTE *slot,
+                                const UBYTE *data, const UBYTE *ref, ULONG bad)
+{
+    char bstr[12], posstr[21];
+    db_fmt_size(bs, bstr);
+    db_u64_dec(pos, posstr);
+    LONG at = (LONG)bad - (LONG)(data - slot); /* relative to the buffer start */
+    if (what == DB_CHECK_DATA)
+        printf("dev: check bs=%s qd=%lu offset=%lu pos=%s: data byte %ld is %02lx, read %02lx aligned\n",
+               bstr, (unsigned long)qd, (unsigned long)offset, posstr, (long)at,
+               (unsigned long)slot[bad], (unsigned long)ref[at]);
+    else if (at < 0)
+        printf("dev: check bs=%s qd=%lu offset=%lu pos=%s: guard byte %ld before the buffer is %02lx\n",
+               bstr, (unsigned long)qd, (unsigned long)offset, posstr, (long)-at,
+               (unsigned long)slot[bad]);
+    else
+        printf("dev: check bs=%s qd=%lu offset=%lu pos=%s: guard byte %lu after the buffer is %02lx\n",
+               bstr, (unsigned long)qd, (unsigned long)offset, posstr,
+               (unsigned long)((ULONG)at - bs), (unsigned long)slot[bad]);
+}
+
+/**
+ * db_dev_check() - Run DEVCHECK at one (bs, qd) point.
+ * @cfg: run configuration: range, SECS, CHIP.
+ * @bs: bytes per read, a multiple of the sector size.
+ * @qd: reads in flight at once.
+ *
+ * Read each position into a 4K-aligned Fast RAM reference buffer, then again at every buffer
+ * offset 0..63, @qd reads in flight, each buffer between DB_GUARD guard bytes (in Chip RAM with
+ * CHIP), and compare data and guards. Move on to the next position until SECS run out, at
+ * least one position. Each round of reads writes a different guard byte, and fills the buffers
+ * with its complement.
+ *
+ * Return: RETURN_OK if every read matched, RETURN_WARN on ^C, RETURN_ERROR on a mismatch, a
+ * device error or a point that could not run (a check not done is not a pass).
+ */
+static LONG db_dev_check(const struct BenchCfg *cfg, ULONG bs, ULONG qd)
+{
+    char bstr[12];
+    db_fmt_size(bs, bstr);
+    if (cfg->part_end - cfg->part_start < bs)
+    {
+        printf("dev check bs=%s qd=%lu: NOT RUN, range too small\n", bstr, (unsigned long)qd);
+        return RETURN_ERROR;
+    }
+    ULONG slot_size = (DB_GUARD + DB_CHECK_OFFSETS + bs + DB_GUARD + DB_ALIGN - 1) & ~(ULONG)(DB_ALIGN - 1);
+    if ((db_u64)qd * slot_size > 0x20000000ULL)
+    {
+        printf("dev check bs=%s qd=%lu: NOT RUN, buffer set above 512M\n", bstr, (unsigned long)qd);
+        return RETURN_ERROR;
+    }
+
+    APTR ref_base, base;
+    ULONG ref_basesize, basesize;
+    UBYTE *ref = db_alloc_aligned(bs, MEMF_PUBLIC | MEMF_FAST, &ref_base, &ref_basesize);
+    UBYTE *slots = db_alloc_aligned(qd * slot_size,
+                                    MEMF_PUBLIC | (cfg->chip ? MEMF_CHIP : MEMF_FAST),
+                                    &base, &basesize);
+    if (ref == NULL || slots == NULL)
+    {
+        printf("dev check bs=%s qd=%lu: NOT RUN, no memory\n", bstr, (unsigned long)qd);
+        if (ref != NULL)
+            FreeMem(ref_base, ref_basesize);
+        if (slots != NULL)
+            FreeMem(base, basesize);
+        return RETURN_ERROR;
+    }
+
+    struct IOStdReq *aio = &dev_anchor->iotd_Req;
+    db_u64 cursor = cfg->part_start;
+    db_u64 deadline = db_now() + (db_u64)cfg->secs * db_efreq;
+    ULONG positions = 0, reads = 0, wrong = 0, errs = 0, round = 0;
+    BYTE first_err = 0;
+    LONG rc = RETURN_OK;
+
+    do
+    {
+        aio->io_Command = dev_cmd;
+        aio->io_Data = ref;
+        aio->io_Length = bs;
+        aio->io_Offset = (ULONG)cursor;
+        aio->io_Actual = (ULONG)(cursor >> 32); /* io_HighOffset */
+        if (DoIO((struct IORequest *)aio) != 0 || aio->io_Actual != bs)
+        {
+            if (errs++ == 0)
+                first_err = aio->io_Error;
+        }
+        else
+        {
+            for (ULONG first = 0; first < DB_CHECK_OFFSETS; first += qd)
+            {
+                ULONG n = (first + qd <= DB_CHECK_OFFSETS) ? qd : DB_CHECK_OFFSETS - first;
+                const UBYTE guard = (UBYTE)(DB_GUARD_BYTE + round++);
+                for (ULONG i = 0; i < n; i++)
+                {
+                    UBYTE *slot = slots + i * slot_size;
+                    UBYTE *data = slot + DB_GUARD + first + i;
+                    memset(slot, guard, (ULONG)(data - slot));
+                    memset(data, (UBYTE)~guard, bs);
+                    memset(data + bs, guard, (ULONG)(slot + slot_size - (data + bs)));
+                    dev_slots[i].ds_Buf = data;
+                    db_dev_submit(&dev_slots[i], bs, cursor);
+                }
+
+                for (ULONG done = 0; done < n;)
+                {
+                    ULONG sig = Wait((1UL << dev_port->mp_SigBit) | SIGBREAKF_CTRL_C);
+                    if ((sig & SIGBREAKF_CTRL_C) != 0)
+                    {
+                        printf("dev: ^C\n");
+                        db_dev_abort_all();
+                        rc = RETURN_WARN;
+                        goto out;
+                    }
+                    struct DevSlot *s;
+                    while ((s = (struct DevSlot *)GetMsg(dev_port)) != NULL)
+                    {
+                        s->ds_Busy = FALSE;
+                        done++;
+                    }
+                }
+
+                for (ULONG i = 0; i < n; i++)
+                {
+                    const struct IOStdReq *io = &dev_slots[i].ds_Req.iotd_Req;
+                    const UBYTE *slot = slots + i * slot_size;
+                    ULONG bad;
+                    reads++;
+                    if (io->io_Error != 0 || io->io_Actual != bs)
+                    {
+                        if (errs++ == 0)
+                            first_err = io->io_Error;
+                        continue;
+                    }
+                    enum db_check_result r = db_dev_check_buf(slot, slot_size, dev_slots[i].ds_Buf,
+                                                              ref, bs, guard, &bad);
+                    if (r != DB_CHECK_OK && wrong++ < DB_CHECK_REPORTS)
+                        db_dev_check_report(bs, qd, first + i, cursor, r, slot,
+                                            dev_slots[i].ds_Buf, ref, bad);
+                }
+            }
+            positions++;
+        }
+
+        cursor += bs;
+        if (cursor + bs > cfg->part_end)
+            cursor = cfg->part_start;
+    } while (db_now() < deadline && errs <= DB_ERR_BUDGET);
+
+    if (errs != 0)
+        printf("dev: check bs=%s qd=%lu: %lu device errors, first io_Error %ld\n",
+               bstr, (unsigned long)qd, (unsigned long)errs, (long)first_err);
+    if (db_raw)
+        printf("RESULT engine=dev test=check bs=%lu qd=%lu reads=%lu positions=%lu wrong=%lu err=%lu\n",
+               (unsigned long)bs, (unsigned long)qd, (unsigned long)reads,
+               (unsigned long)positions, (unsigned long)wrong, (unsigned long)errs);
+    else
+        printf("dev check bs=%s qd=%lu: %lu reads at %lu positions, offsets 0..%d: %s (%lu wrong, %lu errors)\n",
+               bstr, (unsigned long)qd, (unsigned long)reads, (unsigned long)positions,
+               DB_CHECK_OFFSETS - 1, (wrong == 0 && errs == 0) ? "OK" : "FAILED",
+               (unsigned long)wrong, (unsigned long)errs);
+    if (wrong != 0 || errs != 0)
+        rc = RETURN_ERROR;
+
+out:
+    FreeMem(ref_base, ref_basesize);
     FreeMem(base, basesize);
     return rc;
 }
@@ -499,6 +736,27 @@ LONG db_run_dev(struct BenchCfg *cfg)
             bs = dev_secsize; /* 4Kn or exotic sectors: use one sector */
         for (ULONG q = 0; q < cfg->n_qd && rc == RETURN_OK; q++)
             rc = db_dev_point(cfg, bs, cfg->qd[q], TRUE);
+    }
+    if ((cfg->tests & DB_T_DEVCHECK) != 0 && rc == RETURN_OK)
+    {
+        /* a failed point doesn't stop the others; ^C does */
+        BOOL stop = FALSE;
+        for (ULONG i = 0; i < cfg->n_bs && !stop; i++)
+        {
+            if ((cfg->bs[i] % dev_secsize) != 0)
+            {
+                printf("dev: skip bs=%lu: not a multiple of the %lu byte sector\n",
+                       (unsigned long)cfg->bs[i], (unsigned long)dev_secsize);
+                continue;
+            }
+            for (ULONG q = 0; q < cfg->n_qd && !stop; q++)
+            {
+                LONG r = db_dev_check(cfg, cfg->bs[i], cfg->qd[q]);
+                stop = (r == RETURN_WARN);
+                if (r > rc)
+                    rc = r;
+            }
+        }
     }
 
 out:

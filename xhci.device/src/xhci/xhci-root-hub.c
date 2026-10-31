@@ -836,22 +836,31 @@ inline static void xhci_roothub_reply(struct xhci_xfer *req, void *data, u32 len
 	req->error = UHIOERR_NO_ERROR;
 }
 
-/* Sleep on the unit task's persistent sleep timer with the transfer-plane
- * lock RELEASED.  The port handlers run on the unit task holding xfer_lock
- * exactly once, PORTSC is re-read after every sleep, and direct
- * submits/aborts proceeding during the wait is the point — a port reset or
- * resume no longer stalls the whole transfer plane.  (The timer is
- * task-bound, which is why the unit task owns it — see ctrl->sleep_timer;
- * without one the wait degrades to a hot poll.) */
-static void rh_sleep_unlocked(struct xhci_ctrl *ctrl, u32 milliseconds)
+/* Before a host-initiated resume is written to a 1-based root port.
+ *
+ * A port is resumed only once it shows U3 (xHCI 4.15.2.2), and not before it
+ * has been there for 10 ms (6.4.3.8).  A U3 written a moment ago does not
+ * show yet: the suspend signalling takes up to 10 ms and the field changes
+ * when the transition is complete (4.15.1) - a resume written into that would
+ * race the suspend, and on a USB2 port be ignored outright.  So a port that
+ * still reads U0 gets that long to arrive; one that stays in U0 was not being
+ * suspended.  Any other link state - a device-initiated resume above all - is
+ * none of this function's business. */
+#define RH_U3_ENTRY_MS 20U
+#define RH_U3_MIN_MS 10U
+static void rh_port_settle_u3(struct xhci_root_hub *rh, u32 portNo)
 {
-	struct ExecBase *SysBase = ctrl->sysBase;
-	if (milliseconds == 0 || !ctrl->sleep_timer.req)
-		return;
+	struct xhci_ctrl *ctrl = rh->udev->controller;
+	volatile u32 *portsc = &ctrl->hcor->portregs[portNo - 1].or_portsc;
 
-	lock_prof_release(&ctrl->lockProf, &ctrl->xfer_lock);
-	drv_timer_sleep_ms(&ctrl->sleep_timer, milliseconds);
-	lock_prof_obtain(&ctrl->lockProf, &ctrl->xfer_lock);
+	if ((mmio_read32(portsc) & PORT_PLS_MASK) == XDEV_U0)
+		xhci_sleep_unlocked(ctrl, RH_U3_ENTRY_MS);
+
+	if ((mmio_read32(portsc) & PORT_PLS_MASK) == XDEV_U3)
+		xhci_sleep_unlocked(ctrl, RH_U3_MIN_MS);
+	else
+		KprintfT("port %lu: resume asked for, link state %lu is not U3\n",
+				 (ULONG)portNo, (ULONG)((mmio_read32(portsc) & PORT_PLS_MASK) >> 5));
 }
 
 static void xhci_roothub_handle_device_get_configuration(struct xhci_root_hub *rh, struct xhci_xfer *req)
@@ -1068,11 +1077,12 @@ static void xhci_roothub_handle_port_clear_feature(struct xhci_root_hub *rh, str
 		break;
 	case USB_PORT_FEAT_SUSPEND:
 		KprintfT("Clear port %lu PORT_SUSPEND\n", (ULONG)portNo);
+		rh_port_settle_u3(rh, portNo);
 		/* For USB2, need to write 15 (XDEV_RESUME) first, wait 20ms, then write U0 */
 		if (rh->ports[portNo - 1].major_revision < 3)
 		{
 			xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_RESUME);
-			rh_sleep_unlocked(rh->udev->controller, 25); // wait at least 20ms for resume to take effect
+			xhci_sleep_unlocked(rh->udev->controller, 25); // wait at least 20ms for resume to take effect
 		}
 		/* put port back to U0 (active) state */
 		xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_U0);
@@ -1169,9 +1179,9 @@ static void xhci_roothub_handle_port_get_status(struct xhci_root_hub_view *v, st
 	if ((reg & PORT_PLS_MASK) == XDEV_RESUME)
 	{
 		Kprintf("port %lu: completing device-initiated resume (Resume -> U0)\n", (ULONG)portNo);
-		rh_sleep_unlocked(rh->udev->controller, 20);
+		xhci_sleep_unlocked(rh->udev->controller, 20);
 		xhci_port_set_link_state(rh->udev->controller->hcor, portNo, XDEV_U0);
-		rh_sleep_unlocked(rh->udev->controller, 3); /* let the transition settle before sampling */
+		xhci_sleep_unlocked(rh->udev->controller, 3); /* let the transition settle before sampling */
 		reg = mmio_read32(&port->or_portsc);
 	}
 
@@ -1291,7 +1301,7 @@ static void xhci_roothub_warm_reset_port(struct xhci_ctrl *ctrl, struct xhci_hco
 		u32 temp;
 		for (attempts = 0; attempts < 100; attempts++)
 		{
-			rh_sleep_unlocked(ctrl, 10);
+			xhci_sleep_unlocked(ctrl, 10);
 			temp = mmio_read32(&port->or_portsc);
 			if (!(temp & PORT_RESET))
 				break;
@@ -1357,7 +1367,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 
 		/* Allow the link partner to stabilise before
 		 * the stack tries ADDRESS_DEVICE. */
-		rh_sleep_unlocked(rh->udev->controller, 50);
+		xhci_sleep_unlocked(rh->udev->controller, 50);
 		break;
 	}
 	case USB_PORT_FEAT_POWER:
@@ -1377,7 +1387,7 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		KprintfT("Set port %lu PORT_BH_RESET\n", (ULONG)portNo);
 		xhci_roothub_warm_reset_port(rh->udev->controller, port, portNo);
 		/* stabilise before the stack re-enumerates */
-		rh_sleep_unlocked(rh->udev->controller, 50);
+		xhci_sleep_unlocked(rh->udev->controller, 50);
 		break;
 	case USB_SS_PORT_FEAT_U1_TIMEOUT:
 		xhci_roothub_set_usb3_port_timeout(rh, portNo, /*u2*/ FALSE, (u16)(wIndex >> 8));
@@ -1391,6 +1401,12 @@ static void xhci_roothub_handle_port_set_feature(struct xhci_root_hub *rh, struc
 		KprintfT("Set port %lu PORT_LINK_STATE to %lu\n", (ULONG)portNo, (ULONG)link_state);
 		if (link_state <= 5 || link_state == 10)
 		{
+			if (link_state == 0)
+			{
+				/* U0: a resume, if the port is suspended */
+				rh_port_settle_u3(rh, portNo);
+				reg = xhci_port_state_to_neutral(mmio_read32(&port->or_portsc)); /* it slept */
+			}
 			reg &= ~PORT_PLS_MASK;
 			reg |= PORT_LINK_STROBE;
 			reg |= link_state << 5;

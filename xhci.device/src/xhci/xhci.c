@@ -58,6 +58,9 @@ static const char *const xhci_perf_names[XP_SLOT_COUNT] = {
 	[XP_EVT_DRAIN] = "evt_drain",
 	[XP_EVT_HOOK] = "evt_hook",
 	[XP_IRQ_TO_TASK] = "irq_to_task",
+	[XP_DMA_SPLIT] = "dma_split",
+	[XP_LINK_CUT] = "link_cut",
+	[XP_LINK_PIECE] = "link_piece",
 };
 
 static u32 xhci_get_page_size(struct xhci_ctrl *ctrl)
@@ -597,15 +600,18 @@ struct xhci_slab_spec
 	u16 ctrl_offset; /* offsetof the slab_cache within struct xhci_ctrl */
 	BOOL dma;		 /* slots come from the DMA pool (else CPU-only metaPool) */
 	u32 size;
+	u32 align;		 /* of each slot: slots follow each other at size */
 	u32 capacity;
 };
 
 static const struct xhci_slab_spec xhci_slab_specs[] = {
-	{offsetof(struct xhci_ctrl, xfer_slab), FALSE, sizeof(struct xhci_xfer), 64},
-	{offsetof(struct xhci_ctrl, trb_addr_slab), FALSE, XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t), 256},
-	{offsetof(struct xhci_ctrl, bounce_small), TRUE, XHCI_BOUNCE_SMALL_SIZE, XHCI_BOUNCE_SMALL_CAP},
-	{offsetof(struct xhci_ctrl, bounce_med), TRUE, XHCI_BOUNCE_MED_SIZE, XHCI_BOUNCE_MED_CAP},
-	{offsetof(struct xhci_ctrl, bounce_large), TRUE, XHCI_BOUNCE_LARGE_SIZE, XHCI_BOUNCE_LARGE_CAP},
+	{offsetof(struct xhci_ctrl, xfer_slab), FALSE, sizeof(struct xhci_xfer), DMA_ALIGN_MIN, 64},
+	{offsetof(struct xhci_ctrl, trb_addr_slab), FALSE, XHCI_TD_SMALL_TRBS * sizeof(dma_addr_t), DMA_ALIGN_MIN, 256},
+	{offsetof(struct xhci_ctrl, bounce_small), TRUE, XHCI_BOUNCE_SMALL_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_SMALL_CAP},
+	{offsetof(struct xhci_ctrl, bounce_med), TRUE, XHCI_BOUNCE_MED_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_MED_CAP},
+	{offsetof(struct xhci_ctrl, bounce_large), TRUE, XHCI_BOUNCE_LARGE_SIZE, DMA_ALIGN_MIN, XHCI_BOUNCE_LARGE_CAP},
+	/* self-aligned: a link piece is one TRB and may not cross 64 KB */
+	{offsetof(struct xhci_ctrl, bounce_link), TRUE, XHCI_LINK_SLOT_SIZE, XHCI_LINK_SLOT_SIZE, XHCI_BOUNCE_LINK_CAP},
 };
 
 static inline struct slab_cache *slab_for_spec(struct xhci_ctrl *ctrl, const struct xhci_slab_spec *spec)
@@ -648,7 +654,7 @@ s32 xhci_register(struct xhci_ctrl *ctrl, struct xhci_hccr *hccr, struct xhci_hc
 		const struct xhci_slab_spec *spec = &xhci_slab_specs[i];
 		slab_cache_init(slab_for_spec(ctrl, spec), SysBase, ctrl->metaPool,
 						spec->dma ? ctrl->dmaPool : NULL,
-						spec->size, DMA_ALIGN_MIN, spec->capacity);
+						spec->size, spec->align, spec->capacity);
 	}
 
 	/* Ring segments: one slab, slot = obj_align = seg_size (a power of two), so every
@@ -706,4 +712,15 @@ void xhci_deregister(struct xhci_ctrl *ctrl)
 	}
 
 	memset(ctrl, 0, sizeof(struct xhci_ctrl));
+}
+
+void xhci_sleep_unlocked(struct xhci_ctrl *ctrl, u32 milliseconds)
+{
+	struct ExecBase *SysBase = ctrl->sysBase;
+	if (milliseconds == 0 || !ctrl->sleep_timer.req)
+		return;
+
+	lock_prof_release(&ctrl->lockProf, &ctrl->xfer_lock);
+	drv_timer_sleep_ms(&ctrl->sleep_timer, milliseconds);
+	lock_prof_obtain(&ctrl->lockProf, &ctrl->xfer_lock);
 }
