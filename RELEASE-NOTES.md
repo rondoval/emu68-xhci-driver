@@ -2,10 +2,18 @@
 
 Configuration-relevant changes across all releases, newest first:
 
-* **5.x is the compatibility line.**  It speaks the classic Poseidon HCD ABI, so
-  it drives **classic Poseidon 4.x** and also works with **Poseidon for AmigaOS
-  6.x**, which retains that ABI.  On Poseidon 6.x prefer the driver's **6.x**
-  line — it is faster there — maintained on the
+* **5.6 renames the driver to `xhci-legacy.device`.**  The 6.x line keeps
+  `xhci.device`, so the two can be installed side by side.  To use 5.6 with
+  Poseidon 4.x, select `xhci-legacy.device` in Trident and save; the old
+  `DEVS:USBHardware/xhci.device` can then be deleted.  On Neptune, pick it in
+  Neptune USB the same way.  Until you switch, the old `xhci.device` keeps
+  working.
+* **5.x is the compatibility line.**  It speaks the classic V1/V2 `IOUsbHWReq`
+  interface, so it drives **classic Poseidon 4.x** and also works with
+  **[Neptune](https://github.com/rondoval/neptune) 6.x** (an incompatible fork
+  of the Poseidon USB stack; 6.0–6.2 were published as "Poseidon for AmigaOS",
+  the name older notes below use), which retains that interface.  On Neptune
+  prefer the driver's **6.x** line — it is faster there — maintained on the
   [`context_release` branch](https://github.com/rondoval/emu68-xhci-driver/tree/context_release).
 * **From 4.4 or later:** no configuration changes are required.
 * **From 3.x:** `bcmpcie.library` must be installed in `LIBS:` for PCIe-based
@@ -13,6 +21,33 @@ Configuration-relevant changes across all releases, newest first:
 * **From pre-3.x:** unit numbering differs.  Unit 0 was the VL805 (PCIe) and
   is now the onboard OTG port; unit 1 is now the VL805.  Update your USB
   stack configuration accordingly.
+
+
+# Release notes — xhci-legacy.device 5.6
+
+Changes since v5.5.
+
+---
+
+## Changes
+
+- **Renamed to `xhci-legacy.device`** so it can sit next to the 6.x line's
+  `xhci.device` in `DEVS:USBHardware/`, for a machine that boots either Poseidon
+  4.x or Neptune. Nothing else changes; see *Upgrade notes* for the switch.
+- **A program that calls `CloseDevice()` after a failed `OpenDevice()` no
+  longer upsets the driver.** A failed open now clears the request's device
+  and unit, so that close does nothing, as Exec expects; before, it reached
+  the driver's close and dropped an open count it had never taken.
+- **The on-board controller is found by its device-tree label** (`xhci`)
+  instead of a fixed path.
+- **Two drivers can no longer run the built-in USB controller at once.**
+  Unit 0 (the Pi 4's USB-C port, the CM4's USB) is now reserved like a PCIe
+  controller: while Neptune runs it with `xhci.device`, opening it here is
+  refused, and the other way round. A controller that failed to start is
+  released again; before, it stayed taken until a reboot.
+- `find_package()` names the oldest version of each dependency the driver
+  builds against: emu68-common 2.1 (for `DT_OpenSymbol`), bcmpcie.library
+  2.0. An older one now fails at configure instead of mid-build.
 
 
 # Release notes — xhci.device 5.5

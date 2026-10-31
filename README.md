@@ -5,19 +5,23 @@
 > `.lha` and bundled documentation are published there. This repository is source-only
 > and versioned via git tags.
 
-**xhci.device** is an AmigaOS USB 2.0 / USB 3.0 host controller driver for the xHCI
+**xhci-legacy.device** is an AmigaOS USB 2.0 / USB 3.0 host controller driver for the xHCI
 controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 [Emu68](https://github.com/michalsc/Emu68). The xHCI code is derived from
 [Das U-Boot](https://source.denx.de/u-boot/u-boot).
 
-> **Which line do you need?** `xhci.device` **5.x** — this line — is the compatibility
-> line: it speaks the classic Poseidon HCD ABI, so it drives **classic Poseidon 4.x** and
-> also works with **Poseidon for AmigaOS 6.x**, which keeps that ABI alongside its own.
-> On Poseidon 4.x this is your only option. On Poseidon 6.x prefer the driver's **6.x**
+> **Which line do you need?** `xhci-legacy.device` **5.x** — this line — is the compatibility
+> line: it speaks the classic V1/V2 `IOUsbHWReq` interface, so it drives **classic
+> Poseidon 4.x** and also works with [**Neptune**](https://github.com/rondoval/neptune)
+> **6.x** (an incompatible fork of the Poseidon USB stack, released as "Poseidon for
+> AmigaOS" up to 6.2), which keeps that interface alongside its own.
+> On Poseidon 4.x this is your only option. On Neptune prefer the driver's **6.x**
 > line — through this one, SuperSpeed devices still go through the USB 2.0 emulation and
 > run slower, whereas the 6.x line hands the stack real USB 3.0 devices and adds bulk
 > streams. It is maintained on the
-> [`context_release` branch](https://github.com/rondoval/emu68-xhci-driver/tree/context_release).
+> [`context_release` branch](https://github.com/rondoval/emu68-xhci-driver/tree/context_release)
+> and installs as `xhci.device`. Up to 5.5 this line was called `xhci.device` too; from 5.6
+> the two have different names and can be installed side by side.
 
 > **Upgrading from an older release?** See the *Upgrade notes* at the top of
 > [RELEASE-NOTES.md](RELEASE-NOTES.md) — unit renumbering and the `bcmpcie.library`
@@ -44,8 +48,8 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 ## Requirements
 
 - AmigaOS 3.1 or later (Kickstart V39 minimum).
-- **Classic Poseidon 4.x**, or **Poseidon for AmigaOS 6.x** — this line works with both,
-  though on 6.x the 6.x driver line is faster. See the note above.
+- **Classic Poseidon 4.x**, or **Neptune 6.x** — this line works with both, though on
+  Neptune the 6.x driver line is faster. See the note above.
 - [PiStorm32-lite](https://github.com/PiStorm/pistorm32-lite) with a Raspberry Pi 4B or CM4.
 - Emu68 1.1 alpha.1 or later — needed to map the PCIe BAR window into the lower 4 GB.
 - `gic400.library` — [emu68-gic400-library](https://github.com/rondoval/emu68-gic400-library).
@@ -70,7 +74,7 @@ ports. On a CM4, unit 1 exists only if you have attached a PCIe xHCI card.
 - **Real-time isochronous audio may glitch**, and non-RT isochronous transfers are
   untested. AHI 4.x is not supported yet.
 - **No USB 3.0 bulk streams** — the fast UAS path for mass storage is only in the 6.x
-  line, so USB 3.0 storage is slower here even under Poseidon 6.x.
+  line, so USB 3.0 storage is slower here even under Neptune.
 - **USB 3.0 link power management does nothing on the Pi 4B's own ports** — the VL805
   never enters U1/U2 by fixed firmware policy, exactly as under Linux. It works on the
   downstream links of external SuperSpeed hubs.
@@ -100,9 +104,8 @@ cross-toolchain and the companion CMake packages (`emu68-common`, `emu68-pcie-li
 ```
 
 The build runs inside the toolchain container, so do not invoke `cmake` on the host. The
-superproject installs this line under `Storage/` — `Storage/DEVS/USBHardware/xhci.device`
-— so it does not collide with the 6.x line's device of the same name; the installer copies
-whichever one you pick to `DEVS:USBHardware/`.
+superproject installs it as `DEVS/USBHardware/xhci-legacy.device`, next to the 6.x line's
+`xhci.device`. The source drawer keeps its old name, `xhci.device/`.
 
 Debug backend: `EMU68_CONFIGURE_ARGS="-DEMU68_DEBUG_BACKEND=serial" ./scripts/docker-build.sh`
 (`pistorm` default | `serial` | `off`), selected stack-wide via `emu68-common`. `serial`

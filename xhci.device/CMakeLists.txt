@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14.0)
-project(xhci.device VERSION ${CMAKE_PROJECT_VERSION})
+project(xhci-legacy.device VERSION ${CMAKE_PROJECT_VERSION})
 
 # Toolchain and compile options
 add_link_options(
@@ -36,7 +36,7 @@ add_compile_definitions(
 )
 
 # Sources
-add_executable(xhci.device
+add_executable(${PROJECT_NAME}
     src/device.c
     src/device_beginio.c
     src/device_abortio.c
@@ -58,12 +58,12 @@ add_executable(xhci.device
     src/xhci/xhci-endpoint.c
 )
 
-target_include_directories(xhci.device
+target_include_directories(${PROJECT_NAME}
     PRIVATE
         include
 )
 
-target_link_libraries(xhci.device
+target_link_libraries(${PROJECT_NAME}
     PRIVATE
         Emu68Common::common
         Emu68PCIe::pcie_headers
@@ -73,16 +73,16 @@ target_link_libraries(xhci.device
 # serial backend this instead links debug.lib (+ __divsi3 glue) and skips the check.
 # Layout contract (entry at offset 0, RT_ENDSKIP, no writable sections) belongs to the
 # linker, not to source order -- see Emu68CommonModuleLayout.cmake.
-emu68_module_layout(xhci.device)
+emu68_module_layout(${PROJECT_NAME})
 
 # Exec interrupt servers answer with the Z flag, not D0 (exec.library/AddIntServer);
 # a compiler epilogue that ends in MOVE rather than MOVEM silently overwrites it.
 # emu68_isr_z_check() slices each server out of the LINKED module (by the section
 # EMU68_INTSERVER() puts it in), so the servers are ordinary LTO'd TUs.
-emu68_enable_lto(xhci.device)
-emu68_isr_z_check(xhci.device SERVERS xhci_int_isr)
+emu68_enable_lto(${PROJECT_NAME})
+emu68_isr_z_check(${PROJECT_NAME} SERVERS xhci_int_isr)
 
 install(
-    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xhci.device
+    PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}
     DESTINATION DEVS/USBHardware
 )
