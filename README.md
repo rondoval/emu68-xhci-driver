@@ -11,7 +11,7 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 [Das U-Boot](https://source.denx.de/u-boot/u-boot).
 
 > **This driver needs Neptune.** `xhci.device` **6.x** talks to
-> [**Neptune**](https://github.com/rondoval/neptune) **6.x** — an incompatible fork of the
+> [**Neptune**](https://github.com/rondoval/neptune-usb-stack) **6.x** — an incompatible fork of the
 > Poseidon USB stack, whose 6.0–6.2 releases were published as "Poseidon for AmigaOS" — and
 > nothing else: it implements only Neptune's own context HCD interface, which is not part
 > of Poseidon's API, and answers the legacy per-transfer commands with `IOERR_NOCMD`. It

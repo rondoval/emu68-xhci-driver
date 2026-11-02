@@ -2,7 +2,7 @@
 
 Configuration-relevant changes across all releases, newest first:
 
-* **6.x requires [Neptune](https://github.com/rondoval/neptune) 6.x**, whose
+* **6.x requires [Neptune](https://github.com/rondoval/neptune-usb-stack) 6.x**, whose
   context HCD interface is the only one this line implements.  Neptune is an
   incompatible fork of the Poseidon USB stack; its 6.0–6.2 releases were
   published as "Poseidon for AmigaOS", and older notes below use that name.
