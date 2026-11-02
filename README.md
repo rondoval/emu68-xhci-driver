@@ -12,7 +12,7 @@ controllers on the Raspberry Pi 4B and CM4, for use with PiStorm32-lite and
 
 > **Which line do you need?** `xhci-legacy.device` **5.x** — this line — is the compatibility
 > line: it speaks the classic V1/V2 `IOUsbHWReq` interface, so it drives **classic
-> Poseidon 4.x** and also works with [**Neptune**](https://github.com/rondoval/neptune)
+> Poseidon 4.x** and also works with [**Neptune**](https://github.com/rondoval/neptune-usb-stack)
 > **6.x** (an incompatible fork of the Poseidon USB stack, released as "Poseidon for
 > AmigaOS" up to 6.2), which keeps that interface alongside its own.
 > On Poseidon 4.x this is your only option. On Neptune prefer the driver's **6.x**
