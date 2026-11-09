@@ -53,6 +53,7 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
 #define ep_handle_default(udev, ep_ctx, event) ((void)0)
 #endif
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
+static void ep_handle_rt_iso_stopped(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event);
 static void rt_iso_deliver(struct ep_context *ep_ctx, const struct xhci_td_completion *done, xhci_comp_code comp);
 
 /* IDLE, PARKED and FAILED expect no transfer event: the default handler logs
@@ -64,7 +65,7 @@ static const ep_state_handler ep_state_dispatch[] = {
     [USB_DEV_EP_STATE_RECOVERING] = ep_handle_receiving_generic,
     [USB_DEV_EP_STATE_PARKED] = NULL,
     [USB_DEV_EP_STATE_FAILED] = NULL,
-    [USB_DEV_EP_STATE_RT_ISO_STOPPED] = NULL,
+    [USB_DEV_EP_STATE_RT_ISO_STOPPED] = ep_handle_rt_iso_stopped,
     [USB_DEV_EP_STATE_RT_ISO_RUNNING] = ep_handle_receiving_generic,
     [USB_DEV_EP_STATE_RT_ISO_STOPPING] = ep_handle_receiving_generic};
 
@@ -319,6 +320,19 @@ static void ep_handle_default(struct usb_device *udev, struct ep_context *ep_ctx
              (ULONG)le32(event->generic.field[3]));
 }
 #endif /* DEBUG (ep_handle_default) */
+
+/* A stopped stream's ring reported empty: the controller noticing the end of
+ * the last TD, whose completion finished the stop already.  Any other event
+ * is unexpected. */
+static void ep_handle_rt_iso_stopped(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
+{
+    const xhci_comp_code comp = GET_COMP_CODE(le32(event->trans_event.transfer_len));
+
+    (void)udev;
+    (void)ep_ctx;
+    if (comp != COMP_UNDERRUN && comp != COMP_OVERRUN)
+        ep_handle_default(udev, ep_ctx, event);
+}
 
 static void ep_handle_receiving_generic(struct usb_device *udev, struct ep_context *ep_ctx, union xhci_trb *event)
 {
