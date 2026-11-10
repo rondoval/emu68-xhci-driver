@@ -21,6 +21,36 @@ Configuration-relevant changes across all releases, newest first:
   stack configuration accordingly.
 
 
+# Release notes — xhci.device 6.5
+
+Changes since v6.4.
+
+USB audio plays cleanly at high rates, and isochronous streams cost far less
+CPU.
+
+---
+
+## Improvements
+
+- **Isochronous streams interrupt far less.** Playback raised an interrupt
+  for every packet, 8000 a second on a high-speed audio interface, and a
+  fast IN endpoint one a millisecond. Completions now come in batches, every
+  1 to 8 ms as the stream's queue allows, and a stream and its feedback
+  endpoint are served together: 192 kHz playback on a CM4 takes about 8 % of
+  the CPU instead of about 40 %, with some 250 interrupts a second instead
+  of about 7,000.
+
+---
+
+## Bug fixes
+
+- **High-rate USB audio played with dropouts.** A playback stream lost about
+  one microframe in 25 when what it gave the driver to hold ahead was less
+  than about 5 ms. At 176.4 and 192 kHz that was audible. The driver now
+  asks only the lead the controller needs.
+
+---
+
 # Release notes — xhci.device 6.4
 
 Changes since v6.3.

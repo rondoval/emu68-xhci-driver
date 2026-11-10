@@ -724,6 +724,9 @@ s8 xhci_submit_rt_td(struct usb_device *udev, struct ep_context *ep_ctx,
 		return UHIOERR_OUTOFMEMORY;
 	}
 
-	xhci_ring_finalize_first_trb(udev, ep_ring, (struct xhci_generic_trb *)td_trb_addrs[0], TRUE);
+	/* IN TDs are queued a batch at a time and handed over with one doorbell
+	 * at its end (xhci_submit_giveback()); an OUT TD goes at once, because the
+	 * class's request hook runs between two of them and may run long. */
+	xhci_ring_finalize_first_trb(udev, ep_ring, (struct xhci_generic_trb *)td_trb_addrs[0], dir == XHCI_DIR_IN);
 	return UHIOERR_NO_ERROR;
 }

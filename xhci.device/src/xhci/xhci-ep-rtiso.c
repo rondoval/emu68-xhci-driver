@@ -77,16 +77,21 @@ void xhci_ep_set_rt_service(struct ep_context *ep_ctx, u8 interval, u32 max_esit
     ep_ctx->rt_esit_payload = max_esit_payload;
 }
 
-#define RT_ISO_SCHED_OFFSET_UFRAMES 32U
+#define RT_ISO_SCHED_OFFSET_UFRAMES 32U /* a stream's first TD: this far past the IST */
+#define RT_ISO_RUNNING_LEAD_UFRAMES 8U  /* a running stream's TDs: at least this far past it */
+#define RT_ISO_UFRAMES_PER_FRAME 8U
+#define RT_ISO_IRQ_FRAMES_MAX 8U        /* the longest completion interrupt period */
+#define RT_ISO_IRQ_SHARE 4U             /* the period: at most a quarter of the pipeline */
 #define RT_ISO_FRAME_MASK 0x7ffU /* Frame ID modulus: 2048 frames */
 #define RT_ISO_UF_MASK 0x3fffU   /* microframe modulus: 2048 frames * 8 = 16384 */
 #define RT_UFRAME_TO_FRAME(uf) (((uf) >> 3) & RT_ISO_FRAME_MASK)
 
-/* Earliest microframe HW can accept, rounded UP to the next ESIT boundary. */
-static u16 xhci_rt_iso_min_uf(struct ep_context *ep_ctx)
+/* Earliest microframe a TD may be given, @lead past MFINDEX and the IST,
+ * rounded UP to the next ESIT boundary. */
+static u16 xhci_rt_iso_min_uf(struct ep_context *ep_ctx, u32 lead)
 {
     u32 mfindex = mmio_read32(&ep_ctx->udev->controller->run_regs->microframe_index);
-    u32 raw = mfindex + ep_ctx->rt->ist + RT_ISO_SCHED_OFFSET_UFRAMES;
+    u32 raw = mfindex + ep_ctx->rt->ist + lead;
     u32 ivf_mask = (u32)ep_ctx->rt_uframes_per_esit - 1U;
     return (u16)(((raw + ivf_mask) & ~ivf_mask) & RT_ISO_UF_MASK);
 }
@@ -94,11 +99,16 @@ static u16 xhci_rt_iso_min_uf(struct ep_context *ep_ctx)
 /* If rt_next_uframe has fallen behind the HW window, advance it by whole
  * ESITs to the next valid slot >= min. Updates rt_next_uframe in place
  * so the caller's post-submit advance keeps the stream contiguous.
- * Returns the 11-bit Frame ID for the resulting microframe. */
+ * Returns the 11-bit Frame ID for the resulting microframe.
+ *
+ * A running stream is late only when its next TD would fall inside the IST
+ * and a frame's margin.  The first TD's larger offset, applied here too,
+ * dropped microframes from every pipeline shorter than it: a 4 ms prefetch
+ * of 192 kHz audio lost one in twenty-five. */
 static u16 xhci_rt_iso_clamp_frame(struct ep_context *ep_ctx)
 {
     u16 uf = ep_ctx->rt->next_uframe;
-    u16 min_uf = xhci_rt_iso_min_uf(ep_ctx);
+    u16 min_uf = xhci_rt_iso_min_uf(ep_ctx, RT_ISO_RUNNING_LEAD_UFRAMES);
     /* 14-bit signed delta to handle wraparound. */
     u16 raw_delta = (u16)(min_uf - uf) & RT_ISO_UF_MASK;
     s32 delta = (raw_delta >= 0x2000U) ? ((s32)raw_delta - 0x4000) : (s32)raw_delta;
@@ -109,6 +119,8 @@ static u16 xhci_rt_iso_clamp_frame(struct ep_context *ep_ctx)
         u32 advance = ((u32)delta + ivf_mask) & ~ivf_mask;
         uf = (u16)((uf + advance) & RT_ISO_UF_MASK);
         ep_ctx->rt->next_uframe = uf;
+        ep_ctx->rt->skipped_uframes += advance;
+        ep_ctx->rt->late_refills++;
     }
     return RT_UFRAME_TO_FRAME(uf);
 }
@@ -290,6 +302,46 @@ static u16 rt_pick_frame(struct ep_context *ep_ctx)
                : RT_UFRAME_TO_FRAME(ep_ctx->rt->next_uframe);
 }
 
+/*
+ * Completion interrupts.  Only some TDs raise one (the others carry BEI): an
+ * endpoint served every microframe would otherwise interrupt 8000 times a
+ * second.  The period is the largest power of two up to a quarter of the
+ * pipeline, so three quarters of it remain while an interrupt waits to be
+ * served and the class's hooks run; none below a frame (every TD interrupts
+ * then), at most RT_ISO_IRQ_FRAMES_MAX frames.  Periods are aligned to frame
+ * numbers: the TD ending a period interrupts on OUT, the TD starting one on
+ * IN, whose packet arrives within its interval - so a stream's OUT and its
+ * feedback IN interrupt together at the same edge.  A stream's end needs no
+ * interrupt of its own: the controller reports the ring empty after the last
+ * TD, and that event interrupts.
+ */
+static u32 rt_irq_period(const struct ep_context *ep_ctx, u32 depth_uframes)
+{
+    const u32 most = RT_ISO_IRQ_FRAMES_MAX * RT_ISO_UFRAMES_PER_FRAME;
+    const u32 quarter = depth_uframes / RT_ISO_IRQ_SHARE;
+    u32 period = RT_ISO_UFRAMES_PER_FRAME;
+
+    if (ep_ctx->udev->controller->hci_version < 0x100 || quarter < period)
+        return 0; /* BEI is xHCI 1.0's */
+    while (period * 2U <= quarter && period < most)
+        period *= 2U;
+    return period;
+}
+
+static BOOL rt_silent(u32 uframe, u32 period)
+{
+    return period && (uframe & (period - 1U)) != 0;
+}
+
+/* An OUT TD's period comes from the pipeline its prefetch holds at this TD's
+ * length. */
+static BOOL rt_out_silent(const struct ep_context *ep_ctx, u32 prefetch_bytes, u32 length)
+{
+    const u32 depth_tds = prefetch_bytes / (length ? length : 1U);
+    const u32 period = rt_irq_period(ep_ctx, depth_tds * ep_ctx->rt_uframes_per_esit);
+    return rt_silent((u32)ep_ctx->rt->next_uframe + ep_ctx->rt_uframes_per_esit, period);
+}
+
 static void rt_advance(struct ep_context *ep_ctx, u32 bytes)
 {
     ep_ctx->rt->next_uframe = (u16)(((u32)ep_ctx->rt->next_uframe + ep_ctx->rt_uframes_per_esit) & RT_ISO_UF_MASK);
@@ -308,16 +360,15 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         if (!rt_ensure_room(ep_ctx))
             break;
 
-        u16 frame = rt_pick_frame(ep_ctx);
-
         struct USBBufferRequest rt_buffer_req;
         rt_buffer_req.length = prefetch_bytes;
         rt_buffer_req.data = ep_ctx->rt->last_buffer;
         rt_buffer_req.flags = 0;
-        rt_buffer_req.frame = frame; /* monotonic frame counter to avoid jumps */
+        //TODO replace with timer perhaps, PCIe read is expensive on VL805
+        rt_buffer_req.frame = rt_pick_frame(ep_ctx); /* monotonic frame counter to avoid jumps */
 
         KprintfT("RT ISO OUT sched frame=%lu len=%lu inflight_bytes=%lu inflight_tds=%lu\n",
-                 (ULONG)frame,
+                 (ULONG)rt_buffer_req.frame,
                  (ULONG)rt_buffer_req.length,
                  (ULONG)ep_ctx->rt->inflight_bytes,
                  (ULONG)xhci_ep_get_active_td_count(ep_ctx));
@@ -341,10 +392,14 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
         }
         ep_ctx->rt->last_filled = offset + rt_buffer_req.length;
 
+        /* The hook may have run long (a class mixes its next pass from it): the
+         * frame is picked again, and xhci_submit_rt_td() hands an OUT TD to the
+         * controller at once, so no TD reaches it later than its frame allows. */
+        u16 frame = rt_pick_frame(ep_ctx);
         u32 length = rt_buffer_req.length;
         s8 ret = xhci_submit_rt_td(ep_ctx->udev, ep_ctx,
                                    (APTR)((u8 *)rt_buffer_req.data + offset), length,
-                                   frame, XHCI_DIR_OUT, FALSE);
+                                   frame, XHCI_DIR_OUT, rt_out_silent(ep_ctx, prefetch_bytes, length));
         if (ret != UHIOERR_NO_ERROR)
         {
             Kprintf("RT ISO submit failed %ld\n", (LONG)ret);
@@ -363,21 +418,17 @@ static void xhci_ep_schedule_rt_iso_out(struct ep_context *ep_ctx)
 }
 
 /*
- * The pipeline is topped up a batch at a time, and only the last TD of a
- * batch raises its completion interrupt (the others carry BEI): an endpoint
- * served every microframe would otherwise interrupt 8000 times a second,
- * data or no data.  A batch is one frame's worth of TDs, so the hooks run at
- * most a millisecond late - against a pipeline RT_ISO_IN_TARGET_FRAMES deep.
- * The TD queued last always interrupts, so a stream that stops drains without
- * help; a pass cut short by a failure may end on a silent TD, whose event the
- * unit task's tick collects.  With one TD per batch (an endpoint served once
- * a frame or less, or a pre-1.0 controller) none of this changes anything.
+ * The pipeline, RT_ISO_IN_TARGET_FRAMES deep, is topped up an interrupt
+ * period at a time (see rt_irq_period), so the hooks run at most a period
+ * late.
  */
 static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 {
-    const u32 batch_mask = ep_ctx->rt->in_irq_batch_mask;
+    const u32 period = ep_ctx->rt->in_irq_period;
+    const u32 uframes_per_esit = ep_ctx->rt_uframes_per_esit;
+    const u32 batch = (period > uframes_per_esit) ? period / uframes_per_esit : 1U;
     const u32 inflight = xhci_ep_get_active_td_count(ep_ctx);
-    if (inflight + batch_mask >= ep_ctx->rt->inflight_tds_target)
+    if (inflight + batch > ep_ctx->rt->inflight_tds_target)
         return;
 
     for (u32 remaining = ep_ctx->rt->inflight_tds_target - inflight; remaining; --remaining)
@@ -407,7 +458,7 @@ static void xhci_ep_schedule_rt_iso_in(struct ep_context *ep_ctx)
 
         s8 ret = xhci_submit_rt_td(ep_ctx->udev, ep_ctx,
                                    staging, td_length, frame, XHCI_DIR_IN,
-                                   ((remaining - 1U) & batch_mask) != 0 /* all but the last of a batch */);
+                                   rt_silent(ep_ctx->rt->next_uframe, period));
         if (ret != UHIOERR_NO_ERROR)
         {
             slab_free(&ep_ctx->rt->in_staging_slab, staging);
@@ -494,18 +545,18 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
      * Normalize to microframes once so users can add to MFINDEX directly. */
     u32 ist_raw = HCS_IST(mmio_read32(&ep_ctx->udev->controller->hccr->cr_hcsparams2));
     ep_ctx->rt->ist = (ist_raw & 0x8U) ? ((ist_raw & 0x7U) << 3) : (ist_raw & 0x7U);
-    ep_ctx->rt->next_uframe = xhci_rt_iso_min_uf(ep_ctx);
+    ep_ctx->rt->next_uframe = xhci_rt_iso_min_uf(ep_ctx, RT_ISO_SCHED_OFFSET_UFRAMES);
     xhci_ep_transition(ep_ctx, USB_DEV_EP_STATE_RT_ISO_RUNNING);
 
-    const u32 uframes_per_td = ep_ctx->rt_uframes_per_esit ? (u32)ep_ctx->rt_uframes_per_esit : 1U;
-    const u32 target_uframes = RT_ISO_IN_TARGET_FRAMES * 8U;
-    ep_ctx->rt->inflight_tds_target = (target_uframes + uframes_per_td - 1U) / uframes_per_td;
+    const u32 uframes_per_esit = ep_ctx->rt_uframes_per_esit;
+    const u32 target_uframes = RT_ISO_IN_TARGET_FRAMES * RT_ISO_UFRAMES_PER_FRAME;
+    ep_ctx->rt->inflight_tds_target = (target_uframes + uframes_per_esit - 1U) / uframes_per_esit;
 
-    /* One completion interrupt per frame: 8, 4 or 2 TDs for an endpoint served
-     * 8, 4 or 2 times a frame (the interval is a power of two), else 1. */
-    const u32 tds_per_frame = 8U / uframes_per_td;
-    ep_ctx->rt->in_irq_batch_mask =
-        (tds_per_frame > 1U && ep_ctx->udev->controller->hci_version >= 0x100) ? tds_per_frame - 1U : 0;
+    ep_ctx->rt->in_irq_period = rt_irq_period(ep_ctx, ep_ctx->rt->inflight_tds_target * uframes_per_esit);
+    ep_ctx->rt->skipped_uframes = 0;
+    ep_ctx->rt->late_refills = 0;
+    Kprintf("RT ISO start slot %lu ep %lu: IST %lu uframes\n",
+            (ULONG)ep_ctx->udev->slot_id, (ULONG)ep_ctx->ep_index, (ULONG)ep_ctx->rt->ist);
 
     /* Build the per-endpoint IN staging slab now that we know both the TD length
      * and the target inflight depth.  OUT endpoints have no staging buffer.
@@ -526,12 +577,12 @@ s8 xhci_ep_rt_iso_start(struct ep_context *ep_ctx)
         ep_ctx->rt->in_staging_active = TRUE;
     }
 
-    KprintfT("Starting RT ISO stream: IST=%lu uframes rt_next_uframe=%lu target_ms=%lu target_uframes=%lu uframes_per_td=%lu target_tds=%lu\n",
+    KprintfT("Starting RT ISO stream: IST=%lu uframes rt_next_uframe=%lu target_ms=%lu target_uframes=%lu uframes_per_esit=%lu target_tds=%lu\n",
              (ULONG)ep_ctx->rt->ist,
              (ULONG)ep_ctx->rt->next_uframe,
              (ULONG)RT_ISO_IN_TARGET_FRAMES,
              (ULONG)target_uframes,
-             (ULONG)uframes_per_td,
+             (ULONG)uframes_per_esit,
              (ULONG)ep_ctx->rt->inflight_tds_target);
 
     xhci_ep_schedule_rt_iso(ep_ctx);
@@ -559,6 +610,9 @@ s8 xhci_ep_rt_iso_stop(struct ep_context *ep_ctx, struct USBIsoHooks *hooks, str
     }
 
     ep_ctx->rt->stop_pending = stop_token;
+    Kprintf("RT ISO stop slot %lu ep %lu: %lu microframes skipped in %lu late refills\n",
+            (ULONG)ep_ctx->udev->slot_id, (ULONG)ep_ctx->ep_index,
+            (ULONG)ep_ctx->rt->skipped_uframes, (ULONG)ep_ctx->rt->late_refills);
 
     if (xhci_td_is_empty(ep_default_tds(ep_ctx)))
     {

@@ -130,9 +130,14 @@ struct rt_iso_state
     u32 inflight_tds_target; /* target number of inflight TDs based on scheduling horizon */
     u32 inflight_bytes;
 
-    /* IN: TDs per completion interrupt - 1 (a power of two - 1).  0 = every
-     * TD interrupts; see xhci_ep_schedule_rt_iso_in. */
-    u32 in_irq_batch_mask;
+    /* IN: microframes between completion interrupts, a power of two; 0 =
+     * every TD interrupts (see rt_irq_period).  OUT works its own out per TD. */
+    u32 in_irq_period;
+
+    /* A running stream's late refills: microframes the clamp passed over, and
+     * how often; reported at the stop */
+    u32 skipped_uframes;
+    u32 late_refills;
 
     u32 ist; /* IST decoded to microframes, cached at RT ISO start */
 
